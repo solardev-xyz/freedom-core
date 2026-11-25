@@ -325,7 +325,8 @@ const NO_CASE = {
 const DEVIATION_IDS = ['feed-entry-bound', 'tar-paths', 'feed-wrap-root', 'reference-check', 'read-data-verified', 'read-pieces',
   'index-probe', 'index-allocation', 'stamps-one-read', 'deadlines', 'busy', 'reply-bounds', 'reply-syntax', 'batch-depth', 'error-body-bound', 'session-transport',
   'transport-error-text', 'subscribe-proxy', 'history-bound', 'history-blobs', 'store-shapes', 'store-refusal', 'own-keys', 'history-retry',
-  'legacy-dates', 'identity-references-bound', 'collation', 'owner-read-order', 'detach-timing', 'tag-owners-bound', 'store-writes'];
+  'legacy-dates', 'identity-references-bound', 'collation', 'owner-read-order', 'detach-timing', 'picked-read-text', 'tag-owners-bound',
+  'store-writes'];
 
 function deviationsOf(swarm) {
   const where = Object.fromEntries(DEVIATION_IDS.map((id) => [id, []]));
@@ -453,8 +454,9 @@ const SWARM_FORMATS = {
     + 'manifest check\'s token is crypto.randomBytes(24) in base64url, the nth SHA-256(`swarm vectors token <n>`)\'s first 24 bytes. concurrent: '
     + 'the steps run at once, as it says. after: the files, the grants and, for swarm.publish and swarm.history, the history (getEntries(), or '
     + 'the rows). A case marked deviation records the reference\'s outcome; `core` holds the core\'s: answers (each step\'s answer, in order), '
-    + 'files (each step\'s files as it answers), or for index-probe the methods\' text (the lookup\'s request is marked, and the core asks '
-    + 'feed_head with the reply\'s swarm-feed-index headers).',
+    + 'files (each step\'s files as it answers), history (the rows as the core leaves them, beside answers, for picked-read-text, whose '
+    + 'core makes its upload call and main ends its body with the part\'s abort), or for index-probe the methods\' text (the lookup\'s '
+    + 'request is marked, and the core asks feed_head with the reply\'s swarm-feed-index headers).',
 };
 
 module.exports = { buildSwarm, environment, loadPackages, BEE_JS, CORE_SDK };

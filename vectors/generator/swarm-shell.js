@@ -298,7 +298,28 @@ async function withHistory(env, spec) {
   assert.deepEqual(viaHandler.steps[0].requests, viaService.steps[0].requests, `${spec.id}: the handler's requests are the service's`);
   const { requests, answer: core, ...head } = viaService.steps[0];
   const step = { ...head, handler: viaHandler.steps[0].handler, answer: core, requests };
-  return { ...viaService, steps: [step], after: viaHandler.after };
+  const record = { ...viaService, steps: [step], after: viaHandler.after };
+  if (spec.deviation?.coreOf) {
+    const { after, ...rest } = record;
+    return { ...rest, core: spec.deviation.coreOf(record), after };
+  }
+  return record;
+}
+
+/**
+ * picked-read-text's core answer: describePickedPathError's coded form,
+ * `Could not read "<name>" (<code>)`, from main's part abort, as the answer
+ * (the error the service throws) and as the history row's text (the
+ * reference's row otherwise). The core makes its upload call, whose body
+ * main ends with the abort.
+ */
+function pickedReadCore(record, name, code) {
+  const message = `Could not read "${name}" (${code})`;
+  assert.match(record.steps[0].reference.error.message, /^fetch failed: /, 'the reference\'s text is fetch\'s');
+  return {
+    answers: [typedError({ message })],
+    history: record.after.history.map((row) => ({ ...row, errorMessage: message })),
+  };
 }
 
 function publishCases(env) {
@@ -393,16 +414,18 @@ function historyPublishCases(env) {
     };
   };
   out.push(file('file-history', node()));
-  // A picked file that can't be read once the upload starts (here a folder
-  // at its path: EISDIR on the read stream). bee-js's fetch wraps the read
-  // error, so describePickedPathError's coded form (which only a stat
-  // error before the upload reaches) isn't the text: the handler and the
-  // row give `fetch failed: EISDIR: …`. Main ends the part with the errno's
-  // name (`part_abort`), from which the core makes its own text.
+  // picked-read-text: a picked file that can't be read once the upload
+  // starts (here a folder at its path: EISDIR on the read stream). bee-js's
+  // fetch wraps the read error, so describePickedPathError's coded form
+  // (which only a stat error before the upload reaches) isn't the text: the
+  // handler and the row give `fetch failed: EISDIR: …`. Main ends the part
+  // with the errno's name (`part_abort`), and the core answers that form,
+  // in the answer and the row.
   out.push({
     id: 'publish-file-history-unreadable', method: 'swarm.publish', row: 'swarm.publish:data,file', node: node(),
     params: { kind: 'file', parts: [{ bytes: 0, part: 0 }], name: 'notes', pin: true, deferred: true, history: { type: 'file', name: 'notes' } },
     part_abort: { part: 0, error_code: 'EISDIR' },
+    deviation: { id: 'picked-read-text', coreOf: (record) => pickedReadCore(record, 'notes', 'EISDIR') },
     run: async (ref, world) => {
       const at = path.join(world.dir, 'picked', 'notes');
       fs.mkdirSync(at, { recursive: true });

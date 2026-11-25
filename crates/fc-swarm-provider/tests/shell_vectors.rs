@@ -2624,14 +2624,6 @@ const SHELL_LEFT_OUT: &[(&str, &str)] = &[
         "feed-read-node-500",
         "`swarm.feed`'s `op: \"read\"` (readFeedState, SWM-8's) has no machine yet",
     ),
-    (
-        "publish-file-history-unreadable",
-        "the reference's text for a picked file whose read fails once the upload starts is \
-         fetch's wrapper (`fetch failed: EISDIR: illegal operation on a directory, read`), and no \
-         request reaches the node; the core, from main's part abort with the errno's name, makes \
-         its call and answers `Could not read \"notes\" (EISDIR)` (#497's choice), which the \
-         design names no deviation for",
-    ),
 ];
 
 /// A call the reference made, as the core makes it, and main's reply.
@@ -2795,9 +2787,16 @@ fn every_shell_case_through_the_machines() {
             continue;
         }
         // A feed update's index lookup is feed_head (`index-probe`), which
-        // want_calls asks for; no other deviation marks these methods.
-        match case.get("deviation").map(string).as_deref() {
+        // want_calls asks for. A picked file whose read fails once its
+        // upload started (`picked-read-text`): the reference's fetch fails
+        // before any request reaches the node; the core makes its upload
+        // call, main ends the part with the errno's name, and the core
+        // answers describePickedPathError's form, in the row too.
+        let deviation = case.get("deviation").map(string);
+        let picked_read = deviation.as_deref() == Some("picked-read-text");
+        match deviation.as_deref() {
             None => assert!(case.get("core").is_none(), "{id}"),
+            Some("picked-read-text") => {}
             Some("index-probe") => assert_eq!(
                 string(get(case, "core")),
                 "feed_head with swarm-only-root-chunk instead of the whole latest payload; the same index",
@@ -2818,16 +2817,49 @@ fn every_shell_case_through_the_machines() {
                     .insert(k as u32, common::b64(&string(get(part, "base64"))));
             }
         }
+        if let Some(abort) = step.get("part_abort") {
+            let part = number(get(abort, "part")) as u32;
+            let code = ErrorCode::new(&string(get(abort, "error_code"))).unwrap();
+            main.parts.entry(part).or_default();
+            main.abort_part = Some((part, Abort::Unreadable(code)));
+        }
         let history = params.contains(r#""history""#);
         if history {
             main.db = Some(HistoryDb::open());
         }
         let (outcome, ran, _) = main.play(parse(method, &params));
-        assert_eq!(ran.calls.len(), wants.len(), "{id}: {:?}", ran.calls);
+        let extra = usize::from(picked_read);
+        assert_eq!(
+            ran.calls.len(),
+            wants.len() + extra,
+            "{id}: {:?}",
+            ran.calls
+        );
         for (k, (got, want)) in ran.calls.iter().zip(&wants).enumerate() {
             check_call(&id, k, got, want);
         }
-        let answer = get(step, "answer");
+        if picked_read {
+            // The core's upload, whose body main's abort ended.
+            let upload = ran.calls.last().unwrap();
+            assert_eq!(upload.call.form, Form::BzzFile, "{id}");
+            assert_eq!(
+                upload.call.query,
+                [("name".to_owned(), "notes".to_owned())],
+                "{id}"
+            );
+            assert!(
+                ran.terminals
+                    .iter()
+                    .any(|(_, out)| *out == BodyOut::Abort(BodyAbort::BodyStreamError)),
+                "{id}: {:?}",
+                ran.terminals
+            );
+        }
+        let core = case.get("core").filter(|_| picked_read);
+        let answer = match core {
+            Some(core) => get(core, "answers").children().next().unwrap(),
+            None => get(step, "answer"),
+        };
         match (
             &outcome,
             answer.get("result_typed"),
@@ -2841,7 +2873,10 @@ fn every_shell_case_through_the_machines() {
             }
             (other, ..) => panic!("{id}: {other:?}, the reference's {}", answer.raw()),
         }
-        let rows = get(get(case, "after"), "history");
+        let rows = match core {
+            Some(core) => get(core, "history"),
+            None => get(get(case, "after"), "history"),
+        };
         match &main.db {
             Some(db) => {
                 let want = fc_json::parse(rows.raw()).unwrap();
@@ -2859,5 +2894,5 @@ fn every_shell_case_through_the_machines() {
         .collect();
     named.sort();
     assert_eq!(left_out, named, "every left-out case is in the vectors");
-    assert_eq!(played, 40, "cases played");
+    assert_eq!(played, 41, "cases played");
 }
