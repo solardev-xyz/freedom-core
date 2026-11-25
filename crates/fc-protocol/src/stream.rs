@@ -43,8 +43,13 @@
 //!   and which a stream may end with depends on who sends it. A service's
 //!   bodies keep 0007's five; the core's verified bodies end only with
 //!   0009's, and main's pieces and bodies only with `cancelled`, `stalled`
-//!   or `body_stream_error`. The sender refuses any other, and the receiving
-//!   side takes any other as a protocol error.
+//!   or `body_stream_error`. Design 0015 adds two: a `shell.swarm_api` body
+//!   main streams may also end `too_large`, past its `max_bytes`, which is
+//!   why the core's inbound streams carry their codes one by one
+//!   ([`Inbound::request_with`]); and the core's `swarm.body` uploads end
+//!   only with `cancelled`, `internal` or `body_stream_error`. The sender
+//!   refuses any other, and the receiving side takes any other as a
+//!   protocol error.
 //!
 //! Sans-I/O, like the rest of the crate: the caller feeds frames and events
 //! in and takes frames and deliveries out. `vectors/streams.json` holds the
@@ -229,11 +234,14 @@ pub enum AbortCode {
     /// A piece main streams to the core: main's body idle timer ended it
     /// (0009).
     Stalled,
+    /// A `shell.swarm_api` body main streams to the core: past the call's
+    /// `max_bytes` (design 0015, Streams).
+    TooLarge,
 }
 
 impl AbortCode {
-    /// Every code: 0007's, then 0009's.
-    pub const ALL: [AbortCode; 10] = [
+    /// Every code: 0007's, then 0009's, then 0015's.
+    pub const ALL: [AbortCode; 11] = [
         AbortCode::Cancelled,
         AbortCode::Internal,
         AbortCode::BodyStreamError,
@@ -244,6 +252,7 @@ impl AbortCode {
         AbortCode::Malformed,
         AbortCode::PieceFailed,
         AbortCode::Stalled,
+        AbortCode::TooLarge,
     ];
 
     /// The code on the wire.
@@ -259,6 +268,7 @@ impl AbortCode {
             AbortCode::Malformed => "malformed",
             AbortCode::PieceFailed => "piece_failed",
             AbortCode::Stalled => "stalled",
+            AbortCode::TooLarge => "too_large",
         }
     }
 
@@ -282,6 +292,7 @@ const ABORT_CODE_NAMES: &[&str] = &[
     "malformed",
     "piece_failed",
     "stalled",
+    "too_large",
 ];
 
 /// Which codes a stream may end with, by who sends it. A sender refuses to
@@ -296,11 +307,22 @@ pub enum Codes {
     /// (0009, Failures: after the head): `verification_failed`,
     /// `unverifiable`, `malformed`, `piece_failed`, `busy`, `cancelled`.
     CoreBody,
-    /// A body main sends: a piece to the core (`shell.dweb_get`, 0009), or
-    /// a body to a service that takes them (0014): `cancelled` (the
-    /// requester's cancel, or main's), `stalled` (main's body idle timer)
-    /// and `body_stream_error` (the body failed in main).
+    /// A body main sends: a piece to the core (`shell.dweb_get`, 0009, and
+    /// `shell.swarm_part`, 0015), or a body to a service that takes them
+    /// (0014): `cancelled` (the requester's cancel, or main's), `stalled`
+    /// (main's body idle timer) and `body_stream_error` (the body failed in
+    /// main).
     Piece,
+    /// A `shell.swarm_api` body main streams to the core (design 0015,
+    /// Streams): a piece's three, and `too_large`, the node's body past the
+    /// call's `max_bytes`. Only those streams take it, so the core's
+    /// inbound streams carry their codes one by one
+    /// ([`Inbound::request_with`]).
+    SwarmPiece,
+    /// A `swarm.body` upload the core sends main (design 0015, Streams):
+    /// `cancelled`, `internal`, or `body_stream_error` when a part it was
+    /// copying failed.
+    CoreUpload,
 }
 
 impl Codes {
@@ -322,6 +344,11 @@ impl Codes {
                     | C::Cancelled
             ),
             Codes::Piece => matches!(code, C::Cancelled | C::Stalled | C::BodyStreamError),
+            Codes::SwarmPiece => matches!(
+                code,
+                C::Cancelled | C::Stalled | C::BodyStreamError | C::TooLarge
+            ),
+            Codes::CoreUpload => matches!(code, C::Cancelled | C::Internal | C::BodyStreamError),
         }
     }
 }
@@ -763,6 +790,24 @@ mod tests {
             names(Codes::Piece),
             ["cancelled", "body_stream_error", "stalled"]
         );
+        // Design 0015: `too_large` only on a `shell.swarm_api` body, and the
+        // core's uploads with their own three.
+        assert_eq!(
+            names(Codes::SwarmPiece),
+            ["cancelled", "body_stream_error", "stalled", "too_large"]
+        );
+        assert_eq!(
+            names(Codes::CoreUpload),
+            ["cancelled", "internal", "body_stream_error"]
+        );
+        for codes in [
+            Codes::Service,
+            Codes::CoreBody,
+            Codes::Piece,
+            Codes::CoreUpload,
+        ] {
+            assert!(!codes.allows(AbortCode::TooLarge), "{codes:?}");
+        }
     }
 
     #[test]

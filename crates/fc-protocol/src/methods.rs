@@ -87,17 +87,43 @@ pub enum Deadline {
     /// hang watchdog skips the request while main answers one of its
     /// prompts.
     Steps,
+    /// A Swarm request's (design 0015, "Methods main calls"; SWM-4, D5):
+    /// 300 s, or the caller's shorter `deadline_ms` (a page's own timer,
+    /// 60 s or 300 s by today's list).
+    Swarm,
+    /// No total deadline, only idle bounds (design 0015, D5 and D13): a
+    /// picked file may be large, so `swarm.publish` and `swarm.body` end
+    /// only when a stream or an ask makes no progress for 60 s. Unlike
+    /// [`Deadline::Immediate`], the request may run for as long as it
+    /// progresses, so `schema.json` writes it apart from `null`
+    /// ([`Deadline::schema_value`]).
+    Idle,
 }
 
 impl Deadline {
-    /// The default, in milliseconds; `None` when answered at once.
+    /// The default total deadline, in milliseconds; `None` when answered
+    /// at once, or when only idle bounds end the request
+    /// ([`Deadline::Idle`]).
     pub fn default_ms(self) -> Option<u64> {
         match self {
-            Deadline::Immediate => None,
+            Deadline::Immediate | Deadline::Idle => None,
             Deadline::Vault => Some(30_000),
             Deadline::Session => Some(120_000),
             Deadline::Head => Some(360_000),
             Deadline::Steps => Some(120_000),
+            Deadline::Swarm => Some(300_000),
+        }
+    }
+
+    /// Its `deadline_ms` in `schema.json`: the default in milliseconds,
+    /// `null` when answered at once, and `"idle"` when only idle bounds end
+    /// the request, so main's table tells it from an immediate method,
+    /// whose hang watchdog is a short total one.
+    pub fn schema_value(self) -> String {
+        match (self, self.default_ms()) {
+            (Deadline::Idle, _) => "\"idle\"".to_owned(),
+            (_, Some(ms)) => ms.to_string(),
+            (_, None) => "null".to_owned(),
         }
     }
 }
@@ -204,11 +230,13 @@ pub const METHODS: &[Method] = &[
     row("keys.addresses", CS, false, NOW),
     row("keys.radicle_did", CS, false, NOW),
     // Design 0012: a page signs as `page`, with its `PageContext`, and an
-    // authorization is checked when one is present (APR-3).
+    // authorization is checked when one is present (APR-3). A SOC is a
+    // page's or main's own: the chrome lost it at SWM-4 (design 0015's
+    // amendment to 0002), and the row goes at SWM-9.
     row("sign.transaction", PCS, false, NOW),
     row("sign.message", PCS, false, NOW),
     row("sign.typed_data", PCS, false, NOW),
-    row("swarm.sign_soc", PCS, false, NOW),
+    row("swarm.sign_soc", PS, false, NOW),
     row("typed_data.hash", CS, false, NOW),
     row("naming.configure", CS, false, NOW),
     row("naming.availability", CS, false, NOW),
@@ -352,10 +380,7 @@ pub fn schema_json() -> String {
             .iter()
             .map(|c| format!("\"{c}\""))
             .collect();
-        let deadline = m
-            .deadline
-            .default_ms()
-            .map_or("null".to_owned(), |ms| ms.to_string());
+        let deadline = m.deadline.schema_value();
         let since = if m.since > crate::PROTOCOL_VERSION {
             format!(", \"protocol\": {}", m.since)
         } else {
@@ -464,7 +489,8 @@ mod tests {
             ]
         );
         // Design 0012, API: who reaches each grant method, and
-        // `approval.issue`, which no page reaches from APR-7.
+        // `approval.issue`, which no page reaches from APR-7; and design
+        // 0015's `swarm.sign_soc`.
         for (name, page, chrome, shell) in [
             ("approval.issue", false, true, true),
             ("approval.check", true, false, false),
@@ -476,6 +502,8 @@ mod tests {
             ("approval.forget_account", false, false, true),
             ("approval.remember", true, false, false),
             ("eip1193.request", true, false, false),
+            // Design 0015 (SWM-4): the chrome signs no SOC.
+            ("swarm.sign_soc", true, false, true),
         ] {
             for (caller, allowed) in [
                 (CallerKind::Page, page),
@@ -658,6 +686,44 @@ mod tests {
         assert_eq!(
             method("dweb.verify").map(|m| m.deadline.default_ms()),
             Some(Some(360_000))
+        );
+    }
+
+    /// Design 0015 (SWM-4, D5): the Swarm kinds. `swarm` is 300 s; idle
+    /// only has no total deadline, as an immediate method, but `schema.json`
+    /// writes it apart from one, and every value it writes is distinct.
+    #[test]
+    fn the_swarm_deadline_kinds() {
+        assert_eq!(Deadline::Swarm.default_ms(), Some(300_000));
+        assert_eq!(Deadline::Idle.default_ms(), None);
+        assert_eq!(Deadline::Immediate.default_ms(), None);
+        assert_eq!(Deadline::Idle.schema_value(), r#""idle""#);
+        assert_eq!(Deadline::Immediate.schema_value(), "null");
+        assert_eq!(Deadline::Swarm.schema_value(), "300000");
+        assert_eq!(Deadline::Head.schema_value(), "360000");
+        // Each kind but `steps`, which writes a session's 120 s as main's
+        // table has it, writes its own value, and each parses as JSON.
+        let kinds = [
+            Deadline::Immediate,
+            Deadline::Vault,
+            Deadline::Session,
+            Deadline::Head,
+            Deadline::Swarm,
+            Deadline::Idle,
+        ];
+        for (i, a) in kinds.iter().enumerate() {
+            let value: serde_json::Value = serde_json::from_str(&a.schema_value()).unwrap();
+            assert!(
+                value.is_null() || value.is_u64() || value == "idle",
+                "{a:?}"
+            );
+            for b in &kinds[i + 1..] {
+                assert_ne!(a.schema_value(), b.schema_value(), "{a:?} {b:?}");
+            }
+        }
+        assert_eq!(
+            Deadline::Steps.schema_value(),
+            Deadline::Session.schema_value()
         );
     }
 

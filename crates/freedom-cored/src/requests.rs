@@ -15,7 +15,19 @@
 //!   response to the thread that asked, and a response that answers no
 //!   request is unsolicited. The reader's [`Pending`] set is filled at the
 //!   same time, before the writer has the request, so a fragmented answer
-//!   always finds its request (design 0005, Frames).
+//!   always finds its request (design 0005, Frames), with the most its
+//!   reply may take ([`Expect::reply_bound`], design 0015, D4); and so is
+//!   the stream routes' entry for a request whose reply may stream to an
+//!   owner other than the dweb thread ([`Expect::streams`]), so no frame of
+//!   it can be misrouted.
+//! - **A cancelled request keeps its slot** until main's answer, which
+//!   0001 says always comes, and which the reader reads within its bound
+//!   for its owner to drop (design 0015, D13). An owner that wants the
+//!   answer bounded says so as it cancels ([`Requests::cancelled`]): past
+//!   [`CANCEL_ANSWER_BOUND`] without it, [`Requests::overdue`] names the
+//!   request, and the event loop ends the connection as for a protocol
+//!   violation (`cancel_unanswered`). The Swarm thread's asks will; the
+//!   other owners' cancels are left as they were.
 //! - **Closing.** At shutdown the event loop closes the gate before it
 //!   acknowledges, so no request follows the acknowledgement.
 //! - **Frames made outside the lock.** A request's frame is made, up to
@@ -30,15 +42,21 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use fc_protocol::message::MAX_ID;
 use zeroize::Zeroizing;
 
-use crate::transport::{self, Allowance, Out, Pending};
+use crate::transport::{self, Allowance, Out, Pending, StreamKey, StreamRoutes};
 
 /// The most of the core's requests main holds at a time (0004, Bounds:
 /// Work; `MAX_INCOMING` in `core-client.js`).
 pub const MAX_OUTSTANDING: usize = 256;
+
+/// How long main has to answer a request the core cancelled and watches
+/// ([`Requests::cancelled`]): 60 s (design 0015, D13). Past it, main has
+/// broken 0001's one answer per request, and the connection ends.
+pub const CANCEL_ANSWER_BOUND: Duration = Duration::from_secs(60);
 
 /// The thread a request belongs to: its response goes back there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -53,6 +71,24 @@ pub enum Owner {
     /// A page's `approval.request`s, `approval.recheck`s and
     /// `eip1193.select_chain`s (design 0012, APR-5c), from the event loop.
     Eip1193,
+    /// The Swarm thread's `shell.swarm_*` asks (design 0015), whose parts
+    /// and node bodies stream to it ([`StreamRoutes`]).
+    #[allow(dead_code)] // the Swarm thread's (SWM-4 PR 5)
+    Swarm,
+}
+
+/// What the gate registers for a request beside its owner (design 0015,
+/// D4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Expect {
+    /// The most bytes main's reply may take, serialized: the room its owner
+    /// reserved for it. Past it, whole or fragmented, the reply is a
+    /// protocol error. `None`: the message cap.
+    pub reply_bound: Option<usize>,
+    /// Main's reply may open a stream, whose frames go to the request's
+    /// owner ([`StreamRoutes`]). The dweb thread, every stream's owner by
+    /// default, needs no route.
+    pub streams: bool,
 }
 
 /// What became of a request offered to [`Requests::send`].
@@ -154,6 +190,8 @@ struct State {
     /// Owners that found the limit reached: woken when a request is
     /// answered.
     waiting: BTreeSet<Owner>,
+    /// The requests among `owners` the core cancelled and watches: when.
+    cancelled: BTreeMap<u64, Instant>,
 }
 
 /// See the module documentation.
@@ -161,7 +199,10 @@ pub struct Requests {
     state: Mutex<State>,
     max_outstanding: usize,
     pending: Arc<Pending>,
+    routes: Arc<StreamRoutes>,
     wakes: Mutex<BTreeMap<Owner, Wake>>,
+    /// Called when a watched cancel is added: the event loop's timer.
+    watch: Mutex<Option<Wake>>,
 }
 
 impl Requests {
@@ -172,11 +213,28 @@ impl Requests {
                 closing: false,
                 owners: BTreeMap::new(),
                 waiting: BTreeSet::new(),
+                cancelled: BTreeMap::new(),
             }),
             max_outstanding,
             pending,
+            routes: Arc::new(StreamRoutes::default()),
             wakes: Mutex::new(BTreeMap::new()),
+            watch: Mutex::new(None),
         })
+    }
+
+    /// The stream routes the gate registers the pieces' in ([`Expect`]),
+    /// which the event loop routes main's stream frames by.
+    pub fn routes(&self) -> &Arc<StreamRoutes> {
+        &self.routes
+    }
+
+    /// What to call when a cancelled request is watched
+    /// ([`Requests::cancelled`]), so the event loop's timer takes it in.
+    pub fn on_cancel(&self, wake: impl Fn() + Send + 'static) {
+        if let Ok(mut slot) = self.watch.lock() {
+            *slot = Some(Box::new(wake));
+        }
     }
 
     /// What to call when one of `owner`'s requests may go after a
@@ -214,6 +272,22 @@ impl Requests {
         build: impl FnOnce() -> Option<RequestFrame>,
         start: impl FnOnce() -> Start,
     ) -> Dispatch {
+        self.send_with(owner, allowance, out, build, start, Expect::default())
+    }
+
+    /// As [`Requests::send`], with what to register beside the owner, under
+    /// the same lock and before the writer has the request: its reply's
+    /// bound in the reader's [`Pending`], and, if its reply may stream to
+    /// an owner other than the dweb thread, its stream's route.
+    pub fn send_with(
+        &self,
+        owner: Owner,
+        allowance: &Arc<Allowance>,
+        out: &Sender<Out>,
+        build: impl FnOnce() -> Option<RequestFrame>,
+        start: impl FnOnce() -> Start,
+        expect: Expect,
+    ) -> Dispatch {
         {
             let Ok(mut state) = self.state.lock() else {
                 return Dispatch::Closed;
@@ -243,8 +317,15 @@ impl Requests {
         request.write(id, start);
         state.next_id += 1;
         state.owners.insert(id, owner);
-        // Before the writer has it, so main's answer can't come first.
-        self.pending.insert(id);
+        // Before the writer has it, so main's answer can't come first, nor
+        // a frame of its stream.
+        match expect.reply_bound {
+            Some(bound) => self.pending.insert_bounded(id, bound),
+            None => self.pending.insert(id),
+        }
+        if expect.streams {
+            self.routes.register(StreamKey::Piece(id), owner);
+        }
         let frame = request.frame;
         if out.send(Out::Frame { frame, hold }).is_err() {
             return Dispatch::WriterGone;
@@ -272,6 +353,7 @@ impl Requests {
         let (owner, woken) = {
             let mut state = self.state.lock().ok()?;
             let owner = state.owners.remove(&id)?;
+            state.cancelled.remove(&id);
             (owner, std::mem::take(&mut state.waiting))
         };
         self.pending.remove(id);
@@ -285,6 +367,54 @@ impl Requests {
             }
         }
         Some(owner)
+    }
+
+    /// The core cancelled its request `id` at `at`, and wants main's
+    /// answer within [`CANCEL_ANSWER_BOUND`] (design 0015, D13). The request
+    /// keeps its slot until the answer, which the reader reads within its
+    /// bound and routes to its owner to drop, as any cancelled request's;
+    /// [`Requests::overdue`] names it once the bound has passed without it.
+    /// False when main has answered it already: nothing to watch.
+    #[allow(dead_code)] // the Swarm thread's (SWM-4 PR 5)
+    pub fn cancelled(&self, id: u64, at: Instant) -> bool {
+        let watched = self.state.lock().is_ok_and(|mut state| {
+            if !state.owners.contains_key(&id) {
+                return false;
+            }
+            state.cancelled.entry(id).or_insert(at);
+            true
+        });
+        if watched
+            && let Ok(watch) = self.watch.lock()
+            && let Some(wake) = watch.as_ref()
+        {
+            wake();
+        }
+        watched
+    }
+
+    /// When the first watched cancel's answer is due, if one is watched.
+    pub fn next_overdue(&self) -> Option<Instant> {
+        let state = self.state.lock().ok()?;
+        let first = state.cancelled.values().min()?;
+        first.checked_add(CANCEL_ANSWER_BOUND)
+    }
+
+    /// A watched cancel main hasn't answered within the bound at `now`, if
+    /// one: main broke the protocol, and the connection ends. An answer the
+    /// reader has read counts, though the event loop hasn't handled it yet
+    /// (the reader retires its ID from [`Pending`] as it reads it), so a
+    /// busy loop doesn't end the connection over an answer that came.
+    pub fn overdue(&self, now: Instant) -> Option<u64> {
+        let state = self.state.lock().ok()?;
+        state
+            .cancelled
+            .iter()
+            .find(|(id, at)| {
+                now.saturating_duration_since(**at) >= CANCEL_ANSWER_BOUND
+                    && self.pending.contains(**id)
+            })
+            .map(|(id, _)| *id)
     }
 
     /// Requests main hasn't answered.
@@ -653,5 +783,186 @@ mod tests {
         requests.on_room(Owner::Chain, move || *wake.lock().unwrap() = true);
         assert_eq!(requests.answered(1), Some(Owner::Naming));
         assert!(*woken.lock().unwrap());
+    }
+
+    /// Design 0015, D4: what the gate registers beside the owner, under its
+    /// lock and before the writer has the request: the reply's bound in the
+    /// reader's set, and the stream's route for a request whose reply may
+    /// stream to an owner other than the dweb thread. Without them, the
+    /// message cap and no route.
+    #[test]
+    fn a_requests_bound_and_route_are_registered_before_the_writer_has_it() {
+        let pending = Arc::new(Pending::default());
+        let requests = Requests::new(usize::MAX, Arc::clone(&pending));
+        let (out, rx) = mpsc::channel();
+        let allowance = Allowance::new(usize::MAX, usize::MAX);
+        let expect = Expect {
+            reply_bound: Some(103_384),
+            streams: true,
+        };
+        let swarm = requests.send_with(
+            Owner::Swarm,
+            &allowance,
+            &out,
+            frame_of,
+            || {
+                // Its start is checked last, before anything is
+                // registered.
+                assert_eq!(requests.routes().len(), 0);
+                Start::Anytime
+            },
+            expect,
+        );
+        assert_eq!(swarm, Dispatch::Sent(1));
+        assert_eq!(requests.routes().owner(StreamKey::Piece(1)), Owner::Swarm);
+        assert_eq!(requests.routes().owner(StreamKey::Body(1)), Owner::Dweb);
+        assert_eq!(pending.remove(1), Some(103_384));
+        // Registered before it was queued: whoever reads the queue finds it.
+        assert_eq!(written(&rx), [1]);
+        // The dweb thread's own streams need no route, nor does a request
+        // that opens none; neither has a bound of its own.
+        let dweb = Expect {
+            reply_bound: None,
+            streams: true,
+        };
+        assert_eq!(
+            requests.send_with(
+                Owner::Dweb,
+                &allowance,
+                &out,
+                frame_of,
+                || Start::Anytime,
+                dweb
+            ),
+            Dispatch::Sent(2)
+        );
+        assert_eq!(
+            send(&requests, Owner::Chain, &allowance, &out),
+            Dispatch::Sent(3)
+        );
+        assert_eq!(requests.routes().len(), 1);
+        assert_eq!(requests.routes().owner(StreamKey::Piece(2)), Owner::Dweb);
+        assert_eq!(pending.remove(2), Some(fc_protocol::frame::MAX_MESSAGE));
+        assert_eq!(pending.remove(3), Some(fc_protocol::frame::MAX_MESSAGE));
+        // A request that never goes registers nothing.
+        assert_eq!(
+            requests.send_with(
+                Owner::Swarm,
+                &allowance,
+                &out,
+                frame_of,
+                || Start::Late,
+                expect
+            ),
+            Dispatch::Late
+        );
+        assert_eq!(requests.routes().len(), 1);
+        assert!(!pending.contains(4));
+    }
+
+    /// Design 0015, D13: a cancelled request keeps its slot among main's
+    /// 256 until main's answer, read within its bound; the answer frees
+    /// it, and the next request goes.
+    #[test]
+    fn a_cancelled_request_keeps_its_slot_until_its_late_answer() {
+        let pending = Arc::new(Pending::default());
+        let requests = Requests::new(1, Arc::clone(&pending));
+        let (out, _rx) = mpsc::channel();
+        let allowance = Allowance::new(usize::MAX, usize::MAX);
+        let expect = Expect {
+            reply_bound: Some(600),
+            streams: true,
+        };
+        let sent = requests.send_with(
+            Owner::Swarm,
+            &allowance,
+            &out,
+            frame_of,
+            || Start::Anytime,
+            expect,
+        );
+        assert_eq!(sent, Dispatch::Sent(1));
+        let at = Instant::now();
+        assert!(requests.cancelled(1, at));
+        // Its slot is held: the next waits, whoever's it is.
+        assert_eq!(
+            send(&requests, Owner::Chain, &allowance, &out),
+            Dispatch::Full
+        );
+        assert_eq!(
+            send(&requests, Owner::Swarm, &allowance, &out),
+            Dispatch::Full
+        );
+        assert_eq!(requests.outstanding(), 1);
+        // The reader still takes its answer, within its bound.
+        assert!(requests.is_pending(1));
+        // Main's late answer comes: it goes to its owner, to drop, and the
+        // slot is free.
+        let woken = Arc::new(Mutex::new(false));
+        let wake = Arc::clone(&woken);
+        requests.on_room(Owner::Chain, move || *wake.lock().unwrap() = true);
+        assert_eq!(requests.answered(1), Some(Owner::Swarm));
+        assert!(*woken.lock().unwrap());
+        assert!(!requests.is_pending(1));
+        assert_eq!(requests.next_overdue(), None);
+        assert_eq!(requests.overdue(at + CANCEL_ANSWER_BOUND), None);
+        assert_eq!(
+            send(&requests, Owner::Chain, &allowance, &out),
+            Dispatch::Sent(2)
+        );
+    }
+
+    /// Design 0015, D13, on a test clock: a cancelled request main doesn't
+    /// answer within 60 s of the cancel is overdue, and the event loop then
+    /// ends the connection. A bound per request, from its own cancel; the
+    /// first due is the loop's timer; an answer before the bound ends the
+    /// watch, and so does one the reader has read and the loop not yet
+    /// handled. A request already answered, or never sent, isn't watched, and
+    /// a second cancel keeps the first's time. Each new watch wakes the
+    /// loop.
+    #[test]
+    fn a_cancel_main_leaves_unanswered_for_60_s_is_overdue() {
+        let pending = Arc::new(Pending::default());
+        let requests = Requests::new(usize::MAX, Arc::clone(&pending));
+        let (out, _rx) = mpsc::channel();
+        let allowance = Allowance::new(usize::MAX, usize::MAX);
+        let watched = Arc::new(Mutex::new(0));
+        let count = Arc::clone(&watched);
+        requests.on_cancel(move || *count.lock().unwrap() += 1);
+        for _ in 0..3 {
+            assert!(matches!(
+                send(&requests, Owner::Swarm, &allowance, &out),
+                Dispatch::Sent(_)
+            ));
+        }
+        let t0 = Instant::now();
+        let second = Duration::from_secs(1);
+        assert_eq!(requests.next_overdue(), None);
+        assert!(requests.cancelled(2, t0 + 10 * second));
+        assert!(requests.cancelled(1, t0 + 20 * second));
+        assert!(requests.cancelled(2, t0 + 30 * second));
+        assert_eq!(*watched.lock().unwrap(), 3);
+        assert_eq!(requests.next_overdue(), Some(t0 + 70 * second));
+        let just_short = t0 + 70 * second - Duration::from_millis(1);
+        assert_eq!(requests.overdue(just_short), None);
+        assert_eq!(requests.overdue(t0 + 70 * second), Some(2));
+        // Answered in time: 2 is no longer watched, and 1's bound is next.
+        assert_eq!(requests.answered(2), Some(Owner::Swarm));
+        assert_eq!(requests.overdue(t0 + 70 * second), None);
+        assert_eq!(requests.next_overdue(), Some(t0 + 80 * second));
+        assert_eq!(requests.overdue(t0 + 80 * second), Some(1));
+        // Its answer read by the reader, not yet handled by the loop: it
+        // came, and nothing is overdue.
+        assert_eq!(pending.remove(1), Some(fc_protocol::frame::MAX_MESSAGE));
+        assert_eq!(requests.overdue(t0 + 80 * second), None);
+        // Nothing to watch for an answered request or one never sent.
+        assert!(!requests.cancelled(2, t0));
+        assert!(!requests.cancelled(9, t0));
+        assert_eq!(*watched.lock().unwrap(), 3);
+        assert_eq!(requests.answered(1), Some(Owner::Swarm));
+        assert_eq!(requests.next_overdue(), None);
+        assert_eq!(requests.overdue(t0 + 3600 * second), None);
+        // 3 was never cancelled: no bound, however long main takes.
+        assert_eq!(requests.outstanding(), 1);
     }
 }
