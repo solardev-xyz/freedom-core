@@ -592,7 +592,7 @@ The core never parses a node's reply into a generic JSON value: a dense array of
   | `/stamps` (1 MiB) | per batch, the fields `mapPostageBatch` reads, its label as it came, and `exists` and `propagating` (the batch choice reads both); for a reply bee-js's schema refuses, each field's type, for the refusal's text | 4,096 batches | 7.7 MiB |
   | `/stamps/<b>` (64 KiB) | one batch, the same fields | 1 | 0.5 MiB (the floor) |
   | `/tags/<uid>` (64 KiB) | `normalizeTag`'s fields | 1 | 0.5 MiB (the floor) |
-  | `/addresses` (64 KiB) | `overlay` and `pssPublicKey`; the underlays skipped | 1 | 0.5 MiB (the floor) |
+  | `/addresses` (64 KiB) | `overlay`, `ethereum`, `publicKey` and `pssPublicKey` as they came (core-sdk's transform runs on each, and can throw), every field's type for zod's issues, and up to 512 `underlay` elements that aren't strings (an index and a type, 8 B each; past 512 their issues can't fit the refusal's 64 KiB); the underlay's strings skipped | 1 | 0.5 MiB (the floor): the four strings are within the kept strings' `m` and the refusal's text within the fourth `m`; the 512 entries (4 KiB) and the refusal's issue list (at most 378 issues of 80 B, 40 KiB as allocated) fit in the 69 KiB the floor holds above `4m + 2 × b64(m) + 16 KiB + 256 B` |
   | an upload's result (64 KiB) | `reference` | 1 | 0.5 MiB (the floor) |
 
 - **Skipped values** cost nothing kept: the reader counts their nesting, at most 64 deep, past which the call fails `error`, and keeps no element of them.

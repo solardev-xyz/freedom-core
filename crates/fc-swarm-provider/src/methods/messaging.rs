@@ -434,9 +434,11 @@ enum Underlay {
     },
 }
 
-/// Elements kept for the refusal's text: each issue's text is over 64
-/// bytes, so past this many it can't fit the form's 64 KiB.
-const UNDERLAY_ISSUES: usize = JSON_REPLY_CAP / 64;
+/// Elements kept for the refusal's text: each element's issue is over 128
+/// bytes of it (171 at the shortest), so past this many (512, 8 bytes
+/// each) the refusal can't fit the form's 64 KiB, and the call fails
+/// `too_large` unless a transform throws first.
+const UNDERLAY_ISSUES: usize = JSON_REPLY_CAP / 128;
 
 fn received(token: &Token<'_>) -> Received {
     match token {
@@ -1235,6 +1237,37 @@ mod tests {
             read_addresses(&with("underlay", &many)),
             Err(ReplyError::TooLarge)
         );
+    }
+
+    /// What the `/addresses` reader holds beyond its strings and the
+    /// refusal's text fits the floor its call reserves (design 0015, "JSON
+    /// replies"): the kept `underlay` entries and the refusal's issue list
+    /// at the cap, above `4m + 2 × b64(m) + 16 KiB + E × 256 B`.
+    #[test]
+    fn the_addresses_reader_fits_its_charge() {
+        use crate::machine::node::b64;
+        let m = JSON_REPLY_CAP;
+        let base = 4 * m + 2 * b64(m) + 16 * 1024 + 256;
+        let shortest = Issue::new(
+            Expected::String,
+            Received::Null,
+            &[Segment::Key("underlay"), Segment::Index(0)],
+        );
+        let mut issues = Issues::new();
+        let mut fit = 0;
+        while issues.push(shortest, JSON_REPLY_CAP).is_ok() {
+            fit += 1;
+        }
+        assert_eq!(fit, 378);
+        assert!(fit < UNDERLAY_ISSUES);
+        let entries = UNDERLAY_ISSUES * std::mem::size_of::<(u32, Received)>();
+        assert_eq!(entries, 4096);
+        assert!(issues.heap_bytes() <= 40 * 1024);
+        assert_eq!(
+            crate::machine::whole_charge(Form::Addresses),
+            crate::machine::node::CHARGE_FLOOR
+        );
+        assert!(base + entries + issues.heap_bytes() <= crate::machine::node::CHARGE_FLOOR);
     }
 
     #[test]
