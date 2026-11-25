@@ -616,7 +616,8 @@ fn a_fetch_is_bound_in_all_and_read_strictly() {
         r#"{"status":200}"#.to_owned(),
         r#"{"status":99,"body_base64":""}"#.to_owned(),
         r#"{"status":200,"body_base64":"!!"}"#.to_owned(),
-        r#"{"failed":"nope"}"#.to_owned(),
+        r#"{"failed":"unreachable"}"#.to_owned(),
+        r#"{"failed":false}"#.to_owned(),
         serde_json::json!({
             "status": 200,
             "body_base64": fc_swarm_provider::value::encode_base64(&vec![b' '; MANIFEST_MOST + 1]),
@@ -658,7 +659,7 @@ fn a_fetch_is_bound_in_all_and_read_strictly() {
         .unwrap();
     let (fetch, _, _) = io.last();
     engine
-        .response(&mut io, 0, fetch, Ok(r#"{"failed":"unreachable"}"#))
+        .response(&mut io, 0, fetch, Ok(r#"{"failed":true}"#))
         .unwrap();
     assert!(result_of(io.answer_of(1)).contains(r#"["reason",{"string":"unresolved"}]"#));
 }

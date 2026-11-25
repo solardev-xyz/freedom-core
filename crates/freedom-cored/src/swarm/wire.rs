@@ -291,10 +291,10 @@ fn failed_class(name: &str) -> Option<Failed> {
     })
 }
 
-/// D6's `shell.swarm_manifest`'s answer: `{ status, body_base64 }`, at
-/// most 8 KiB and a byte of the manifest's body (main reads no more), or `{
-/// failed }` with `failed`'s closed set (the fetch threw, or its body
-/// stalled or broke), which the check reads alike.
+/// D6's `shell.swarm_manifest`'s answer, as D12's vectors record it: `{
+/// status, body_base64 }`, at most 8 KiB and a byte of the manifest's body
+/// (main reads no more), or `{ failed: true }` (the fetch threw, or its
+/// body stalled or broke).
 pub fn manifest_reply(text: &str) -> Option<fc_swarm_provider::ops::Fetch> {
     use fc_swarm_provider::ops::Fetch;
     #[derive(Deserialize)]
@@ -304,8 +304,13 @@ pub fn manifest_reply(text: &str) -> Option<fc_swarm_provider::ops::Fetch> {
         #[serde(borrow)]
         body_base64: &'a str,
     }
-    if let Some(failed) = object::<FailedReply>(text) {
-        return failed_class(&failed.failed).map(|_| Fetch::Failed);
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Failed {
+        failed: bool,
+    }
+    if let Some(failed) = object::<Failed>(text) {
+        return failed.failed.then_some(Fetch::Failed);
     }
     let fetched: Fetched<'_> = object(text)?;
     if !(100..=599).contains(&fetched.status) {

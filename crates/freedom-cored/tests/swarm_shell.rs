@@ -1513,7 +1513,7 @@ fn shell_swarm_manifest_answers_and_its_bound() {
     // no record yet: legacy).
     no_manifests(&mut main);
     let mut own = OwnMain::new(|call, _| panic!("{call:?}"));
-    own.manifest = Box::new(|_| Some(json!({ "failed": "unreachable" })));
+    own.manifest = Box::new(|_| Some(json!({ "failed": true })));
     let answer = value_of(got(&main.play_own(
         &mut own,
         "swarm.manifest",

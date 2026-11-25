@@ -238,6 +238,11 @@ pub fn main_in(
 }
 
 impl Main {
+    /// The core's data directory (its vault, `vault-meta.json`).
+    pub fn data_dir(&self) -> std::path::PathBuf {
+        self._dir.path().join("identity")
+    }
+
     /// The core killed, as a crash leaves it, and another started in the
     /// same directories with `env`'s hooks: its grants and stores moved.
     pub fn restart(self, env: &[(&str, &str)]) -> Main {
@@ -1212,12 +1217,13 @@ impl Main {
     }
 
     /// Each part's next bytes within the core's credit; a part main fails
-    /// ends after its first frame with its error code's abort.
+    /// ends after its first frame (an empty one after its head) with its
+    /// error code's abort.
     fn pump_own_parts(&mut self, own: &OwnMain<'_>, aborted: &mut BTreeSet<u64>) {
         let failing: Vec<u64> = self
             .parts_out
             .iter()
-            .filter(|(id, (_, sent))| aborted.contains(id) && *sent > 0)
+            .filter(|(id, (data, sent))| aborted.contains(id) && (*sent > 0 || data.is_empty()))
             .map(|(id, _)| *id)
             .collect();
         for id in failing {
