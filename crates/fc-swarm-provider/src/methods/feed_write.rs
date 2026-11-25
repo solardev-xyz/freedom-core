@@ -29,24 +29,24 @@
 //! A feed entry is at most 10 MiB (deviation `feed-entry-bound`, question
 //! 3), refused with the params, where #1233 refuses it on browser main.
 
-use std::collections::VecDeque;
-
 use fc_json::{JsString, JsValue, number_to_string};
 use fc_swarm::PreparedChunk;
-use fc_swarm::chunker::{Chunker, Root};
 use fc_swarm::verify::{feed_update_address, feed_update_id, soc_address};
 
+use super::body::{BodyWriter, Fault, Piece};
 use super::feed_index::{Next, NextIndex, wrapping_index};
+use super::permitted;
 use super::writes::{
-    Ending, Fail, add_row, bee_upload, batch, bytes_up, feed_not_granted, guard, owner, row,
-    row_added, s, signature, signer_key, soc_up, soc_uploaded, stamps_call, unavailable, written,
+    Ending, Fail, add_row, admit, bee_upload, batch, bytes_up, closing, feed_not_granted, guard,
+    inserted, owner, row, s, signature, signer_key, soc_up, soc_uploaded, stamps_call,
+    unavailable, written,
 };
 use crate::chunks::single_owner;
-use crate::machine::node::{MAX_FRAME, WINDOW};
+use crate::machine::node::BodyAbort;
 use crate::machine::params::{feed_name, is_hex, require_params};
 use crate::machine::{
-    AskId, Cx, Event, Failure, NodeCall, Outcome, ReadyCheck, SignKey, SignSoc, SocKind, Step,
-    StoreWrite, World, fail,
+    Approval, AskId, Cx, Event, Failure, NodeCall, Outcome, Protocol, ReadyCheck, SignKey,
+    SignSoc, SocKind, Step, StoreWrite, World, fail,
 };
 use crate::methods::limits::MAX_DATA_BYTES;
 use crate::stamps::BatchId;
@@ -105,13 +105,17 @@ enum Kind {
 
 /// `handleUpdateFeed` and `handleWriteFeedEntry`.
 pub(crate) struct FeedWrite {
+    approval: Option<Approval>,
     kind: Kind,
     name: JsString,
     topic: [u8; 32],
     identity: Option<JsValue>,
     key: SignKey,
     owner: [u8; 20],
-    row: i64,
+    row: Option<i64>,
+    /// The row's last update is asked.
+    closed: bool,
+    now: u64,
     batch: Option<BatchId>,
     /// The write's index, and the answer's.
     index: u64,
@@ -122,15 +126,17 @@ pub(crate) struct FeedWrite {
 enum Stage {
     Ready(AskId),
     Owner(AskId),
-    Row(AskId),
+    Insert(AskId),
+    Trim(AskId),
     Stamps(AskId),
     Lock(AskId),
     Lookup { id: AskId, next: NextIndex },
     Exists { id: AskId, address: [u8; 32] },
-    UploadGuard(AskId),
-    Upload(Box<Upload>),
+    /// A large entry waits for its turn among the streaming uploads.
+    Turn(AskId),
+    /// Its `POST /bytes`, the body hashed as it goes out.
+    Upload { call: AskId, body: Box<BodyWriter> },
     Sign(Box<Signing>),
-    SocGuard(Box<Signing>, [u8; 65]),
     SocUp { id: AskId, address: [u8; 32] },
     Record(AskId),
     Ending(Ending),
@@ -146,29 +152,19 @@ struct Signing {
     payload: Vec<u8>,
 }
 
-/// A large entry's `POST /bytes`: its body out under main's credit, a
-/// part's bytes in under the core's, the root computed as they pass.
-struct Upload {
-    call: AskId,
-    part: Option<AskId>,
-    opened: bool,
-    /// Main's credit left on the body.
-    window: usize,
-    sent: u64,
-    total: u64,
-    /// A part's bytes taken but not yet sent.
-    pending: VecDeque<u8>,
-    chunker: Option<Chunker>,
-    root: Option<Root>,
-}
-
 fn invalid(message: &str, reason: &str) -> Outcome {
     Failure::invalid_params(message, reason).into()
 }
 
 impl FeedWrite {
     /// `handleUpdateFeed`'s checks.
-    pub(crate) fn update<W: World>(cx: &mut Cx<'_, W>, params: &Value) -> Result<Self, Outcome> {
+    pub(crate) fn update<W: World>(
+        cx: &mut Cx<'_, W>,
+        params: &Value,
+        approval: Option<Approval>,
+    ) -> Result<Self, Outcome> {
+        permitted(cx)?;
+        admit(cx, approval, Capability::Feeds)?;
         require_params(params)?;
         let name = match params.get("feedId") {
             Value::String(id) if !id.is_empty() => id.clone(),
@@ -201,11 +197,17 @@ impl FeedWrite {
             bytes,
             bzz_url,
         };
-        Self::begin(cx, kind, name, &feed)
+        Self::begin(cx, approval, kind, name, &feed)
     }
 
     /// `handleWriteFeedEntry`'s checks.
-    pub(crate) fn entry<W: World>(cx: &mut Cx<'_, W>, params: &Value) -> Result<Self, Outcome> {
+    pub(crate) fn entry<W: World>(
+        cx: &mut Cx<'_, W>,
+        params: &Value,
+        approval: Option<Approval>,
+    ) -> Result<Self, Outcome> {
+        permitted(cx)?;
+        admit(cx, approval, Capability::Feeds)?;
         require_params(params)?;
         let name = feed_name(params.get("name"))
             .map_err(|m| Failure::invalid_params(m, "invalid_feed_name"))?
@@ -255,11 +257,12 @@ impl FeedWrite {
             ]);
             return Err(Failure::invalid_params(message, "feed_not_found").into());
         };
-        Self::begin(cx, Kind::Entry { data, explicit }, name, &feed)
+        Self::begin(cx, approval, Kind::Entry { data, explicit }, name, &feed)
     }
 
     fn begin<W: World>(
         cx: &mut Cx<'_, W>,
+        approval: Option<Approval>,
         kind: Kind,
         name: JsString,
         feed: &JsValue,
@@ -268,13 +271,16 @@ impl FeedWrite {
         unavailable(identity.as_ref())?;
         let topic = fc_swarm::feed::topic(&format!("{}/{}", cx.origin.as_str(), name.as_str()));
         Ok(FeedWrite {
+            approval,
             kind,
             name,
             topic,
             identity,
             key: SignKey::BeeWallet,
             owner: [0; 20],
-            row: 0,
+            row: None,
+            closed: false,
+            now: cx.world.now(),
             batch: None,
             index: 0,
             shown: Value::Undefined,
@@ -283,6 +289,7 @@ impl FeedWrite {
     }
 
     pub(crate) fn on<W: World>(&mut self, cx: &mut Cx<'_, W>, id: AskId, event: Event) -> Step {
+        self.now = cx.world.now();
         match std::mem::replace(&mut self.stage, Stage::Gone) {
             Stage::Ready(asked) if asked == id => {
                 if let Err(step) = super::chunk_reads::ready(event) {
@@ -324,19 +331,26 @@ impl FeedWrite {
                 };
                 match add_row(cx, &entry) {
                     Ok(id) => {
-                        self.stage = Stage::Row(id);
+                        self.stage = Stage::Insert(id);
                         Step::Wait
                     }
                     Err(failure) => fail(failure),
                 }
             }
-            Stage::Row(asked) if asked == id => match row_added(event) {
-                Ok(row) => {
-                    self.row = row;
-                    self.stage = Stage::Stamps(cx.whole(stamps_call()));
+            Stage::Insert(asked) if asked == id => match inserted(cx, event) {
+                Ok((row, trim)) => {
+                    self.row = Some(row);
+                    self.stage = Stage::Trim(trim);
                     Step::Wait
                 }
                 Err(failure) => fail(failure),
+            },
+            Stage::Trim(asked) if asked == id => match written(event) {
+                Ok(()) => {
+                    self.stage = Stage::Stamps(cx.whole(stamps_call()));
+                    Step::Wait
+                }
+                Err(text) => self.end(cx, Err(Fail::text(text))),
             },
             Stage::Stamps(asked) if asked == id => {
                 let size = match &self.kind {
@@ -428,48 +442,39 @@ impl FeedWrite {
                     Err(failure) => self.end(cx, Err(failure)),
                 }
             }
-            Stage::UploadGuard(asked) if asked == id => {
-                if let Err(refused) = guard(cx, Capability::Feeds, event) {
+            Stage::Turn(asked) if asked == id => {
+                if !matches!(event, Event::Turn) {
+                    return self.end(cx, Err(Fail::internal()));
+                }
+                if let Err(refused) = guard(cx, self.approval, Capability::Feeds) {
                     return self.end(cx, Err(Fail::answer(refused)));
                 }
                 let (Kind::Entry { data, .. }, Some(batch)) = (&self.kind, &self.batch) else {
                     return self.end(cx, Err(Fail::internal()));
                 };
-                let total = data.len();
-                let call = cx.upload(bytes_up(batch, total));
-                self.stage = Stage::Upload(Box::new(Upload {
-                    call,
-                    part: None,
-                    opened: false,
-                    window: 0,
-                    sent: 0,
-                    total,
-                    pending: VecDeque::new(),
-                    chunker: Some(Chunker::new()),
-                    root: None,
-                }));
+                let piece = match data {
+                    Data::Inline(bytes) => Piece::Own(bytes.clone()),
+                    Data::Part { part, len } => Piece::Part {
+                        part: *part,
+                        len: *len,
+                    },
+                };
+                let mut body = Box::new(BodyWriter::hashed(piece));
+                let call = cx.whole(bytes_up(batch, body.total()));
+                body.bind(call);
+                self.stage = Stage::Upload { call, body };
                 Step::Wait
             }
-            Stage::Upload(mut upload) if id == upload.call || Some(id) == upload.part => {
-                let step = self.upload(cx, &mut upload, id, event);
-                if matches!(self.stage, Stage::Gone) {
-                    self.stage = Stage::Upload(upload);
-                }
-                step
+            Stage::Upload { call, body } if id == call || body.copies(id) => {
+                self.upload(cx, call, body, id, event)
             }
             Stage::Sign(signing) if signing.id == id => {
-                match signature(event, &self.owner, &signing.prepared) {
-                    Ok(sig) => {
-                        let mut signing = signing;
-                        signing.id = cx.recheck();
-                        self.stage = Stage::SocGuard(signing, sig);
-                        Step::Wait
-                    }
-                    Err(failure) => self.end(cx, Err(failure)),
-                }
-            }
-            Stage::SocGuard(signing, sig) if signing.id == id => {
-                if let Err(refused) = guard(cx, Capability::Feeds, event) {
+                let sig = match signature(event, &self.owner, &signing.prepared) {
+                    Ok(sig) => sig,
+                    Err(failure) => return self.end(cx, Err(failure)),
+                };
+                // After the vault's wait, the guard owns the upload.
+                if let Err(refused) = guard(cx, self.approval, Capability::Feeds) {
                     return self.end(cx, Err(Fail::answer(refused)));
                 }
                 let Some(batch) = &self.batch else {
@@ -572,7 +577,7 @@ impl FeedWrite {
                         return self.end(cx, Err(Fail::internal()));
                     }
                     _ => {
-                        self.stage = Stage::UploadGuard(cx.recheck());
+                        self.stage = Stage::Turn(cx.turn());
                         return Step::Wait;
                     }
                 }
@@ -606,43 +611,34 @@ impl FeedWrite {
         Step::Wait
     }
 
-    /// The large entry's upload: main's `swarm.body` and credit, a part's
-    /// bytes, the node's answer.
+    /// The large entry's upload: main's `swarm.body` and its credit, the
+    /// part's bytes, then the node's answer, checked against the core's own
+    /// root, which the SOC then wraps.
     fn upload<W: World>(
         &mut self,
         cx: &mut Cx<'_, W>,
-        upload: &mut Upload,
+        call: AskId,
+        mut body: Box<BodyWriter>,
         id: AskId,
         event: Event,
     ) -> Step {
-        if id == upload.call {
+        let pumped = if id != call {
+            body.part(cx, event)
+        } else {
             match event {
-                Event::BodyOpen => {
-                    upload.opened = true;
-                    upload.window = usize::try_from(WINDOW).unwrap_or(usize::MAX);
-                    if let Kind::Entry {
-                        data: Data::Part { part, .. },
-                        ..
-                    } = &self.kind
-                    {
-                        upload.part = Some(cx.part(*part));
-                    }
-                }
-                Event::BodyCredit(bytes) => {
-                    upload.window = upload.window.saturating_add(bytes);
-                }
+                Event::BodyOpen => body.open(cx),
+                Event::BodyCredit(bytes) => body.credit(cx, bytes),
                 reply @ (Event::Reply(_) | Event::Failed(_)) => {
-                    if let Some(part) = upload.part.take() {
-                        cx.cancel(part);
-                    }
+                    let whole = body.ended();
+                    body.abort(cx, BodyAbort::Cancelled);
                     let reference = match bee_upload(reply) {
                         Ok(reference) => reference,
                         Err(failure) => return self.end(cx, Err(failure)),
                     };
                     // reference-check: the node's reference is the core's
                     // own root, which the SOC wraps (feed-wrap-root).
-                    let root = match upload.root.take() {
-                        Some(root) if reference == root.address() => root,
+                    let root = match body.root() {
+                        Some(root) if whole && reference == root.address() => root,
                         _ => {
                             return self.end(
                                 cx,
@@ -650,82 +646,48 @@ impl FeedWrite {
                             );
                         }
                     };
-                    return match fc_swarm::feed::Update::wrap(&root) {
+                    return match fc_swarm::feed::Update::wrap(root) {
                         Ok(update) => self.sign(cx, update.span(), update.payload().to_vec()),
                         Err(_) => self.end(cx, Err(Fail::internal())),
                     };
                 }
-                _ => return self.end(cx, Err(Fail::internal())),
-            }
-        } else {
-            match event {
-                Event::PartHead(len) if len == upload.total => {}
-                Event::Data(bytes) => upload.pending.extend(bytes),
-                Event::End => {}
-                // A part main couldn't give: the page's bytes are gone.
-                Event::PartHead(_) | Event::Abort(_) | Event::Failed(_) => {
+                _ => {
+                    body.abort(cx, BodyAbort::Cancelled);
                     return self.end(cx, Err(Fail::internal()));
                 }
-                _ => return self.end(cx, Err(Fail::internal())),
+            }
+        };
+        match pumped {
+            Ok(()) => {
+                self.stage = Stage::Upload { call, body };
+                Step::Wait
+            }
+            Err(fault) => {
+                let why = match fault {
+                    Fault::Part => BodyAbort::BodyStreamError,
+                    Fault::PartLength | Fault::Internal => BodyAbort::Internal,
+                };
+                body.abort(cx, why);
+                cx.cancel(call);
+                match fault {
+                    Fault::PartLength => Step::Done(Outcome::Protocol(Protocol::PartLength)),
+                    Fault::Part | Fault::Internal => self.end(cx, Err(Fail::internal())),
+                }
             }
         }
-        if let Err(failure) = self.pump(cx, upload) {
-            return self.end(cx, Err(failure));
-        }
-        Step::Wait
     }
 
-    /// Sends what main's credit allows of what the core has, hashing it as
-    /// it goes; credits a part only for what left on the body.
-    fn pump<W: World>(&mut self, cx: &mut Cx<'_, W>, upload: &mut Upload) -> Result<(), Fail> {
-        if !upload.opened {
-            return Ok(());
-        }
-        while upload.window > 0 && upload.sent < upload.total {
-            let left = usize::try_from(upload.total - upload.sent).unwrap_or(usize::MAX);
-            let room = upload.window.min(MAX_FRAME).min(left);
-            let frame: Vec<u8> = match &self.kind {
-                Kind::Entry {
-                    data: Data::Inline(bytes),
-                    ..
-                } => {
-                    let at = usize::try_from(upload.sent).unwrap_or(usize::MAX);
-                    bytes.get(at..at + room).ok_or_else(Fail::internal)?.to_vec()
-                }
-                Kind::Entry {
-                    data: Data::Part { .. },
-                    ..
-                } => {
-                    let take = room.min(upload.pending.len());
-                    if take == 0 {
-                        break;
-                    }
-                    upload.pending.drain(..take).collect()
-                }
-                Kind::Update { .. } => return Err(Fail::internal()),
-            };
-            let chunker = upload.chunker.as_mut().ok_or_else(Fail::internal)?;
-            chunker
-                .write(&frame, &mut |_| {})
-                .map_err(|_| Fail::internal())?;
-            upload.window -= frame.len();
-            upload.sent += frame.len() as u64;
-            if let Some(part) = upload.part {
-                cx.credit(part, frame.len());
-            }
-            cx.body(upload.call, frame);
-        }
-        if upload.sent == upload.total
-            && let Some(chunker) = upload.chunker.take()
-        {
-            upload.root = Some(chunker.finish(&mut |_| {}));
-            cx.body_end(upload.call);
-        }
-        Ok(())
+    /// What the request still writes when it ends without its machine.
+    pub(crate) fn closing(&self, outcome: &Outcome) -> Option<StoreWrite> {
+        closing(self.row, self.closed, outcome, self.now)
     }
 
     fn end<W: World>(&mut self, cx: &mut Cx<'_, W>, result: Result<(Value, JsValue), Fail>) -> Step {
-        match Ending::start(cx, self.row, result) {
+        let Some(row) = self.row else {
+            return fail(result.err().map_or_else(Failure::internal_error, |f| f.page));
+        };
+        self.closed = true;
+        match Ending::start(cx, row, result) {
             Ok(ending) => {
                 self.stage = Stage::Ending(ending);
                 Step::Wait

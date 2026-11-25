@@ -480,7 +480,7 @@ pub struct ServiceError {
 }
 
 impl ServiceError {
-    fn plain(message: JsString) -> Self {
+    pub(crate) fn plain(message: JsString) -> Self {
         Self {
             message,
             code: None,

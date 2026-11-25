@@ -43,6 +43,22 @@
 //!   them ([`chunks`]); and the feed index lookup the feed writes will use
 //!   ([`methods::feed_index`], deviation `index-probe`).
 //!
+//! The fourth part (SWM-3, part 3b) adds the Publish group:
+//!
+//! - **Uploads** ([`methods::publish`]): `publishData`, `publishFiles` and
+//!   `publishChunk` along design 0015's path: the publish readiness, the
+//!   history row and its bound (deviation `history-bound`), one `/stamps`
+//!   read and the batch, the effect's guard, the upload (one file inline
+//!   or streamed from its part, page-upload.js's tar, a chunk), the node's
+//!   answer as the reference reads it, the chunk's reference checked
+//!   (deviation `reference-check`), the tag's owner and the row's update.
+//! - **`getUploadStatus`** ([`methods::upload_status`]): the tag's owner,
+//!   and `normalizeTag`'s object through a typed reader ([`replies`]).
+//! - **The framework's upload asks** ([`machine`]): a streaming upload's
+//!   turn, a history insert answered with its rowid, `swarm.body` out of
+//!   the core with credit on a part only for what went out, and the row's
+//!   update when a request ends without its machine.
+//!
 //! The reference is freedom-browser's `src/main/swarm/` at the swarm
 //! reference commit over bee-js 13.2.0 and core-sdk 0.2.2;
 //! `vectors/swarm.json` is the contract (AGENTS rule 5). The crate does no
@@ -55,6 +71,7 @@ mod js;
 pub mod json;
 pub mod machine;
 pub mod methods;
+pub mod replies;
 pub mod stamps;
 pub mod stores;
 pub mod value;

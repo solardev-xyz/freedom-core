@@ -1,22 +1,48 @@
-//! The method machines, by group (design 0015, "The methods"): this part
-//! brings Access (`requestAccess`, `getCapabilities`) and the Reads
-//! (`readChunk`, `readData`, `readSingleOwnerChunk`, `readFeedEntry`,
-//! `listFeeds`), and the feed index lookup the feed writes will use.
+//! The method machines, by group (design 0015, "The methods"): Access
+//! (`requestAccess`, `getCapabilities`), the Reads (`readChunk`,
+//! `readData`, `readSingleOwnerChunk`, `readFeedEntry`, `listFeeds`), the
+//! feed index lookup the feed writes will use, and the Publish group
+//! (`publishData`, `publishFiles`, `publishChunk`, `getUploadStatus`).
+
+use fc_json::JsString;
 
 use crate::errors::{self, ChunkRead};
 use crate::machine::node::{Failed, transport_text};
-use crate::machine::{Failure, Outcome};
+use crate::machine::{Cx, Failure, Outcome, World};
+use crate::value::Value;
 
 pub mod access;
+mod body;
 pub mod chunk_reads;
 pub mod create_feed;
 pub mod feed_index;
 pub mod feed_read;
 pub mod feed_write;
+pub mod publish;
 pub mod read_data;
 pub mod signing;
 pub mod soc_write;
+pub mod upload_status;
 pub(crate) mod writes;
+
+/// `getPermission(origin)`, which every method but Access and the Reads
+/// needs first: `notConnected()`.
+pub(crate) fn permitted<W: World>(cx: &Cx<'_, W>) -> Result<(), Outcome> {
+    if cx.connected() {
+        Ok(())
+    } else {
+        Err(Failure::not_connected().into())
+    }
+}
+
+/// page-swarm.js's `NO_ADDRESS`: the document no longer holds its key.
+pub(crate) fn no_address() -> Failure {
+    Failure {
+        code: crate::machine::page::UNAUTHORIZED,
+        message: JsString::from("This page has no address to connect from yet"),
+        data: Some(Value::object([("reason", Value::str("no_address"))])),
+    }
+}
 
 /// `LIMITS` (swarm-provider-ipc.js), as `getCapabilities` reports them.
 pub mod limits {

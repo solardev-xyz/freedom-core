@@ -10,17 +10,18 @@
 
 use fc_json::{JsString, JsValue};
 
+use super::permitted;
 use super::writes::{
-    Ending, Fail, add_row, bee_upload, batch, feed_manifest, feed_not_granted, guard, owner,
-    row as fields, row_added, s, signer_key, stamps_call, unavailable, written,
+    Ending, Fail, add_row, admit, bee_upload, batch, closing, feed_manifest, feed_not_granted,
+    guard, inserted, owner, row as fields, s, signer_key, stamps_call, unavailable, written,
 };
 use crate::chunks::hex;
 use crate::js::concat;
 use crate::machine::params::{feed_name, require_params};
 use crate::machine::{
-    AskId, Cx, Event, Failure, Outcome, ReadyCheck, SignKey, Step, StoreWrite, World, done, fail,
+    Approval, AskId, Cx, Event, Failure, Outcome, ReadyCheck, SignKey, Step, StoreWrite, World,
+    fail,
 };
-use crate::stamps::BatchId;
 use crate::stores::feeds::{FeedChange, identity_mode};
 use crate::stores::manifests::Capability;
 use crate::stores::{UNDEFINED, template};
@@ -28,30 +29,40 @@ use crate::value::Value;
 
 /// `handleCreateFeed`.
 pub(crate) struct CreateFeed {
+    approval: Option<Approval>,
     name: JsString,
     topic: [u8; 32],
     /// The active identity, read before the waits, as the reference reads
     /// it once.
     identity: Option<JsValue>,
+    owner: [u8; 20],
+    row: Option<i64>,
+    /// The row's last update is asked.
+    closed: bool,
+    now: u64,
     stage: Stage,
 }
 
 enum Stage {
-    /// An existing feed: its record, once the guard passes.
-    Existing { id: AskId, result: Value },
     Ready(AskId),
     Owner { id: AskId, key: SignKey },
-    Row { id: AskId, owner: [u8; 20] },
-    Stamps { id: AskId, owner: [u8; 20], row: i64 },
-    Guard { id: AskId, owner: [u8; 20], row: i64, batch: BatchId },
-    Manifest { id: AskId, owner: [u8; 20], row: i64 },
-    Record { id: AskId, row: i64, result: Value },
+    Insert(AskId),
+    Trim(AskId),
+    Stamps(AskId),
+    Manifest(AskId),
+    Record { id: AskId, result: Value },
     Ending(Ending),
     Gone,
 }
 
 impl CreateFeed {
-    pub(crate) fn start<W: World>(cx: &mut Cx<'_, W>, params: &Value) -> Result<Self, Outcome> {
+    pub(crate) fn start<W: World>(
+        cx: &mut Cx<'_, W>,
+        params: &Value,
+        approval: Option<Approval>,
+    ) -> Result<Self, Outcome> {
+        permitted(cx)?;
+        admit(cx, approval, Capability::Feeds)?;
         require_params(params)?;
         let name = feed_name(params.get("name"))
             .map_err(|m| Failure::invalid_params(m, "invalid_feed_name"))?
@@ -74,41 +85,37 @@ impl CreateFeed {
                 ("manifestReference", Value::from_js(field("manifestReference"))),
                 (
                     "bzzUrl",
-                    Value::String(concat(&[&JsString::from("bzz://"), &JsString::from(reference)])),
+                    Value::String(concat(&[
+                        &JsString::from("bzz://"),
+                        &JsString::from(reference),
+                    ])),
                 ),
                 (
                     "identityMode",
                     Value::from_js(&identity_mode(identity.as_ref())),
                 ),
             ]);
-            return Ok(CreateFeed {
-                name,
-                topic,
-                identity: None,
-                stage: Stage::Existing {
-                    id: cx.recheck(),
-                    result,
-                },
-            });
+            guard(cx, approval, Capability::Feeds)?;
+            return Err(Outcome::Result(result));
         }
         let identity = feeds.active_origin_identity(cx.origin);
         unavailable(identity.as_ref())?;
         Ok(CreateFeed {
+            approval,
             name,
             topic,
             identity,
+            owner: [0; 20],
+            row: None,
+            closed: false,
+            now: cx.world.now(),
             stage: Stage::Ready(cx.ready(ReadyCheck::Publish)),
         })
     }
 
     pub(crate) fn on<W: World>(&mut self, cx: &mut Cx<'_, W>, id: AskId, event: Event) -> Step {
+        self.now = cx.world.now();
         match std::mem::replace(&mut self.stage, Stage::Gone) {
-            Stage::Existing { id: asked, result } if asked == id => {
-                match guard(cx, Capability::Feeds, event) {
-                    Ok(()) => done(result),
-                    Err(refused) => fail(refused),
-                }
-            }
             Stage::Ready(asked) if asked == id => {
                 if let Err(step) = super::chunk_reads::ready(event) {
                     return step;
@@ -124,7 +131,7 @@ impl CreateFeed {
                 Step::Wait
             }
             Stage::Owner { id: asked, key } if asked == id => {
-                let owner = match owner(key, event) {
+                self.owner = match owner(key, event) {
                     Ok(owner) => owner,
                     Err(failure) => return fail(failure),
                 };
@@ -136,66 +143,45 @@ impl CreateFeed {
                 ]);
                 match add_row(cx, &entry) {
                     Ok(id) => {
-                        self.stage = Stage::Row { id, owner };
+                        self.stage = Stage::Insert(id);
                         Step::Wait
                     }
                     Err(failure) => fail(failure),
                 }
             }
-            Stage::Row { id: asked, owner } if asked == id => match row_added(event) {
-                Ok(row) => {
-                    self.stage = Stage::Stamps {
-                        id: cx.whole(stamps_call()),
-                        owner,
-                        row,
-                    };
+            Stage::Insert(asked) if asked == id => match inserted(cx, event) {
+                Ok((row, trim)) => {
+                    self.row = Some(row);
+                    self.stage = Stage::Trim(trim);
                     Step::Wait
                 }
                 Err(failure) => fail(failure),
             },
-            Stage::Stamps {
-                id: asked,
-                owner,
-                row,
-            } if asked == id => match batch(event, 4096) {
-                Ok(batch) => {
-                    self.stage = Stage::Guard {
-                        id: cx.recheck(),
-                        owner,
-                        row,
-                        batch,
-                    };
-                    Step::Wait
-                }
-                Err(failure) => self.end(cx, row, Err(failure)),
-            },
-            Stage::Guard {
-                id: asked,
-                owner,
-                row,
-                batch,
-            } if asked == id => match guard(cx, Capability::Feeds, event) {
+            Stage::Trim(asked) if asked == id => match written(event) {
                 Ok(()) => {
-                    self.stage = Stage::Manifest {
-                        id: cx.whole(feed_manifest(&owner, &self.topic, &batch)),
-                        owner,
-                        row,
-                    };
+                    self.stage = Stage::Stamps(cx.whole(stamps_call()));
                     Step::Wait
                 }
-                Err(refused) => self.end(cx, row, Err(Fail::answer(refused))),
+                Err(text) => self.end(cx, Err(Fail::text(text))),
             },
-            Stage::Manifest {
-                id: asked,
-                owner,
-                row,
-            } if asked == id => {
+            Stage::Stamps(asked) if asked == id => {
+                let batch = match batch(event, 4096) {
+                    Ok(batch) => batch,
+                    Err(failure) => return self.end(cx, Err(failure)),
+                };
+                if let Err(refused) = guard(cx, self.approval, Capability::Feeds) {
+                    return self.end(cx, Err(Fail::answer(refused)));
+                }
+                self.stage = Stage::Manifest(cx.whole(feed_manifest(&self.owner, &self.topic, &batch)));
+                Step::Wait
+            }
+            Stage::Manifest(asked) if asked == id => {
                 let manifest = match bee_upload(event) {
                     Ok(reference) => hex(&reference),
-                    Err(failure) => return self.end(cx, row, Err(failure)),
+                    Err(failure) => return self.end(cx, Err(failure)),
                 };
                 let topic = hex(&self.topic);
-                let owner = fc_evm::checksum_address(&owner);
+                let owner = fc_evm::checksum_address(&self.owner);
                 let bzz = format!("bzz://{manifest}");
                 let identity_id = self
                     .identity
@@ -227,34 +213,34 @@ impl CreateFeed {
                 };
                 self.stage = Stage::Record {
                     id: cx.write(StoreWrite::Feeds(change)),
-                    row,
                     result,
                 };
                 Step::Wait
             }
-            Stage::Record {
-                id: asked,
-                row,
-                result,
-            } if asked == id => match written(event) {
+            Stage::Record { id: asked, result } if asked == id => match written(event) {
                 Ok(()) => {
                     // `{ status: 'completed', ...result }`.
                     let updates = row_of_result(&result);
-                    self.end(cx, row, Ok((result, updates)))
+                    self.end(cx, Ok((result, updates)))
                 }
-                Err(text) => self.end(cx, row, Err(Fail::text(text))),
+                Err(text) => self.end(cx, Err(Fail::text(text))),
             },
             Stage::Ending(ending) if ending.id == id => ending.on(event),
-            _ => fail(Failure::internal_error()),
+            _ => self.end(cx, Err(Fail::internal())),
         }
     }
 
-    fn end<W: World>(
-        &mut self,
-        cx: &mut Cx<'_, W>,
-        row: i64,
-        result: Result<(Value, JsValue), Fail>,
-    ) -> Step {
+    /// What the request still writes when it ends without its machine.
+    pub(crate) fn closing(&self, outcome: &Outcome) -> Option<StoreWrite> {
+        closing(self.row, self.closed, outcome, self.now)
+    }
+
+    /// The row's last update, then the answer; at once with no row.
+    fn end<W: World>(&mut self, cx: &mut Cx<'_, W>, result: Result<(Value, JsValue), Fail>) -> Step {
+        let Some(row) = self.row else {
+            return fail(result.err().map_or_else(Failure::internal_error, |f| f.page));
+        };
+        self.closed = true;
         match Ending::start(cx, row, result) {
             Ok(ending) => {
                 self.stage = Stage::Ending(ending);
@@ -268,11 +254,11 @@ impl CreateFeed {
 /// `{ status: 'completed', ...result }`, the fields `updateEntry` reads
 /// among them (`bzzUrl`).
 fn row_of_result(result: &Value) -> JsValue {
-    let mut fields = vec![("status", s("completed"))];
+    let mut updates = vec![("status", s("completed"))];
     for key in ["topic", "owner", "manifestReference", "bzzUrl"] {
         if let Some(text) = result.get(key).as_js_string() {
-            fields.push((key, JsValue::String(text.clone())));
+            updates.push((key, JsValue::String(text.clone())));
         }
     }
-    self::fields(&fields)
+    fields(&updates)
 }

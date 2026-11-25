@@ -49,11 +49,11 @@ use fc_json::{JsString, JsValue};
 use fc_swarm::verify;
 use fc_swarm_provider::budgets::ReadBudgets;
 use fc_swarm_provider::machine::keeper::{ChangeAnswer, ChangeError, HoldId, Keeper, Ran, Ticket};
-use fc_swarm_provider::machine::node::{UPLOAD_STATE, WINDOW};
+use fc_swarm_provider::machine::node::{BodyOut, WINDOW};
 use fc_swarm_provider::machine::{
     Approval, Ask, AskId, Body, Call, Effect, Event, Failed, Failure, Form, Need, NodeCall,
-    Outcome, Reads, Recheck, ReadyCheck, Reply, Request, SignKey, SignSoc, Signed, StoreWrite,
-    World, whole_charge,
+    Outcome, Reads, ReadyCheck, Reply, Request, SignKey, SignSoc, Signed, StoreWrite, TagOwners,
+    UPLOAD_CHARGE, World, whole_charge,
 };
 use fc_swarm_provider::stores::feeds::{FeedChange, FeedStore, Source};
 use fc_swarm_provider::stores::history::{self, Bind, Cell, Statement};
@@ -120,6 +120,13 @@ struct WriteWorld {
     rules: BTreeSet<(JsString, String)>,
     keeper: Keeper,
     budgets: ReadBudgets,
+    /// Agent custody, as main reads it live.
+    custody: bool,
+    /// The page's name still answers and its document holds its key.
+    live: bool,
+    tags: TagOwners,
+    /// The effect guards run: each reads the key's binding first.
+    guards: std::cell::Cell<usize>,
 }
 
 impl Reads for WriteWorld {
@@ -145,6 +152,16 @@ impl World for WriteWorld {
     fn budgets(&mut self) -> &mut ReadBudgets {
         &mut self.budgets
     }
+    fn key_holds(&self, _key: &JsString) -> bool {
+        self.guards.set(self.guards.get() + 1);
+        self.live
+    }
+    fn agent(&self, _key: &JsString) -> bool {
+        self.custody
+    }
+    fn tags(&mut self) -> &mut TagOwners {
+        &mut self.tags
+    }
 }
 
 impl WriteWorld {
@@ -155,6 +172,10 @@ impl WriteWorld {
             rules: BTreeSet::new(),
             keeper: Keeper::new(feeds),
             budgets: ReadBudgets::new(),
+            custody: false,
+            live: true,
+            tags: TagOwners::new(),
+            guards: std::cell::Cell::new(0),
         }
     }
 
@@ -520,10 +541,6 @@ struct PartStream {
 struct Thread<'k> {
     world: WriteWorld,
     vault: Vault<'k>,
-    /// Agent custody, as main reads it live.
-    custody: bool,
-    /// The page's name still answers and its document holds its key.
-    live: bool,
     readiness: Result<(), JsString>,
     node: WriteNode,
     db: rusqlite::Connection,
@@ -533,8 +550,9 @@ struct Thread<'k> {
     request: Option<Request>,
     queue: VecDeque<Effect>,
     parts: Vec<PartStream>,
-    /// A streamed upload's call, its charge and the body so far.
-    uploads: BTreeMap<AskId, (NodeCall, usize, Vec<u8>)>,
+    /// A streamed upload's call, its charge, the length its head gave and
+    /// the body so far.
+    uploads: BTreeMap<AskId, (NodeCall, usize, Option<u64>, Vec<u8>)>,
     cancelled: HashSet<AskId>,
     holds: Vec<HoldId>,
     tickets: u64,
@@ -543,7 +561,6 @@ struct Thread<'k> {
     calls: Vec<Logged>,
     /// Each streamed upload's body, by its index in `calls`.
     bodies: BTreeMap<usize, Vec<u8>>,
-    rechecks: usize,
     answers: Vec<(Ticket, Result<ChangeAnswer, ChangeError>)>,
     cancels_after_outcome: usize,
 }
@@ -559,8 +576,6 @@ impl<'k> Thread<'k> {
                 unlocked: true,
                 signed: Vec::new(),
             },
-            custody: false,
-            live: true,
             readiness: Ok(()),
             node,
             db,
@@ -576,7 +591,6 @@ impl<'k> Thread<'k> {
             ready: Vec::new(),
             calls: Vec::new(),
             bodies: BTreeMap::new(),
-            rechecks: 0,
             answers: Vec::new(),
             cancels_after_outcome: 0,
         }
@@ -587,7 +601,7 @@ impl<'k> Thread<'k> {
         self.ready.clear();
         self.calls.clear();
         self.bodies.clear();
-        self.rechecks = 0;
+        self.world.guards.set(0);
         self.vault.signed.clear();
         self.node.soc_posts = 0;
         self.cancels_after_outcome = 0;
@@ -666,8 +680,19 @@ impl<'k> Thread<'k> {
         loop {
             if self.outcome().is_some() {
                 for effect in std::mem::take(&mut self.queue) {
-                    if let Effect::Cancel(_) = effect {
-                        self.cancels_after_outcome += 1;
+                    match effect {
+                        Effect::Cancel(_) => self.cancels_after_outcome += 1,
+                        // The write a request still makes as it ends
+                        // (its history row's), which isn't called back.
+                        Effect::Ask(Ask {
+                            need: Need::Write(StoreWrite::History(statements)),
+                            ..
+                        }) => {
+                            for statement in &statements {
+                                execute(&self.db, statement);
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 return None;
@@ -696,14 +721,24 @@ impl<'k> Thread<'k> {
                             part.window += bytes;
                         }
                     }
-                    Effect::Body { id, bytes } => {
-                        assert!(!bytes.is_empty() && bytes.len() <= 65536);
-                        let len = bytes.len();
-                        self.uploads.get_mut(&id).unwrap().2.extend(bytes);
-                        // Main credits each frame as the node takes it.
-                        self.give(id, Event::BodyCredit(len));
-                    }
-                    Effect::BodyEnd(id) => self.uploaded(id),
+                    Effect::Body { id, out } => match out {
+                        BodyOut::Head { bytes } => {
+                            self.uploads.get_mut(&id).unwrap().2 = Some(bytes);
+                        }
+                        BodyOut::Data(bytes) => {
+                            assert!(!bytes.is_empty() && bytes.len() <= 65536);
+                            let len = bytes.len();
+                            let upload = self.uploads.get_mut(&id).unwrap();
+                            assert!(upload.2.is_some(), "data before the body's head");
+                            upload.3.extend(bytes);
+                            // Main credits each frame as the node takes it.
+                            self.give(id, Event::BodyCredit(len));
+                        }
+                        BodyOut::End => self.uploaded(id),
+                        BodyOut::Abort(_) => {
+                            self.uploads.remove(&id);
+                        }
+                    },
                 }
                 continue;
             }
@@ -765,14 +800,9 @@ impl<'k> Thread<'k> {
                     self.answers.extend(answers);
                 }
             }
-            Need::Recheck => {
-                assert_eq!(ask.charge, 0);
-                self.rechecks += 1;
-                let answer = Event::Rechecked(Recheck {
-                    live: self.live,
-                    agent: self.custody,
-                });
-                self.give(ask.id, answer);
+            Need::Upload => {
+                assert_eq!(ask.charge, UPLOAD_CHARGE);
+                self.give(ask.id, Event::Turn);
             }
             Need::Lock(_) => {
                 assert_eq!(ask.charge, 0);
@@ -786,11 +816,9 @@ impl<'k> Thread<'k> {
                         Ran::Applied(Err(err)) => Event::Written(Err(err.message())),
                         Ran::Deferred => panic!("a request's own change deferred"),
                     },
-                    StoreWrite::HistoryAdd(insert) => {
+                    StoreWrite::HistoryInsert(insert) => {
                         execute(&self.db, &insert);
-                        let rowid = self.db.last_insert_rowid();
-                        execute(&self.db, &history::trim(Some(rowid)));
-                        Event::RowAdded(Ok(rowid))
+                        Event::Inserted(Ok(self.db.last_insert_rowid()))
                     }
                     StoreWrite::History(statements) => {
                         for statement in &statements {
@@ -816,8 +844,8 @@ impl<'k> Thread<'k> {
             }
             Need::Node(call) => {
                 if let Some(Body::Stream { .. }) = call.body {
-                    assert_eq!(ask.charge, whole_charge(call.form) + UPLOAD_STATE);
-                    self.uploads.insert(ask.id, (call, ask.charge, Vec::new()));
+                    assert_eq!(ask.charge, whole_charge(call.form));
+                    self.uploads.insert(ask.id, (call, ask.charge, None, Vec::new()));
                     self.give(ask.id, Event::BodyOpen);
                     return;
                 }
@@ -854,9 +882,10 @@ impl<'k> Thread<'k> {
 
     /// A streamed upload's body is whole: the node's answer.
     fn uploaded(&mut self, id: AskId) {
-        let (call, charge, body) = self.uploads.remove(&id).unwrap();
+        let (call, charge, head, body) = self.uploads.remove(&id).unwrap();
         if let Some(Body::Stream { bytes }) = call.body {
             assert_eq!(body.len() as u64, bytes, "the body is its declared length");
+            assert_eq!(head, Some(bytes), "the body's head");
         }
         let (spec, change) = self.node.reply(&call, &body);
         self.world_change(change);
@@ -879,11 +908,11 @@ impl<'k> Thread<'k> {
     fn world_change(&mut self, change: Option<WorldChange>) {
         match change {
             None => {}
-            Some(WorldChange::Custody) => self.custody = true,
+            Some(WorldChange::Custody) => self.world.custody = true,
             Some(WorldChange::RuleOff(capability)) => {
                 self.world.rules.retain(|(_, c)| *c != capability);
             }
-            Some(WorldChange::NameMoved) => self.live = false,
+            Some(WorldChange::NameMoved) => self.world.live = false,
         }
     }
 
@@ -1386,7 +1415,7 @@ fn feed_and_soc_writes() {
         let origin = js(get(case, "origin"));
         let mut thread = Thread::new(WriteWorld::of(case), &keys, WriteNode::of(case, &keys));
         thread.vault.unlocked = get(case, "vault").is_str("unlocked");
-        thread.custody = get(case, "custody").kind() == Kind::True;
+        thread.world.custody = get(case, "custody").kind() == Kind::True;
         thread.readiness = publish_readiness(case);
 
         for (k, step) in steps.iter().enumerate() {
@@ -1452,10 +1481,10 @@ fn feed_and_soc_writes() {
             }
             check_signatures(&sid, *step, approval, &thread, earlier);
             if earlier {
-                assert!(thread.rechecks <= count(*step, "effect"), "{sid}: effects");
+                assert!(thread.world.guards.get() <= count(*step, "effect"), "{sid}: effects");
                 assert!(thread.ready.len() <= count(*step, "readiness"), "{sid}");
             } else {
-                assert_eq!(thread.rechecks, count(*step, "effect"), "{sid}: effects");
+                assert_eq!(thread.world.guards.get(), count(*step, "effect"), "{sid}: effects");
                 assert_eq!(thread.ready.len(), count(*step, "readiness"), "{sid}: readiness");
             }
             assert_eq!(

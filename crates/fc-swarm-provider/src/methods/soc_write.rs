@@ -30,14 +30,16 @@ use fc_json::JsValue;
 use fc_swarm::PreparedChunk;
 use fc_swarm::verify::soc_address;
 
+use super::permitted;
 use super::writes::{
-    Ending, Fail, add_row, batch, feed_not_granted, guard, owner, row, row_added, s, signature,
-    signer_key, soc_up, soc_uploaded, stamps_call, unavailable,
+    Ending, Fail, add_row, admit, batch, closing, feed_not_granted, guard, inserted, owner, row,
+    s, signature, signer_key, soc_up, soc_uploaded, stamps_call, unavailable, written,
 };
 use crate::chunks::hex;
 use crate::machine::params::{bytes32, empty_options, hex_string, require_params};
 use crate::machine::{
-    AskId, Cx, Event, Failure, Outcome, ReadyCheck, SignKey, SignSoc, SocKind, Step, World, fail,
+    Approval, AskId, Cx, Event, Failure, Outcome, ReadyCheck, SignKey, SignSoc, SocKind, Step,
+    StoreWrite, World, fail,
 };
 use crate::methods::feed_write::{Data, data_of};
 use crate::methods::limits::MAX_CHUNK_PAYLOAD_BYTES;
@@ -61,6 +63,7 @@ pub fn shared_identity() -> Failure {
 
 /// `handleWriteSingleOwnerChunk`.
 pub(crate) struct SocWrite {
+    approval: Option<Approval>,
     identifier: [u8; 32],
     payload: Vec<u8>,
     /// The span the vault signs: the page's, or the payload's length for
@@ -70,6 +73,9 @@ pub(crate) struct SocWrite {
     owner: [u8; 20],
     /// The history row, once added.
     row: Option<i64>,
+    /// The row's last update is asked.
+    closed: bool,
+    now: u64,
     stage: Stage,
 }
 
@@ -78,14 +84,10 @@ enum Stage {
     /// active identity changed before the signature).
     Owner { id: AskId, recheck: bool },
     Ready(AskId),
-    Row(AskId),
+    Insert(AskId),
+    Trim(AskId),
     Sign { id: AskId, prepared: PreparedChunk },
     Stamps { id: AskId, signature: [u8; 65] },
-    Guard {
-        id: AskId,
-        signature: [u8; 65],
-        batch: BatchId,
-    },
     SocUp {
         id: AskId,
         address: [u8; 32],
@@ -100,7 +102,13 @@ fn invalid(message: &str, reason: &str) -> Outcome {
 }
 
 impl SocWrite {
-    pub(crate) fn start<W: World>(cx: &mut Cx<'_, W>, params: &Value) -> Result<Self, Outcome> {
+    pub(crate) fn start<W: World>(
+        cx: &mut Cx<'_, W>,
+        params: &Value,
+        approval: Option<Approval>,
+    ) -> Result<Self, Outcome> {
+        permitted(cx)?;
+        admit(cx, approval, Capability::Signing)?;
         require_params(params)?;
         empty_options(params.get("options"))?;
         let identifier = hex_string(
@@ -154,12 +162,15 @@ impl SocWrite {
             _ => payload.len() as u64,
         };
         Ok(SocWrite {
+            approval,
             identifier,
             payload,
             span,
             key,
             owner: [0; 20],
             row: None,
+            closed: false,
+            now: cx.world.now(),
             stage: Stage::Owner {
                 id: cx.owner(key),
                 recheck: false,
@@ -168,6 +179,7 @@ impl SocWrite {
     }
 
     pub(crate) fn on<W: World>(&mut self, cx: &mut Cx<'_, W>, id: AskId, event: Event) -> Step {
+        self.now = cx.world.now();
         match std::mem::replace(&mut self.stage, Stage::Gone) {
             Stage::Owner { id: asked, recheck } if asked == id => {
                 self.owner = match owner(self.key, event) {
@@ -196,18 +208,23 @@ impl SocWrite {
                 ]);
                 match add_row(cx, &entry) {
                     Ok(id) => {
-                        self.stage = Stage::Row(id);
+                        self.stage = Stage::Insert(id);
                         Step::Wait
                     }
                     Err(failure) => fail(failure),
                 }
             }
-            Stage::Row(asked) if asked == id => match row_added(event) {
-                Ok(row) => {
+            Stage::Insert(asked) if asked == id => match inserted(cx, event) {
+                Ok((row, trim)) => {
                     self.row = Some(row);
-                    self.sign(cx)
+                    self.stage = Stage::Trim(trim);
+                    Step::Wait
                 }
                 Err(failure) => fail(failure),
+            },
+            Stage::Trim(asked) if asked == id => match written(event) {
+                Ok(()) => self.sign(cx),
+                Err(text) => self.end(cx, Err(Fail::text(text))),
             },
             Stage::Sign { id: asked, prepared } if asked == id => {
                 match signature(event, &self.owner, &prepared) {
@@ -224,23 +241,13 @@ impl SocWrite {
             Stage::Stamps {
                 id: asked,
                 signature,
-            } if asked == id => match batch(event, 4096) {
-                Ok(batch) => {
-                    self.stage = Stage::Guard {
-                        id: cx.recheck(),
-                        signature,
-                        batch,
-                    };
-                    Step::Wait
-                }
-                Err(failure) => self.end(cx, Err(failure)),
-            },
-            Stage::Guard {
-                id: asked,
-                signature,
-                batch,
             } if asked == id => {
-                if let Err(refused) = guard(cx, Capability::Signing, event) {
+                let batch = match batch(event, 4096) {
+                    Ok(batch) => batch,
+                    Err(failure) => return self.end(cx, Err(failure)),
+                };
+                // After the batch's wait, the guard owns the upload.
+                if let Err(refused) = guard(cx, self.approval, Capability::Signing) {
                     return self.end(cx, Err(Fail::answer(refused)));
                 }
                 let call = soc_up(
@@ -317,10 +324,16 @@ impl SocWrite {
         Step::Wait
     }
 
+    /// What the request still writes when it ends without its machine.
+    pub(crate) fn closing(&self, outcome: &Outcome) -> Option<StoreWrite> {
+        closing(self.row, self.closed, outcome, self.now)
+    }
+
     fn end<W: World>(&mut self, cx: &mut Cx<'_, W>, result: Result<(Value, JsValue), Fail>) -> Step {
         let Some(row) = self.row else {
             return fail(result.err().map_or_else(Failure::internal_error, |f| f.page));
         };
+        self.closed = true;
         match Ending::start(cx, row, result) {
             Ok(ending) => {
                 self.stage = Stage::Ending(ending);

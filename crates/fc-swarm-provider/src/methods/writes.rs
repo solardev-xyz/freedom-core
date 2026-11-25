@@ -8,9 +8,10 @@
 //! - **the vault's answers**: a key's owner, and a signature checked as
 //!   `createSwarmSigner` checks it;
 //! - **the effect's guard** (`meta.page.effect` and `whileGranted`): just
-//!   before each upload, main's live checks (the name, the document, Agent
-//!   custody), the site's rule for an automatic request, then the
-//!   connection and the feed grant;
+//!   before each upload, in the step that makes it, the document still
+//!   holding its key and, for an automatic request, Agent custody and the
+//!   site's rule (read live, [`World::key_holds`], [`World::agent`]), then
+//!   the connection and the feed grant;
 //! - **the batch** from one `/stamps` read (`selectBestBatch`, deviation
 //!   `stamps-one-read`), and the node's replies to the uploads;
 //! - **the history row** (`addEntry`, `updateEntry`) and the failures after
@@ -25,7 +26,8 @@ use crate::js::{is_integer, strip_bom, to_lower};
 use crate::json::{ReadError, Reader, Token};
 use crate::machine::node::{Failed, JSON_REPLY_CAP, transport_text};
 use crate::machine::{
-    Approval, AskId, Body, Cx, Event, Failure, Form, NodeCall, SignKey, StoreWrite, World,
+    Approval, AskId, Body, Cx, Event, Failure, Form, NodeCall, Outcome, SignKey, StoreWrite,
+    World,
 };
 use crate::stamps::{BatchId, SelectOptions, read_stamps, select_best_batch};
 use crate::stores::feeds::{
@@ -34,7 +36,7 @@ use crate::stores::feeds::{
 use crate::stores::manifests::Capability;
 use crate::stores::{history, is_str, object, template, text};
 use crate::zod::{Expected, Issue, Issues, Received, Segment};
-use crate::{ReplyError, stamps::STAMPS_REPLY_CAP};
+use crate::ReplyError;
 
 /// A failure after the history row: the row's `errorMessage` and the
 /// page's error.
@@ -55,11 +57,7 @@ impl Fail {
 
     /// A plain `Error(message)` a service threw, through `nodeWriteError`.
     pub fn text(message: impl Into<JsString>) -> Fail {
-        Fail::thrown(&ServiceError {
-            message: message.into(),
-            code: None,
-            reason: None,
-        })
+        Fail::thrown(&ServiceError::plain(message.into()))
     }
 
     /// An answer the page gets as it is (a guard's refusal); the row takes
@@ -196,43 +194,51 @@ pub(crate) fn signature(
 
 // --- the effect's guard ----------------------------------------------------
 
-/// A keyless document's answer, or one whose name moved (page-swarm.js's
-/// `NO_ADDRESS`).
-pub(crate) fn no_address() -> Failure {
-    Failure {
-        data: Some(crate::value::Value::object([(
-            "reason",
-            crate::value::Value::str("no_address"),
-        )])),
-        ..Failure::bare(4100, "This page has no address to connect from yet")
-    }
-}
-
 /// `feedNotGranted()`.
 pub(crate) fn feed_not_granted() -> Failure {
     Failure::not_authorized("feed_not_granted")
 }
 
-/// The effect's guard, on main's [`Event::Rechecked`]: the page still
-/// there, then for a request the site's rule answered Agent custody and the
-/// rule itself (`AGENT_CUSTODY`, `RULE_OFF`), then the connection and, for
-/// a feed or SOC write, the feed grant (`whileGranted`).
+/// The admission of a request a site's rule approved (design 0015,
+/// "Methods main calls": `approval`): the agent mustn't hold the tab, and
+/// the rule must stand; otherwise `agent_custody`, or `no_rule`, which only
+/// a main bug reaches.
+pub(crate) fn admit<W: World>(
+    cx: &Cx<'_, W>,
+    approval: Option<Approval>,
+    capability: Capability,
+) -> Result<(), Outcome> {
+    if approval != Some(Approval::Auto) {
+        return Ok(());
+    }
+    if cx.agent() {
+        return Err(Failure::not_authorized("agent_custody").into());
+    }
+    if !cx.auto_approve(capability) {
+        return Err(Failure::not_authorized("no_rule").into());
+    }
+    Ok(())
+}
+
+/// The effect's guard (page-swarm.js's `guardEffect`, then the provider's
+/// `whileGranted` with the feed grant), in the step that makes the effect,
+/// after its last wait: the document still holds its key; for a request
+/// the site's rule approved, the agent doesn't hold its tab and the rule
+/// stands (`AGENT_CUSTODY`, `RULE_OFF`); the site is still connected and
+/// still has its feed grant.
 pub(crate) fn guard<W: World>(
     cx: &Cx<'_, W>,
+    approval: Option<Approval>,
     capability: Capability,
-    event: Event,
 ) -> Result<(), Failure> {
-    let Event::Rechecked(recheck) = event else {
-        return Err(Failure::internal_error());
-    };
-    if !recheck.live {
-        return Err(no_address());
+    if !cx.key_holds() {
+        return Err(super::no_address());
     }
-    if cx.approval == Some(Approval::Auto) {
-        if recheck.agent {
+    if approval == Some(Approval::Auto) {
+        if cx.agent() {
             return Err(Failure::not_authorized("agent_custody"));
         }
-        if !cx.world.auto_approve(cx.origin, capability) {
+        if !cx.auto_approve(capability) {
             return Err(Failure::not_authorized("not_auto_approved"));
         }
     }
@@ -249,16 +255,7 @@ pub(crate) fn guard<W: World>(
 
 /// `GET /stamps`, once (deviation `stamps-one-read`).
 pub(crate) fn stamps_call() -> NodeCall {
-    NodeCall {
-        form: Form::Stamps,
-        path: "/stamps".to_owned(),
-        query: Vec::new(),
-        headers: Vec::new(),
-        body: None,
-        max_bytes: STAMPS_REPLY_CAP,
-        feed: None,
-        tree: None,
-    }
+    NodeCall::stamps()
 }
 
 /// `selectBestBatch(size)` over `/stamps`' answer: the batch, or what the
@@ -555,6 +552,10 @@ fn soc_reference(body: &[u8]) -> Result<Result<JsString, String>, ReadError> {
 /// A history row's fields, as the handler passes them to `addEntry` or
 /// `updateEntry`.
 pub(crate) fn row(fields: &[(&str, JsValue)]) -> JsValue {
+    row_fields(fields)
+}
+
+fn row_fields(fields: &[(&str, JsValue)]) -> JsValue {
     let mut out = object();
     for (key, value) in fields {
         out.set(*key, value.clone());
@@ -567,11 +568,12 @@ pub(crate) fn s(value: &str) -> JsValue {
     text(value)
 }
 
-/// `addEntry(entry)`: the insert, answered with its rowid.
+/// `addEntry(entry)`: the insert, answered with its rowid; the bound
+/// follows ([`inserted`]).
 pub(crate) fn add_row<W: World>(cx: &mut Cx<'_, W>, entry: &JsValue) -> Result<AskId, Failure> {
     let statement =
         history::add_entry(entry, cx.world.now()).map_err(|t| Failure::internal(t.message))?;
-    Ok(cx.write(StoreWrite::HistoryAdd(statement)))
+    Ok(cx.write(StoreWrite::HistoryInsert(statement)))
 }
 
 /// `updateEntry(id, updates)`.
@@ -598,13 +600,48 @@ pub(crate) fn failed_row(fail: &Fail) -> JsValue {
     ])
 }
 
-/// The rowid an insert answered.
-pub(crate) fn row_added(event: Event) -> Result<i64, Failure> {
+/// The rowid an insert answered, and the bound after it, which keeps the
+/// new row (`history::trim(Some(rowid))`).
+pub(crate) fn inserted<W: World>(cx: &mut Cx<'_, W>, event: Event) -> Result<(i64, AskId), Failure> {
     match event {
-        Event::RowAdded(Ok(id)) => Ok(id),
-        Event::RowAdded(Err(text)) => Err(Failure::internal(text)),
+        Event::Inserted(Ok(id)) => {
+            let trim = cx.write(StoreWrite::History(vec![history::trim(Some(id))]));
+            Ok((id, trim))
+        }
+        Event::Inserted(Err(text)) => Err(Failure::internal(text)),
         _ => Err(Failure::internal_error()),
     }
+}
+
+/// What a write still writes when the request ends without its machine
+/// (a cancel, the deadline, `busy`, a protocol error): its row `failed`,
+/// with the request's end as its text, unless the row's last update is
+/// already asked.
+pub(crate) fn closing(
+    row: Option<i64>,
+    closed: bool,
+    outcome: &Outcome,
+    now: u64,
+) -> Option<StoreWrite> {
+    let row = row.filter(|_| !closed)?;
+    let text = match outcome {
+        Outcome::Result(_) => return None,
+        Outcome::Error(failure) => failure.message.clone(),
+        Outcome::Cancelled => JsString::from("cancelled"),
+        Outcome::Protocol(_) => Failure::internal_error().message,
+    };
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "better-sqlite3 answers lastInsertRowid as a JavaScript number"
+    )]
+    let id = JsValue::Number(row as f64);
+    let updates = row_fields(&[
+        ("status", s("failed")),
+        ("errorMessage", JsValue::String(text)),
+    ]);
+    history::update_entry(&id, &updates, now)
+        .ok()
+        .map(|statement| StoreWrite::History(vec![statement]))
 }
 
 /// A store write's answer.

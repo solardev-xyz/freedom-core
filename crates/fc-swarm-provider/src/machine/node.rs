@@ -19,10 +19,6 @@ pub const JSON_REPLY_CAP: usize = 64 * KIB;
 pub const CHARGE_FLOOR: usize = 512 * KIB;
 /// The serialized reply's room beside its body.
 const ENVELOPE: usize = 16 * KIB;
-/// What an upload reserves when it starts, beside its reply's charge: one
-/// incoming and one outgoing window, the chunker's leaf buffer and its
-/// references, and a tar header (design 0015, Bounds: "about 300 KiB").
-pub const UPLOAD_STATE: usize = 300 * KIB;
 
 /// Reply headers: at most this many, names and values and the reason
 /// phrase within their bounds (design 0015, `shell.swarm_api`).
@@ -187,6 +183,29 @@ pub enum Body {
     Stream { bytes: u64 },
 }
 
+/// The most bytes of an inline (`{ base64 }`) body.
+pub const INLINE_BODY: usize = 64 * KIB;
+
+/// The core's answer to main's `swarm.body`, one part at a time (design
+/// 0015, "Streams"): the head with the body's length, data frames of 1 to
+/// [`MAX_FRAME`] bytes within main's window, and one terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BodyOut {
+    Head { bytes: u64 },
+    Data(Vec<u8>),
+    End,
+    Abort(BodyAbort),
+}
+
+/// How the core ends a body short (design 0015, "Streams"): main's call
+/// went, a core failure, or a part it was copying failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyAbort {
+    Cancelled,
+    Internal,
+    BodyStreamError,
+}
+
 /// One `shell.swarm_api` call: `{ for, form, method, path, query, headers,
 /// body, max_bytes, stream, feed?, tree? }` without `for`, which is the
 /// request's own. `headers` are the row's; main adds bee-js's `accept`
@@ -269,6 +288,37 @@ impl NodeCall {
             format!("/feeds/{}/{}", hex(owner), hex(topic)),
             max_bytes,
         )
+    }
+
+    /// `GET /stamps`, whole, at most 1 MiB.
+    pub fn stamps() -> NodeCall {
+        NodeCall::get(Form::Stamps, "/stamps".to_owned(), STAMPS_REPLY_CAP)
+    }
+
+    /// `GET /tags/<uid>`, whole.
+    pub fn tag(uid: u64) -> NodeCall {
+        NodeCall::get(Form::Tag, format!("/tags/{uid}"), JSON_REPLY_CAP)
+    }
+
+    /// An upload, `POST <path>` with its form's headers and `body`; its
+    /// result is whole JSON of at most 64 KiB.
+    pub fn upload(
+        form: Form,
+        path: &str,
+        query: Vec<(String, String)>,
+        headers: Vec<(String, String)>,
+        body: Body,
+    ) -> NodeCall {
+        NodeCall {
+            form,
+            path: path.to_owned(),
+            query,
+            headers,
+            body: Some(body),
+            max_bytes: JSON_REPLY_CAP,
+            feed: None,
+            tree: None,
+        }
     }
 
     /// Its HTTP method.
