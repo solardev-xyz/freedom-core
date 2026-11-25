@@ -55,6 +55,9 @@ pub enum Received {
     /// `1e400`, which `JSON.parse` reads as Infinity.
     Infinity,
     NegInfinity,
+    /// A coerced number that isn't one (`z.coerce.number()` over text that
+    /// `Number()` reads as `NaN`).
+    NaN,
 }
 
 impl Received {
@@ -69,17 +72,20 @@ impl Received {
             Self::Object => "object",
             Self::Infinity => "Infinity",
             Self::NegInfinity => "-Infinity",
+            Self::NaN => "NaN",
         }
     }
 
     /// zod's `received` key, which only a non-finite number has.
     fn key(self) -> Option<&'static str> {
-        matches!(self, Self::Infinity | Self::NegInfinity).then(|| self.name())
+        matches!(self, Self::Infinity | Self::NegInfinity | Self::NaN).then(|| self.name())
     }
 
-    /// A number's kind: finite, or which infinity.
+    /// A number's kind: finite, `NaN`, or which infinity.
     pub fn of_number(n: f64) -> Self {
-        if n == f64::INFINITY {
+        if n.is_nan() {
+            Self::NaN
+        } else if n == f64::INFINITY {
             Self::Infinity
         } else if n == f64::NEG_INFINITY {
             Self::NegInfinity
@@ -253,9 +259,40 @@ impl Issues {
     }
 }
 
+/// zod 4's refusal of a number below an inclusive `minimum` at the
+/// schema's root (`z.number().min(minimum)`): one `too_small` issue, as
+/// the `ZodError`'s message writes it.
+pub fn too_small_number(minimum: f64) -> String {
+    let minimum = number_to_string(minimum);
+    format!(
+        "[\n  {{\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": {minimum},\n    \"inclusive\": true,\n    \"path\": [],\n    \"message\": \"Too small: expected number to be >={minimum}\"\n  }}\n]"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_coerced_number_reads_as_zods() {
+        // bee-js 13.2.0's `makeTagUid` (`z.coerce.number().min(0)`) over
+        // `abc` and `-1`, as the reference's install throws them.
+        let mut issues = Issues::new();
+        issues
+            .push(
+                Issue::new(Expected::Number, Received::of_number(f64::NAN), &[]),
+                usize::MAX,
+            )
+            .unwrap();
+        assert_eq!(
+            issues.message(),
+            "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"received\": \"NaN\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected number, received NaN\"\n  }\n]"
+        );
+        assert_eq!(
+            too_small_number(0.0),
+            "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": 0,\n    \"inclusive\": true,\n    \"path\": [],\n    \"message\": \"Too small: expected number to be >=0\"\n  }\n]"
+        );
+    }
 
     #[test]
     fn message_is_zods() {

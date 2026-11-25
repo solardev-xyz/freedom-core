@@ -453,7 +453,7 @@ node ◀──POST (transport)─────┤◀───────swarm.bo
 
 `writeSingleOwnerChunk` keeps today's order: the params, the feed grant, #89's refusal, SW-1, the vault, the readiness check, then the signature, the batch and the upload.
 - **The check** stays in today's place, with today's cases and errors.
-- **The re-check:** in today's order the vault and the readiness check come between the check and the signature, and either can take seconds. So the swarm thread runs SW-1 again, with the feed-grant check, in the step that hands the signature to the vault. If either fails now, the request ends with the error that check gives, and nothing is signed.
+- **The re-check:** in today's order the vault and the readiness check come between the check and the signature, and either can take seconds. So the swarm thread runs SW-1 again, with the feed-grant check, the name's binding and the document's key, in the step that hands the signature to the vault. If any fails now, the request ends with the error that check gives, and nothing is signed. Custody and the rule are checked again before the upload, with the rest of the guard in the reference's order, as the reference does (`write-feed-rule-custody-before-write` records it signing after custody changed and refusing at the upload). "The vault" is an ask for the key's owner; a locked vault gives the reference's text for each key mode, and a switch to another exclusive identity before the signature asks for the new key's owner and checks again.
 - **The hold:** from that re-check until the vault answers, the swarm thread defers every store change that could change the re-check's answer:
   - another site's identity taking the publisher index (a set with an explicit index, which the store's API keeps for parity and no method calls today);
   - a change of the site's active identity (activate, or create or ensure with `activate`);
@@ -467,7 +467,7 @@ node ◀──POST (transport)─────┤◀───────swarm.bo
 
 **The interleaving gate:** SWM-3 on the machine, which is sans-I/O so every interleaving is a fixed script, and SWM-4 again through the pipe, with the swarm thread's pause points as test hooks. The vault counts signatures and the node counts `POST /soc`. Each case is deterministic:
 - **The change wins:** pause a raw SOC after its first SW-1 check; another site takes its index; resume. 4100 `shared_identity`, no signature, no upload. The same for a switch of the site's active identity to a shared one, and for a revoke of the grant (today's no-grant error).
-- **The change waits:** pause after the re-check, with the vault's answer held back. The other site's change doesn't complete and writes nothing. Release the vault: the SOC is uploaded, then the change applies, and the site's next raw SOC is refused.
+- **The change waits:** pause after the re-check, with the vault's answer held back. The other site's change doesn't complete and writes nothing. Release the vault: every held change applies as the signature ends the hold, before the SOC's batch read and upload. An index or identity change leaves the signed SOC to be uploaded, and the site's next raw SOC is refused; a held revoke makes the upload's guard refuse that SOC, as it refuses one signed just before a revoke.
 - **Cancel during the hold:** the deferred change completes at once, the late signature is dropped, and nothing is uploaded.
 - **A write failure during the hold:** the deferred change's write fails, so its caller gets the store's error, the store is unchanged, and the next raw SOC passes. Another store write that fails during the hold leaves the hold and the SOC as they were.
 - **Allocation:** with the counter at or below the held index, an allocation during the hold takes a fresh index and isn't deferred.
@@ -611,7 +611,7 @@ The core never parses a node's reply into a generic JSON value: a dense array of
 | Uploads streaming | 4 |
 | The swarm thread's memory for requests and bodies | 64 MiB, reserved before use ([above](#the-swarm-threads-memory)), apart from the stores |
 | Main's Swarm I/O pool | 64 MiB, reserved before the dial ([Main's Swarm I/O pool](#mains-swarm-io-pool)) |
-| `swarm-feeds.json` | 16 MiB; a write past it refused (`store_full`); a file past it at load is kept aside as one that doesn't parse |
+| `swarm-feeds.json` | 16 MiB; a write past it refused (`store_full`: -32603 `Swarm feed store is full`); a file past it at load is kept aside as one that doesn't parse |
 | `swarm-manifest-grants.json` | 1 MiB, the same way; a file past it at load is unreadable, and the `.bak` copy is read instead |
 | `publish-history.sqlite` | 10,000 rows, trimmed after each insert and at open: finished rows first, oldest first, then the oldest others, never the row just inserted (a clock set back would make it the oldest), so the table never holds more |
 | Mining | one lane; batches of 256 candidates; 16 jobs waiting per site and 256 in all, then `busy`; a stuck batch's watchdog at 1 s |
@@ -720,6 +720,19 @@ Once decided:
 - **0005:** *Main's pool*: `service-client.js` charges `shell.swarm_*` replies to the Swarm I/O pool, not the chain I/O pool.
 - **0002:** `swarm.sign_soc` loses `chrome` at SWM-4 and goes at SWM-9.
 - **0006:** its *Later designs* bullet for 4.6 points here.
+
+**2026-11-25, SWM-3's feed and SOC writes:** the coordinator's technical calls, proposed, which the user may veto. Building the feed and SOC writes, SW-1 and the interleaving gate (SWM-3 part 3c) against SWM-1's vectors found:
+- **The re-check before the signature** covers SW-1, the feed grant, the name's binding and the document's key; custody and the rule wait for the upload's guard, as in the reference (*SW-1 in the core*). It comes after the history row, whose insert is a wait. "The vault" is an ask for the key's owner.
+- **Every held change lands as the signature ends the hold,** before the SOC's batch read and upload: a revoke makes the upload's guard refuse that SOC; an index or identity change leaves the signed SOC to be uploaded, and refuses the site's next one (*The change waits*).
+- **One write to a topic at a time:** a request holds its topic's turn until it ends; the queue of waiting requests is SWM-4's.
+- **SWM-4 must apply feed-store writes in order:** each finishes before the swarm thread takes the next store change, which the hold relies on.
+- **A full feed store** is -32603 `Swarm feed store is full` (`store_full`, *Budgets*).
+- **A streamed body's chunk tree is hashed on the swarm thread** as each 64 KiB frame passes, not on 0009's hashing pool: about 16 leaves a frame, so no frame holds the thread long.
+- **The 10 MiB feed-entry bound** applies after the data's type check, where #1233 puts it.
+- **`bytes_up`'s `swarm-tag`** is read as bee-js reads it, so a malformed one fails the write with bee-js's text.
+- **`write-soc-no-page`** stays out of the core's cases: the reference's no-page path, which a `swarm.request` (always a page's) can't take.
+- **Vector marks fixed:** `write-feed-explicit-index-timeout` is the page's timer (`deadlines`), and both `no-feed-grant` cases carry `index-probe`, as their lookup's request does.
+- **`getEthereumWalletIdentityReferences`'s ICU order** isn't reached by these five methods; it stays open for `swarm.identities` (SWM-4).
 
 **2026-11-25, SWM-3's publish:** the coordinator's technical calls, proposed, which the user may veto. Building the Publish machines (SWM-3 part 3b) against SWM-1's vectors found:
 - **A node that stops after the readiness answer** reaches the core as `failed: stopped`, answered with the reference's `Swarm node is not ready`; `publish-data-node-stopped-after-ready` pins it, its history row failed with that text.

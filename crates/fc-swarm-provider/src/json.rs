@@ -80,6 +80,13 @@ impl<'a> Reader<'a> {
         self.depth
     }
 
+    /// The byte the reader is at: a value's text runs from where the reader
+    /// was before its [`Reader::token`] to where it is after its
+    /// [`Reader::skip`].
+    pub fn position(&self) -> usize {
+        self.i
+    }
+
     fn peek(&self) -> Option<u8> {
         self.s.get(self.i).copied()
     }

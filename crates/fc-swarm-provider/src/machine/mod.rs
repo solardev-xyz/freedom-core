@@ -17,9 +17,11 @@
 //!   with what it costs the swarm thread's memory, which the thread
 //!   reserves before the call goes), work for the hashing pool, a payload
 //!   part (`shell.swarm_part`), a streaming upload's turn, a store write
-//!   (0013's durable write, or the history's statements), and, for the
-//!   pieces to come, a signature (the vault, with SW-1's hold) and a GSOC
-//!   search (the mining lane). A node call whose body streams is answered
+//!   (0013's durable write, or the history's statements; a feed-store
+//!   change through SW-1's [`keeper`]), a key's owner and a signature (the
+//!   vault, the signature with SW-1's hold), a topic's turn among the
+//!   writes to it, and, for the piece to come, a GSOC search (the mining
+//!   lane). A node call whose body streams is answered
 //!   with main's `swarm.body` and its credit too, and the request writes
 //!   that body ([`Effect::Body`]).
 //! - **A request that ends without its machine** (a cancel, its deadline,
@@ -42,6 +44,7 @@ use std::collections::BTreeMap;
 
 use fc_json::JsString;
 
+pub mod keeper;
 pub mod node;
 pub mod page;
 pub(crate) mod params;
@@ -55,6 +58,7 @@ pub use page::Failure;
 use crate::budgets::{self, ReadBudgets};
 use crate::errors::INVALID_PARAMS;
 use crate::methods;
+use crate::stores::feeds::FeedChange;
 use crate::stores::history::Statement;
 pub use crate::stores::manifests::Capability;
 pub use crate::stores::manifests::Reads;
@@ -203,6 +207,14 @@ pub enum Need {
     Write(StoreWrite),
     /// A GSOC signer search on the mining lane (the Messaging piece).
     Mine(MineJob),
+    /// The vault: a signing key's owner address (swarm-signer.js's
+    /// `resolveSwarmSigner`), which needs the unlocked vault. Answered
+    /// [`Event::Owner`].
+    Owner(SignKey),
+    /// Writes to one topic go one at a time (feed-service.js's
+    /// `withWriteLock`): answered [`Event::Locked`] once no other request
+    /// holds `topic`, which this request then holds until it ends.
+    Lock([u8; 32]),
 }
 
 /// What the vault signs: a SOC over `span ‖ payload` with `identifier`,
@@ -216,6 +228,24 @@ pub struct SignSoc {
     pub span: u64,
     pub payload: Vec<u8>,
     pub hold: Option<JsString>,
+    /// What the SOC is, the authorization's `soc` (0012, "A page's SOC").
+    pub kind: SocKind,
+}
+
+/// A page's SOC: a feed write's update, or a raw single-owner chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocKind {
+    Feed,
+    Raw,
+}
+
+impl SocKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SocKind::Feed => "feed",
+            SocKind::Raw => "raw",
+        }
+    }
 }
 
 /// A signing key reference (design 0002): never key bytes.
@@ -229,8 +259,10 @@ pub enum SignKey {
 /// and its answer is dropped if the machine no longer waits for it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StoreWrite {
-    /// `swarm-feeds.json`'s text.
-    Feeds(String),
+    /// A change to `swarm-feeds.json`, made through SW-1's keeper
+    /// ([`keeper::Keeper::change`]) and written durably before it is
+    /// answered.
+    Feeds(FeedChange),
     /// `publish-history.sqlite`'s statements, in order.
     History(Vec<Statement>),
     /// One `INSERT` into `publish-history.sqlite`, answered with the new
@@ -311,6 +343,11 @@ pub enum Event {
     BodyCredit(usize),
     /// The mining lane's answer.
     Mined(Mined),
+    /// The vault's answer to [`Need::Owner`]: the owner, `None` while the
+    /// vault is locked, or the vault's failure.
+    Owner(Result<Option<[u8; 20]>, JsString>),
+    /// The topic is this request's ([`Need::Lock`]).
+    Locked,
 }
 
 /// A SOC signature.
@@ -370,8 +407,9 @@ pub enum Protocol {
     PartLength,
 }
 
-/// A method the later pieces bring (feed and SOC writes, Messaging): the
-/// machines so far answer Access, the Reads and the Publish group.
+/// A method the later piece brings (Messaging): the machines so far
+/// answer Access, the Reads, the Publish group, and the feed and SOC
+/// writes.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0} has no machine yet")]
 pub struct NotBuilt(pub String);
@@ -416,6 +454,8 @@ enum Kind {
     Insert,
     Turn,
     Mine,
+    Owner,
+    Lock,
 }
 
 #[derive(Debug)]
@@ -461,6 +501,8 @@ impl Asks {
             Need::Write(_) => Kind::Write,
             Need::Upload => Kind::Turn,
             Need::Mine(_) => Kind::Mine,
+            Need::Owner(_) => Kind::Owner,
+            Need::Lock(_) => Kind::Lock,
         };
         self.open.insert(
             id,
@@ -609,7 +651,9 @@ impl Asks {
             | (Kind::Write, Event::Written(_))
             | (Kind::Insert, Event::Inserted(_))
             | (Kind::Turn, Event::Turn)
-            | (Kind::Mine, Event::Mined(_)) => true,
+            | (Kind::Mine, Event::Mined(_))
+            | (Kind::Owner, Event::Owner(_))
+            | (Kind::Lock, Event::Locked) => true,
             _ => return Err(Protocol::WrongKind),
         };
         let cancelled = open.cancelled;
@@ -751,6 +795,21 @@ impl<W: World> Cx<'_, W> {
     pub fn agent(&self) -> bool {
         self.world.agent(self.origin)
     }
+
+    /// The vault: a key's owner.
+    pub fn owner(&mut self, key: SignKey) -> AskId {
+        self.asks.push(Need::Owner(key), 0)
+    }
+
+    /// The topic's turn among the writes to it.
+    pub fn lock(&mut self, topic: [u8; 32]) -> AskId {
+        self.asks.push(Need::Lock(topic), 0)
+    }
+
+    /// A signature from the vault.
+    pub fn sign(&mut self, soc: SignSoc) -> AskId {
+        self.asks.push(Need::Sign(soc), 0)
+    }
 }
 
 /// The request's method, running.
@@ -762,6 +821,10 @@ enum Running {
     ReadFeed(methods::feed_read::ReadFeed),
     Publish(Box<methods::publish::Publish>),
     UploadStatus(methods::upload_status::UploadStatus),
+    Signing(methods::signing::Signing),
+    CreateFeed(methods::create_feed::CreateFeed),
+    FeedWrite(Box<methods::feed_write::FeedWrite>),
+    SocWrite(methods::soc_write::SocWrite),
 }
 
 impl Running {
@@ -772,6 +835,7 @@ impl Running {
     fn end(&mut self, outcome: &Outcome) -> Option<Effect> {
         match self {
             Running::Publish(m) => m.end(outcome),
+            Running::FeedWrite(m) => m.terminal(outcome),
             _ => None,
         }
     }
@@ -783,6 +847,9 @@ impl Running {
     fn closing(&self, outcome: &Outcome) -> Option<Closing> {
         match self {
             Running::Publish(m) => m.closing(outcome),
+            Running::CreateFeed(m) => m.closing(outcome),
+            Running::FeedWrite(m) => m.closing(outcome),
+            Running::SocWrite(m) => m.closing(outcome),
             _ => None,
         }
     }
@@ -790,13 +857,6 @@ impl Running {
 
 /// A method's last write after the request's outcome.
 pub(crate) enum Closing {
-    /// The write, now, with no retry: a store's write other than a history
-    /// row's end (which is [`Closing::Row`]).
-    #[allow(
-        dead_code,
-        reason = "the feed and SOC writes' closing writes (part 3c)"
-    )]
-    Write(StoreWrite),
     /// The history insert `id` is in flight: its rowid is awaited, then
     /// the row is trimmed around and ended `failed` with `text`, at `now`.
     AfterInsert(AfterInsert),
@@ -897,6 +957,7 @@ impl Request {
         };
         let params = &call.params;
         use methods::{access, chunk_reads, feed_read, publish, read_data, upload_status};
+        use methods::{create_feed, feed_write, signing, soc_write};
         let started = match method.as_str() {
             "swarm_requestAccess" => Err(access::request_access(&mut cx)),
             "swarm_getCapabilities" => {
@@ -919,6 +980,18 @@ impl Request {
             }
             "swarm_getUploadStatus" => {
                 upload_status::UploadStatus::start(&mut cx, params).map(Running::UploadStatus)
+            }
+            "swarm_getSigningIdentity" => {
+                signing::Signing::start(&mut cx, call.approval).map(Running::Signing)
+            }
+            "swarm_createFeed" => create_feed::CreateFeed::start(&mut cx, params, call.approval)
+                .map(Running::CreateFeed),
+            "swarm_updateFeed" => feed_write::FeedWrite::update(&mut cx, params, call.approval)
+                .map(|m| Running::FeedWrite(Box::new(m))),
+            "swarm_writeFeedEntry" => feed_write::FeedWrite::entry(&mut cx, params, call.approval)
+                .map(|m| Running::FeedWrite(Box::new(m))),
+            "swarm_writeSingleOwnerChunk" => {
+                soc_write::SocWrite::start(&mut cx, params, call.approval).map(Running::SocWrite)
             }
             other => return Err(NotBuilt(other.to_owned())),
         };
@@ -976,6 +1049,10 @@ impl Request {
             Running::ReadFeed(m) => m.on(&mut cx, id, event),
             Running::Publish(m) => m.on(&mut cx, id, event),
             Running::UploadStatus(m) => m.on(&mut cx, id, event),
+            Running::Signing(m) => m.on(&mut cx, id, event),
+            Running::CreateFeed(m) => m.on(&mut cx, id, event),
+            Running::FeedWrite(m) => m.on(&mut cx, id, event),
+            Running::SocWrite(m) => m.on(&mut cx, id, event),
         };
         if let Step::Done(outcome) = step {
             self.finish(outcome);
@@ -1005,11 +1082,6 @@ impl Request {
         }
         self.asks.cancel_all();
         match running.and_then(|m| m.closing(&outcome)) {
-            // The one ask after the outcome: a write isn't called back, and
-            // its answer is dropped.
-            Some(Closing::Write(write)) => {
-                self.asks.push(Need::Write(write), 0);
-            }
             Some(Closing::AfterInsert(after)) => self.after = Some(After::Insert(after)),
             Some(Closing::Row(end)) => self.end_row(end, false),
             Some(Closing::InFlight(write)) => {
@@ -1423,8 +1495,8 @@ mod tests {
             )))
         );
         assert_eq!(
-            Request::start(&call("swarm_createFeed", Value::Undefined), &mut w).err(),
-            Some(NotBuilt("swarm_createFeed".into()))
+            Request::start(&call("swarm_sendPss", Value::Undefined), &mut w).err(),
+            Some(NotBuilt("swarm_sendPss".into()))
         );
     }
 }

@@ -14,11 +14,16 @@ use crate::value::Value;
 pub mod access;
 mod body;
 pub mod chunk_reads;
+pub mod create_feed;
 pub mod feed_index;
 pub mod feed_read;
+pub mod feed_write;
 pub mod publish;
 pub mod read_data;
+pub mod signing;
+pub mod soc_write;
 pub mod upload_status;
+pub(crate) mod writes;
 
 /// `getPermission(origin)`, which every method but Access and the Reads
 /// needs first: `notConnected()`.

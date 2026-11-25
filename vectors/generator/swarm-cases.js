@@ -737,13 +737,14 @@ function methodCases(env) {
   const uf = (id, params, over = {}) => add({ id: `update-feed-${id}`, method: 'swarm_updateFeed', params, feeds: storeBee(blogBee),
     node: { stamps: STAMPS.usable, latest: [{ key: 'bee', topic: blogTopicStr, reply: { status: 404, json: { code: 404, message: 'Not Found' } } }],
       probes: [{ key: 'bee', topic: blogTopicStr, targets: [] }] }, ...over });
+  const indexDeviation = { id: 'index-probe', core: 'feed_head with swarm-only-root-chunk instead of the whole latest payload; the same index' };
   uf('params-null', () => null);
   uf('feed-id-missing', () => ({ reference: 5 }));
   uf('feed-id-number', () => ({ feedId: 5, reference: 5 }));
   uf('reference-missing', () => ({ feedId: 'blog' }));
   uf('reference-0x', () => ({ feedId: 'blog', reference: `0x${REF}` }), { feeds: storeBee(blogBee, false) });
   uf('reference-128', () => ({ feedId: 'blog', reference: REF.repeat(2) }), { feeds: storeBee(blogBee, false) });
-  uf('no-feed-grant', () => ({ feedId: 'blog', reference: REF }), { feeds: storeBee(blogBee, false) });
+  uf('no-feed-grant', () => ({ feedId: 'blog', reference: REF }), { feeds: storeBee(blogBee, false), deviation: indexDeviation });
   uf('feed-not-found', () => ({ feedId: 'news', reference: REF }), { readiness: { ok: false, reason: 'node-stopped' } });
   uf('feed-id-invalid-name', () => ({ feedId: 'a/b', reference: REF }));
   uf('ethereum-wallet-feed', () => ({ feedId: 'blog', reference: REF }), {
@@ -755,7 +756,6 @@ function methodCases(env) {
   const head = (h, extra = {}) => ({ stamps: STAMPS.usable,
     latest: [{ key: 'bee', topic: blogTopicStr, reply: { status: 404, json: { code: 404, message: 'Not Found' } } }],
     probes: [{ key: 'bee', topic: blogTopicStr, targets: h === null ? [] : [h], head: h }], ...extra });
-  const indexDeviation = { id: 'index-probe', core: 'feed_head with swarm-only-root-chunk instead of the whole latest payload; the same index' };
   for (const h of [null, 0, 1, 2, 3, 7, 8, 1023, 1024]) {
     uf(`head-${h === null ? 'none' : h}`, () => ({ feedId: 'blog', reference: REF }), { node: head(h), deviation: indexDeviation });
   }
@@ -797,7 +797,7 @@ function methodCases(env) {
   for (const [id, index] of [['index-negative', -1], ['index-fraction', 0.5], ['index-string', '1'], ['index-bigint', 1n], ['index-nan', NaN]]) {
     wf(id, () => ({ name: 'blog', data: 'x', index }), { feeds: storeBee(blogBee, false), deviation: undefined });
   }
-  wf('no-feed-grant', () => ({ name: 'blog', data: 'x' }), { feeds: storeBee(blogBee, false), deviation: undefined });
+  wf('no-feed-grant', () => ({ name: 'blog', data: 'x' }), { feeds: storeBee(blogBee, false) });
   wf('feed-not-found', () => ({ name: 'news', data: 'x' }), { readiness: { ok: false, reason: 'node-stopped' }, deviation: undefined });
   wf('ethereum-wallet-feed', () => ({ name: 'blog', data: 'x' }), {
     feeds: feedStore({ [ORIGIN]: originEntry(bee, { identities: [bee, eth], feeds: { blog: feedRecord(ORIGIN, 'blog', eth.id, 'bee') } }) }),
@@ -859,7 +859,7 @@ function methodCases(env) {
   // signal aborts it.
   wf('explicit-index-timeout', () => ({ name: 'blog', data: 'x', index: 3 }), { node: { stamps: STAMPS.usable, rules: [
     { match: { prefix: '/chunks/' }, reply: { abortPage: true, delayMs: 300, status: 404, json: { code: 404, message: 'Not Found' } } },
-  ] }, deviation: undefined });
+  ] }, deviation: { id: 'deadlines', core: 'cancelled at the page\'s timer: the core answers cancelled and nothing more is sent' } });
   wf('explicit-index-4097', () => ({ name: 'blog', data: bytes('write-feed/4097', 4097), index: 9 }), { node: { stamps: STAMPS.usable },
     deviation: { id: 'feed-wrap-root', core: 'the SOC wraps the core\'s own root, with no GET /chunks' } });
   wf('app-scoped', () => ({ name: 'blog', data: 'x' }), { feeds: storeApp(blogApp), node: { stamps: STAMPS.usable,

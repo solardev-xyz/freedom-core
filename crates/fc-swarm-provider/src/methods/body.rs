@@ -9,6 +9,7 @@
 
 use std::collections::VecDeque;
 
+use fc_swarm::chunker::{Chunker, Root};
 use fc_swarm::tar::TarWriter;
 
 use crate::machine::node::{BodyAbort, BodyOut, MAX_FRAME, WINDOW};
@@ -84,12 +85,31 @@ pub(crate) struct BodyWriter {
     /// Bytes ready to go, each with the part they came from.
     pending: VecDeque<(Vec<u8>, Option<AskId>)>,
     copy: Option<Copy>,
+    /// The chunk tree of what went out, for a body whose root the core
+    /// checks (a feed entry over one chunk: deviations `feed-wrap-root`,
+    /// `reference-check`), and its root once the body ended.
+    hash: Option<Chunker>,
+    root: Option<Root>,
 }
 
 impl BodyWriter {
     /// One file's bytes, from `piece`.
     pub(crate) fn file(piece: Piece) -> BodyWriter {
         BodyWriter::new(piece.len(), None, VecDeque::from([Next::Piece(piece)]))
+    }
+
+    /// One file's bytes, from `piece`, hashed as they go out: its chunk
+    /// tree's root once the body ended ([`BodyWriter::root`]).
+    pub(crate) fn hashed(piece: Piece) -> BodyWriter {
+        let mut writer = BodyWriter::file(piece);
+        writer.hash = Some(Chunker::new());
+        writer
+    }
+
+    /// The root of what went out, for a [`BodyWriter::hashed`] body that
+    /// ended.
+    pub(crate) fn root(&self) -> Option<&Root> {
+        self.root.as_ref()
     }
 
     /// A tar of `entries` (path, bytes) as page-upload.js writes it, each
@@ -131,6 +151,8 @@ impl BodyWriter {
             queue,
             pending: VecDeque::new(),
             copy: None,
+            hash: None,
+            root: None,
         }
     }
 
@@ -248,6 +270,11 @@ impl BodyWriter {
                 }
                 self.window -= n as u64;
                 self.sent += n as u64;
+                if let Some(chunker) = self.hash.as_mut() {
+                    chunker
+                        .write(&frame, &mut |_| {})
+                        .map_err(|_| Fault::Internal)?;
+                }
                 cx.body(self.call, BodyOut::Data(frame));
                 if let Some(part) = from {
                     // What went out comes in.
@@ -270,6 +297,7 @@ impl BodyWriter {
                         return Err(Fault::Internal);
                     }
                     self.ended = true;
+                    self.root = self.hash.take().map(|chunker| chunker.finish(&mut |_| {}));
                     cx.body(self.call, BodyOut::End);
                     return Ok(());
                 }

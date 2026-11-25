@@ -524,6 +524,7 @@
     },
     "index-probe": {
       "cases": [
+        "methods/update-feed-no-feed-grant",
         "methods/update-feed-head-none",
         "methods/update-feed-head-0",
         "methods/update-feed-head-1",
@@ -544,6 +545,7 @@
         "methods/update-feed-upper-case-reference",
         "methods/update-feed-auto-approval",
         "methods/update-feed-node-500",
+        "methods/write-feed-no-feed-grant",
         "methods/write-feed-rule",
         "methods/write-feed-rule-in-custody",
         "methods/write-feed-rule-custody-before-write",
@@ -564,8 +566,6 @@
         "methods/write-feed-wrap-root-missing",
         "methods/write-feed-bytes-upload-500",
         "methods/write-feed-soc-500",
-        "methods/update-feed-no-feed-grant",
-        "methods/write-feed-no-feed-grant",
         "methods/write-feed-10mib+1"
       ]
     },
@@ -592,7 +592,8 @@
     },
     "deadlines": {
       "cases": [
-        "methods/read-chunk-page-gives-up"
+        "methods/read-chunk-page-gives-up",
+        "methods/write-feed-explicit-index-timeout"
       ]
     },
     "busy": {
@@ -61019,6 +61020,7 @@
     },
     {
       "id": "update-feed-no-feed-grant",
+      "deviation": "index-probe",
       "origin": "https://app.example",
       "grants": {
         "https://app.example": {
@@ -61263,6 +61265,7 @@
           ]
         }
       ],
+      "core": "feed_head with swarm-only-root-chunk instead of the whole latest payload; the same index",
       "after": {
         "feeds": "{\n  \"version\": 2,\n  \"nextPublisherKeyIndex\": 0,\n  \"origins\": {\n    \"https://app.example\": {\n      \"activeIdentityId\": \"bee-wallet\",\n      \"identities\": {\n        \"bee-wallet\": {\n          \"id\": \"bee-wallet\",\n          \"mode\": \"bee-wallet\",\n          \"publisherKeyIndex\": null,\n          \"walletIndex\": null,\n          \"label\": \"Bee wallet identity\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": 1767225600123\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": {\n        \"blog\": {\n          \"topic\": \"2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4\",\n          \"owner\": \"0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0\",\n          \"manifestReference\": \"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\n          \"identityId\": \"bee-wallet\",\n          \"createdAt\": 1767225560123,\n          \"lastUpdated\": 1767225600123,\n          \"lastReference\": \"efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef\"\n        }\n      }\n    }\n  }\n}",
         "history": [
@@ -72646,6 +72649,7 @@
     },
     {
       "id": "write-feed-no-feed-grant",
+      "deviation": "index-probe",
       "origin": "https://app.example",
       "grants": {
         "https://app.example": {
@@ -72889,6 +72893,7 @@
           ]
         }
       ],
+      "core": "feed_head with swarm-only-root-chunk instead of the whole latest payload; the same index",
       "after": {
         "feeds": "{\n  \"version\": 2,\n  \"nextPublisherKeyIndex\": 0,\n  \"origins\": {\n    \"https://app.example\": {\n      \"activeIdentityId\": \"bee-wallet\",\n      \"identities\": {\n        \"bee-wallet\": {\n          \"id\": \"bee-wallet\",\n          \"mode\": \"bee-wallet\",\n          \"publisherKeyIndex\": null,\n          \"walletIndex\": null,\n          \"label\": \"Bee wallet identity\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": 1767225600123\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": {\n        \"blog\": {\n          \"topic\": \"2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4\",\n          \"owner\": \"0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0\",\n          \"manifestReference\": \"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\n          \"identityId\": \"bee-wallet\",\n          \"createdAt\": 1767225560123,\n          \"lastUpdated\": null,\n          \"lastReference\": null\n        }\n      }\n    }\n  }\n}",
         "history": [
@@ -80882,6 +80887,7 @@
     },
     {
       "id": "write-feed-explicit-index-timeout",
+      "deviation": "deadlines",
       "origin": "https://app.example",
       "grants": {
         "https://app.example": {
@@ -81055,6 +81061,7 @@
           ]
         }
       ],
+      "core": "cancelled at the page's timer: the core answers cancelled and nothing more is sent",
       "after": {
         "feeds": "{\n  \"version\": 2,\n  \"nextPublisherKeyIndex\": 0,\n  \"origins\": {\n    \"https://app.example\": {\n      \"activeIdentityId\": \"bee-wallet\",\n      \"identities\": {\n        \"bee-wallet\": {\n          \"id\": \"bee-wallet\",\n          \"mode\": \"bee-wallet\",\n          \"publisherKeyIndex\": null,\n          \"walletIndex\": null,\n          \"label\": \"Bee wallet identity\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": 1767225600123\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": {\n        \"blog\": {\n          \"topic\": \"2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4\",\n          \"owner\": \"0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0\",\n          \"manifestReference\": \"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\n          \"identityId\": \"bee-wallet\",\n          \"createdAt\": 1767225560123,\n          \"lastUpdated\": null,\n          \"lastReference\": null\n        }\n      }\n    }\n  }\n}",
         "history": [

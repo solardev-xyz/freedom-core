@@ -60,6 +60,29 @@
 //!   the core with credit on a part only for what went out, and the row's
 //!   update when a request ends without its machine.
 //!
+//! The third part's last piece (SWM-3, part 3c) adds the feed and SOC
+//! writes, with SW-1 in the core:
+//!
+//! - **`createFeed`, `updateFeed`, `writeFeedEntry`** ([`methods::create_feed`],
+//!   [`methods::feed_write`]): the topic, the index and the identifier the
+//!   core computes; the key the site's own store names; the index lookup
+//!   (deviation `index-probe`) and an explicit index's check; one write to
+//!   a topic at a time; a feed entry over one chunk streamed to `/bytes`,
+//!   its root computed as it goes and checked against the node's
+//!   (deviations `feed-wrap-root`, `reference-check`); entries of at most
+//!   10 MiB (deviation `feed-entry-bound`).
+//! - **`writeSingleOwnerChunk`** ([`methods::soc_write`]): SW-1's check in
+//!   today's place, its re-check in the step that hands the signature to
+//!   the vault, and the signature asked under SW-1's hold.
+//! - **`getSigningIdentity`** ([`methods::signing`]).
+//! - **SW-1's keeper** ([`machine::keeper`]): every feed-store change, the
+//!   listed ones deferred while a hold stands, each kept only once written
+//!   (deviation `store-refusal`); allocation past every stored index
+//!   (deviation `index-allocation`).
+//! - **The framework's write asks** ([`machine`]): the vault's owner of a
+//!   key, a signature with its kind, the topic's turn, and a feed-store
+//!   change.
+//!
 //! The reference is freedom-browser's `src/main/swarm/` at the swarm
 //! reference commit over bee-js 13.2.0 and core-sdk 0.2.2;
 //! `vectors/swarm.json` is the contract (AGENTS rule 5). The crate does no
