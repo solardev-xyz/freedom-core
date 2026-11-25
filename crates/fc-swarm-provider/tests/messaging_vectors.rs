@@ -710,3 +710,408 @@ fn messaging_methods() {
     // Every honest scenario of the four rows.
     assert_eq!(scenarios_used.len(), 56);
 }
+
+// ---------------------------------------------------------------------------
+// The stamps, gsoc and errors cases messaging reaches.
+
+const KEY: &str = "https://app.example";
+const CLOCK: u64 = 1_767_225_600_123;
+const STAMPS: &str = r#"{"stamps":[{"batchID":"a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1","utilization":0,"usable":true,"label":"freedom","depth":22,"amount":"100000000000","bucketDepth":16,"blockNumber":1000,"immutableFlag":true,"exists":true,"batchTTL":864000}]}"#;
+const RECIPIENT: &str = "023263e186e68d31581a2ac1bec6ca730ba9b9e6b4a194dd78798a36271d0a4a0b";
+
+/// A connected site with the messaging grant, its node holding `stamps`
+/// and the case's `addresses`.
+fn site_thread(stamps: &str) -> Thread {
+    let key = JsString::from(KEY);
+    let mut world = TestWorld::new(CLOCK);
+    world.grants.insert(key.clone());
+    world.messaging.insert(key);
+    Thread {
+        world,
+        node: Node {
+            stamps: Some(stamps.as_bytes().to_vec()),
+            addresses: Some(
+                br#"{"overlay":"36b7efd913ca4cf880b8eeac5093fa27b0825906c600685b6abdd6566e6cfe8f","underlay":[],"ethereum":"0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0","publicKey":"039fd0991d0222b4e1339c1a1a5b5f6d9f6a96672a3247b638ee6156d9ea877a2f","pssPublicKey":"03c22c83fb49ab0ad897aa0c74e51311c95a3d1e1b27b2dedd7f42a7d2538c3a9e"}"#.to_vec(),
+            ),
+            ..Node::new()
+        },
+        readiness: Ok(()),
+        subscribe_check: None,
+        lane: Lane::new(),
+        step: 0,
+        ready: Vec::new(),
+        calls: Vec::new(),
+        mines: Vec::new(),
+        most_open: 0,
+        cancels_after_outcome: 0,
+    }
+}
+
+fn pss_call() -> Call {
+    Call {
+        method: Value::str("swarm_sendPss"),
+        params: Value::object([
+            ("topic", Value::str("chat")),
+            ("recipient", Value::str(RECIPIENT)),
+            ("targets", Value::str("abcd")),
+            ("data", Value::str("hi")),
+        ]),
+        key: JsString::from(KEY),
+        approval: Some(Approval::User),
+    }
+}
+
+fn gsoc_call(topic: &str) -> Call {
+    Call {
+        method: Value::str("swarm_sendGsoc"),
+        params: Value::object([("topic", Value::str(topic)), ("data", Value::str("hi"))]),
+        key: JsString::from(KEY),
+        approval: Some(Approval::User),
+    }
+}
+
+fn identity_call() -> Call {
+    Call {
+        method: Value::str("swarm_getMessagingIdentity"),
+        params: Value::Undefined,
+        key: JsString::from(KEY),
+        approval: None,
+    }
+}
+
+/// `stamps.select`'s `message-4096` cases, `selectBestBatch(4096, {
+/// allowFullMutable: true })`, through both sends' batch choice: one
+/// `/stamps` read, then the send under the chosen batch, or the send's
+/// error through `nodeWriteError`.
+#[test]
+fn a_messages_batch_allows_a_full_mutable_batch() {
+    let v = vectors();
+    let index = Index::new(&v.text).unwrap();
+    let mut played = 0;
+    for case in get(get(index.root(), "stamps"), "select").children() {
+        let id = string(get(case, "id"));
+        if !id.ends_with("/message-4096") {
+            continue;
+        }
+        assert_eq!(number(get(case, "size")), 4096.0, "{id}");
+        assert!(get(get(case, "options"), "allowFullMutable").kind() == Kind::True);
+        let stamps = get(case, "stamps").stringify(KeyOrder::Property);
+        for (call, send) in [
+            (pss_call(), Form::PssSend),
+            (gsoc_call("chat"), Form::SocUp),
+        ] {
+            let sid = format!("{id} via {}", call.method.as_js_string().unwrap().as_str());
+            let mut thread = site_thread(&stamps);
+            let outcome = thread.run(&call);
+            let forms: Vec<Form> = thread.calls.iter().map(|c| c.call.form).collect();
+            // One `/stamps` read, the core's where the reference made two.
+            assert_eq!(
+                forms.iter().filter(|f| **f == Form::Stamps).count(),
+                1,
+                "{sid}: stamps-one-read"
+            );
+            if let Some(error) = case.get("error") {
+                assert_eq!(forms, [Form::Stamps], "{sid}");
+                assert_eq!(
+                    outcome,
+                    Outcome::Error(fc_swarm_provider::machine::Failure::internal(js(get(
+                        error, "message"
+                    )))),
+                    "{sid}"
+                );
+            } else if get(case, "result").kind() == Kind::Null {
+                assert_eq!(forms, [Form::Stamps], "{sid}");
+                assert_eq!(
+                    outcome,
+                    Outcome::Error(fc_swarm_provider::machine::Failure {
+                        data: Some(Value::object([("reason", Value::str("no-usable-stamps"))])),
+                        ..fc_swarm_provider::machine::Failure::bare(
+                            4900,
+                            fc_swarm_provider::errors::NO_USABLE_BATCH_MESSAGE
+                        )
+                    }),
+                    "{sid}"
+                );
+            } else {
+                assert_eq!(forms, [Form::Stamps, send], "{sid}");
+                let header = thread.calls[1]
+                    .call
+                    .headers
+                    .iter()
+                    .find(|(k, _)| k == "swarm-postage-batch-id")
+                    .map(|(_, v)| v.clone());
+                assert_eq!(header, Some(string(get(case, "result"))), "{sid}");
+                assert!(matches!(outcome, Outcome::Result(_)), "{sid}");
+            }
+            played += 1;
+        }
+    }
+    assert_eq!(played, 2 * 11);
+}
+
+/// The `gsoc` section's searches through the mining lane, its batches of
+/// 256 run as the lane thread runs them: bee-js's signer (its index, key,
+/// owner and SOC address) or its failure, which a send answers with the
+/// miner's text.
+#[test]
+fn the_lane_mines_bee_js_signers() {
+    let v = vectors();
+    let index = Index::new(&v.text).unwrap();
+    let mut played = 0;
+    for case in get(index.root(), "gsoc").children() {
+        let id = string(get(case, "id"));
+        let job = MineJob {
+            target: unhex(&string(get(case, "target"))).try_into().unwrap(),
+            identifier: unhex(&string(get(case, "identifier"))).try_into().unwrap(),
+            proximity: number(get(case, "proximity")) as u32,
+        };
+        if let Some(topic) = case.get("topic") {
+            assert_eq!(job, gsoc_job_of(&js(topic)), "{id}: the frozen derivation");
+        }
+        let mut thread = site_thread(STAMPS);
+        let mined = thread.mined(&JsString::from(KEY), job, AskId(1));
+        match (case.get("result"), mined) {
+            (Some(result), Mined::Found(index)) => {
+                assert_eq!(f64::from(index), number(get(result, "index")), "{id}");
+                let key: [u8; 32] = unhex(&string(get(result, "key"))).try_into().unwrap();
+                let key = k256::ecdsa::SigningKey::from_slice(&key).unwrap();
+                let mut want = [0u8; 32];
+                want[24..].copy_from_slice(&(0xb33 + u64::from(index)).to_be_bytes());
+                assert_eq!(key.to_bytes().as_slice(), want, "{id}: the key");
+                let owner = fc_evm::address_of(&key);
+                assert!(get(result, "owner").is_str(&hex(&owner)), "{id}");
+                let address = fc_swarm::verify::soc_address(&job.identifier, &owner);
+                assert!(get(result, "address").is_str(&hex(&address)), "{id}");
+            }
+            (None, Mined::Exhausted) => {
+                let failure = fc_swarm_provider::methods::messaging::mined_failure(mined);
+                assert_eq!(
+                    failure.message.as_str(),
+                    format!("GSOC mining failed: {}", string(get(case, "error"))),
+                    "{id}"
+                );
+            }
+            (want, got) => panic!("{id}: {:?} against {got:?}", want.map(|w| w.raw())),
+        }
+        played += 1;
+    }
+    assert_eq!(played, 12);
+}
+
+/// A node error case's body.
+fn error_body(body: V<'_, '_>) -> Vec<u8> {
+    match body.get("data") {
+        Some(data) => data_of(data),
+        None => body
+            .get("base64")
+            .map_or_else(Vec::new, |b| b64(&string(b))),
+    }
+}
+
+/// `errors.http_error`'s bee-js cases at messaging's three node calls: the
+/// identity's `GET /addresses` (the provider's catch, -32603 with bee-js's
+/// text), `POST /pss/send` (`pssSendHttpError`, bee-js's wording, through
+/// `nodeWriteError`) and the GSOC SOC's `POST /soc` (bee-js's upload,
+/// through `nodeWriteError`). The page reads the case's message, the
+/// core's where `error-body-bound` cuts it.
+#[test]
+fn errors_at_messagings_node_calls() {
+    let v = vectors();
+    let index = Index::new(&v.text).unwrap();
+    let mut played = 0;
+    for case in get(index.root(), "errors").children() {
+        if !get(case, "kind").is_str("http_error") || !get(case, "site").is_str("bee-js-json") {
+            continue;
+        }
+        let id = string(get(case, "id"));
+        let error = case
+            .get("core")
+            .map_or_else(|| get(case, "error"), |core| get(core, "error"));
+        let reply = ReplySpec {
+            status: number(get(case, "status")) as u16,
+            status_text: string(get(case, "status_text")),
+            headers: Vec::new(),
+            body: error_body(get(case, "body")),
+            ..ReplySpec::ok(Vec::new(), "")
+        };
+        let sites: [(Call, &str, Option<&str>); 3] = [
+            (identity_call(), "GET", Some("/addresses")),
+            (pss_call(), "POST", None),
+            (gsoc_call("chat"), "POST", None),
+        ];
+        for (call, method, path) in sites {
+            let sid = format!("{id} via {}", call.method.as_js_string().unwrap().as_str());
+            let mut thread = site_thread(STAMPS);
+            let prefix = match call.method.as_js_string().unwrap().as_str() {
+                "swarm_sendPss" => Some("/pss/send/".to_owned()),
+                "swarm_sendGsoc" => Some("/soc/".to_owned()),
+                _ => None,
+            };
+            thread.node.rules.push(Rule {
+                method: Some(method.to_owned()),
+                path: path.map(str::to_owned),
+                prefix,
+                reply: reply.clone(),
+                world: Vec::new(),
+            });
+            let Outcome::Error(failure) = thread.run(&call) else {
+                panic!("{sid}: the node's error answered")
+            };
+            assert_eq!(failure.code, -32603, "{sid}");
+            assert!(failure.data.is_none(), "{sid}");
+            match error.get("message") {
+                Some(m) => assert_eq!(failure.message, js(m), "{sid}"),
+                None => {
+                    let digest = get(error, "message_digest");
+                    assert_eq!(
+                        failure.message.utf16_len() as f64,
+                        number(get(digest, "units")),
+                        "{sid}"
+                    );
+                    assert_eq!(
+                        sha(failure.message.as_str().as_bytes()),
+                        string(get(digest, "sha256")),
+                        "{sid}"
+                    );
+                }
+            }
+            played += 1;
+        }
+    }
+    assert_eq!(played, 3 * 90);
+}
+
+// ---------------------------------------------------------------------------
+// The lane under the machines.
+
+/// What the lane answers a send and a subscription that find no signer:
+/// today's texts and reasons, the budget's -32602, `busy`; nothing
+/// uploaded after it.
+#[test]
+fn no_signer_answers_as_today() {
+    let cases: [(Mined, Value); 6] = [
+        (
+            Mined::Timeout,
+            Value::str(
+                r#"{"code":-32603,"message":"GSOC mining failed: timed out after 15000 ms","data":{"reason":"gsoc_mining_timeout"}}"#,
+            ),
+        ),
+        (
+            Mined::Exhausted,
+            Value::str(
+                r#"{"code":-32603,"message":"GSOC mining failed: Could not mine a valid signer","data":{"reason":"gsoc_mining_failed"}}"#,
+            ),
+        ),
+        (
+            Mined::Stuck,
+            Value::str(
+                r#"{"code":-32603,"message":"GSOC mining failed: mining lane stuck","data":{"reason":"gsoc_mining_failed"}}"#,
+            ),
+        ),
+        (
+            Mined::Off,
+            Value::str(
+                r#"{"code":-32603,"message":"GSOC mining failed: mining is off until the core restarts","data":{"reason":"gsoc_mining_failed"}}"#,
+            ),
+        ),
+        (
+            Mined::Busy,
+            Value::str(r#"{"code":4900,"message":"busy","data":{"reason":"busy"}}"#),
+        ),
+        (
+            Mined::RateLimited {
+                retry_after_ms: 1500,
+            },
+            Value::str(
+                r#"{"code":-32602,"message":"Too many new messaging topics: at most 16 new topics per 60 s per origin. Retry in 2 s.","data":{"reason":"rate_limited","limit":16,"windowMs":60000,"retryAfterMs":1500}}"#,
+            ),
+        ),
+    ];
+    let subscribe = Call {
+        method: Value::str("swarm_subscribe"),
+        params: Value::object([("kind", Value::str("gsoc")), ("topic", Value::str("chat"))]),
+        key: JsString::from(KEY),
+        approval: None,
+    };
+    for (mined, want) in cases {
+        for call in [gsoc_call("chat"), subscribe.clone()] {
+            let mut world = site_thread(STAMPS).world;
+            let mut request = Request::start(&call, &mut world).unwrap();
+            let mut asked = 0;
+            while request.outcome().is_none() {
+                let effects = request.take_effects();
+                assert_eq!(effects.len(), 1, "{effects:?}");
+                let Effect::Ask(ask) = &effects[0] else {
+                    panic!("{effects:?}")
+                };
+                let event = match &ask.need {
+                    Need::Ready(_) => Event::Ready(Ok(())),
+                    Need::Mine(_) => {
+                        asked += 1;
+                        Event::Mined(mined)
+                    }
+                    other => panic!("{mined:?}: {other:?} after no signer"),
+                };
+                request.answer(&mut world, ask.id, event);
+            }
+            assert_eq!(asked, 1);
+            let Some(Outcome::Error(failure)) = request.outcome() else {
+                panic!("{mined:?}: {:?}", request.outcome())
+            };
+            assert_eq!(
+                failure_value(failure).stringify().unwrap(),
+                want.as_js_string().unwrap().as_str(),
+                "{mined:?}"
+            );
+        }
+    }
+}
+
+/// Two sends of one topic share one job: one request's cancel while it
+/// waits ends only its own wait; the other's send goes on with the job's
+/// signer, and the cancelled one asks for nothing more.
+#[test]
+fn a_cancel_while_mining_ends_only_its_wait() {
+    let mut thread = site_thread(STAMPS);
+    let origin = JsString::from(KEY);
+    let mut a = Request::start(&gsoc_call("room 4"), &mut thread.world).unwrap();
+    let mut b = Request::start(&gsoc_call("room 4"), &mut thread.world).unwrap();
+    let mut waiting = Vec::new();
+    for (n, request) in [&mut a, &mut b].into_iter().enumerate() {
+        let Some(Effect::Ask(ready)) = request.take_effects().pop() else {
+            panic!("the ready check")
+        };
+        request.answer(&mut thread.world, ready.id, Event::Ready(Ok(())));
+        let Some(Effect::Ask(mine)) = request.take_effects().pop() else {
+            panic!("the mining ask")
+        };
+        let Need::Mine(job) = mine.need else {
+            panic!("{mine:?}")
+        };
+        let got = thread.lane.submit(CLOCK, &origin, job, (n, mine.id));
+        assert_eq!(got, Submitted::Waiting);
+        waiting.push(mine.id);
+    }
+    // A's page gives up: its ask is cancelled, and the lane drops its wait.
+    a.cancel();
+    assert_eq!(a.take_effects(), [Effect::Cancel(waiting[0])]);
+    thread.lane.cancel(&(0, waiting[0]));
+    assert_eq!(a.outcome(), Some(&Outcome::Cancelled));
+    let mut answers = Vec::new();
+    while answers.is_empty() {
+        let work = thread.lane.work(CLOCK);
+        answers.extend(work.answers);
+        if let Some(batch) = work.batch {
+            answers.extend(thread.lane.ran(CLOCK, batch.run()));
+        }
+    }
+    assert_eq!(answers.len(), 1, "B alone is answered");
+    let ((who, id), mined) = answers[0];
+    assert_eq!((who, id), (1, waiting[1]));
+    b.answer(&mut thread.world, id, Event::Mined(mined));
+    let Some(Effect::Ask(stamps)) = b.take_effects().pop() else {
+        panic!("B goes on to its batch")
+    };
+    assert!(matches!(&stamps.need, Need::Node(c) if c.form == Form::Stamps));
+    assert!(a.take_effects().is_empty(), "nothing more for A");
+}
