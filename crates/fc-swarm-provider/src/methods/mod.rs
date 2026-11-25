@@ -18,6 +18,7 @@ pub mod create_feed;
 pub mod feed_index;
 pub mod feed_read;
 pub mod feed_write;
+pub mod messaging;
 pub mod publish;
 pub mod read_data;
 pub mod signing;

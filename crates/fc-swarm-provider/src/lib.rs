@@ -95,6 +95,7 @@ mod js;
 pub mod json;
 pub mod machine;
 pub mod methods;
+pub mod mining;
 pub mod replies;
 pub mod stamps;
 pub mod stores;

@@ -20,8 +20,8 @@
 //!   (0013's durable write, or the history's statements; a feed-store
 //!   change through SW-1's [`keeper`]), a key's owner and a signature (the
 //!   vault, the signature with SW-1's hold), a topic's turn among the
-//!   writes to it, and, for the piece to come, a GSOC search (the mining
-//!   lane). A node call whose body streams is answered
+//!   writes to it, and a GSOC search (the mining lane, [`crate::mining`]).
+//!   A node call whose body streams is answered
 //!   with main's `swarm.body` and its credit too, and the request writes
 //!   that body ([`Effect::Body`]).
 //! - **A request that ends without its machine** (a cancel, its deadline,
@@ -205,7 +205,8 @@ pub enum Need {
     Sign(SignSoc),
     /// A durable write of a store (0013), or the history's statements.
     Write(StoreWrite),
-    /// A GSOC signer search on the mining lane (the Messaging piece).
+    /// A GSOC signer search on the mining lane ([`crate::mining::Lane`]),
+    /// charged [`crate::mining::JOB_CHARGE`]: answered [`Event::Mined`].
     Mine(MineJob),
     /// The vault: a signing key's owner address (swarm-signer.js's
     /// `resolveSwarmSigner`), which needs the unlocked vault. Answered
@@ -278,7 +279,7 @@ pub enum StoreWrite {
 pub struct MineJob {
     pub target: [u8; 32],
     pub identifier: [u8; 32],
-    pub proximity: u8,
+    pub proximity: u32,
 }
 
 /// What the request asks of the swarm thread, in order.
@@ -357,7 +358,8 @@ pub struct Signed {
     pub owner: [u8; 20],
 }
 
-/// What a GSOC search found.
+/// What a GSOC search found, or why there is no signer
+/// ([`crate::mining::Lane`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mined {
     /// The signer's index from bee-js's first key.
@@ -366,6 +368,17 @@ pub enum Mined {
     Exhausted,
     /// The job's 15 s passed (`gsoc_mining_timeout`).
     Timeout,
+    /// The site is over its new-topic budget (`topic_rate_limited`): the
+    /// time until its oldest start leaves the window.
+    RateLimited { retry_after_ms: u64 },
+    /// The lane's queue is full for the site or in all (deviation `busy`).
+    Busy,
+    /// The job's batch didn't return within the watchdog's second
+    /// (`gsoc_mining_failed`).
+    Stuck,
+    /// Two stuck lanes turned mining off until the core restarts
+    /// (`gsoc_mining_failed`).
+    Off,
 }
 
 pub use methods::read_data::{Job, JobDone};
@@ -375,6 +388,9 @@ pub use methods::read_data::{Job, JobDone};
 pub enum Outcome {
     /// `{ result }`.
     Result(Value),
+    /// `swarm_subscribe`'s `{ subscribe: { kind, key } }`, which main
+    /// opens (design 0015, "Methods main calls").
+    Subscribe(Subscription),
     /// `{ error }`.
     Error(Failure),
     /// Cancelled by main or past its deadline: answered `cancelled`, with
@@ -382,6 +398,44 @@ pub enum Outcome {
     Cancelled,
     /// Main broke the protocol: answered -32603 `Internal error`.
     Protocol(Protocol),
+}
+
+/// A subscription for main to open: `kind` and the 32-byte `key` it
+/// listens on (the GSOC address, or the PSS topic's hash).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Subscription {
+    pub kind: SubscriptionKind,
+    pub key: [u8; 32],
+}
+
+/// `gsoc` or `pss`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionKind {
+    Gsoc,
+    Pss,
+}
+
+impl SubscriptionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SubscriptionKind::Gsoc => "gsoc",
+            SubscriptionKind::Pss => "pss",
+        }
+    }
+}
+
+impl Subscription {
+    /// The answer as main reads it: `{ subscribe: { kind, key } }`, the key
+    /// in lowercase hex.
+    pub fn to_value(&self) -> Value {
+        Value::object([(
+            "subscribe",
+            Value::object([
+                ("kind", Value::str(self.kind.as_str())),
+                ("key", Value::str(&crate::chunks::hex(&self.key))),
+            ]),
+        )])
+    }
 }
 
 /// How main broke the protocol.
@@ -407,11 +461,10 @@ pub enum Protocol {
     PartLength,
 }
 
-/// A method the later piece brings (Messaging): the machines so far
-/// answer Access, the Reads, the Publish group, and the feed and SOC
-/// writes.
+/// A method the core has no machine for: `swarm_unsubscribe`, which main
+/// answers itself and never sends (design 0015, "Methods main calls").
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{0} has no machine yet")]
+#[error("{0} has no machine in the core")]
 pub struct NotBuilt(pub String);
 
 pub(crate) enum Step {
@@ -810,6 +863,16 @@ impl<W: World> Cx<'_, W> {
     pub fn sign(&mut self, soc: SignSoc) -> AskId {
         self.asks.push(Need::Sign(soc), 0)
     }
+
+    /// `hasMessagingGrant(origin)`: the site's messaging grant (0012).
+    pub fn messaging(&self) -> bool {
+        self.world.messaging(self.origin)
+    }
+
+    /// A GSOC search on the mining lane.
+    pub fn mine(&mut self, job: MineJob) -> AskId {
+        self.asks.push(Need::Mine(job), crate::mining::JOB_CHARGE)
+    }
 }
 
 /// The request's method, running.
@@ -825,6 +888,10 @@ enum Running {
     CreateFeed(methods::create_feed::CreateFeed),
     FeedWrite(Box<methods::feed_write::FeedWrite>),
     SocWrite(methods::soc_write::SocWrite),
+    Identity(methods::messaging::Identity),
+    Pss(methods::messaging::SendPss),
+    Gsoc(methods::messaging::SendGsoc),
+    Subscribe(methods::messaging::Subscribe),
 }
 
 impl Running {
@@ -957,7 +1024,7 @@ impl Request {
         };
         let params = &call.params;
         use methods::{access, chunk_reads, feed_read, publish, read_data, upload_status};
-        use methods::{create_feed, feed_write, signing, soc_write};
+        use methods::{create_feed, feed_write, messaging, signing, soc_write};
         let started = match method.as_str() {
             "swarm_requestAccess" => Err(access::request_access(&mut cx)),
             "swarm_getCapabilities" => {
@@ -992,6 +1059,18 @@ impl Request {
                 .map(|m| Running::FeedWrite(Box::new(m))),
             "swarm_writeSingleOwnerChunk" => {
                 soc_write::SocWrite::start(&mut cx, params, call.approval).map(Running::SocWrite)
+            }
+            "swarm_getMessagingIdentity" => {
+                messaging::Identity::start(&mut cx).map(Running::Identity)
+            }
+            "swarm_sendPss" => {
+                messaging::SendPss::start(&mut cx, params, call.approval).map(Running::Pss)
+            }
+            "swarm_sendGsoc" => {
+                messaging::SendGsoc::start(&mut cx, params, call.approval).map(Running::Gsoc)
+            }
+            "swarm_subscribe" => {
+                messaging::Subscribe::start(&mut cx, params, call.approval).map(Running::Subscribe)
             }
             other => return Err(NotBuilt(other.to_owned())),
         };
@@ -1053,6 +1132,10 @@ impl Request {
             Running::CreateFeed(m) => m.on(&mut cx, id, event),
             Running::FeedWrite(m) => m.on(&mut cx, id, event),
             Running::SocWrite(m) => m.on(&mut cx, id, event),
+            Running::Identity(m) => m.on(&mut cx, id, event),
+            Running::Pss(m) => m.on(&mut cx, id, event),
+            Running::Gsoc(m) => m.on(&mut cx, id, event),
+            Running::Subscribe(m) => m.on(&mut cx, id, event),
         };
         if let Step::Done(outcome) = step {
             self.finish(outcome);
@@ -1495,8 +1578,8 @@ mod tests {
             )))
         );
         assert_eq!(
-            Request::start(&call("swarm_sendPss", Value::Undefined), &mut w).err(),
-            Some(NotBuilt("swarm_sendPss".into()))
+            Request::start(&call("swarm_unsubscribe", Value::Undefined), &mut w).err(),
+            Some(NotBuilt("swarm_unsubscribe".into()))
         );
     }
 }

@@ -309,6 +309,12 @@ pub(crate) fn stamps_call() -> NodeCall {
 /// `selectBestBatch(size)` over `/stamps`' answer: the batch, or what the
 /// write throws (no batch with room is `noUsableBatchError`).
 pub(crate) fn batch(event: Event, size: u64) -> Result<BatchId, Fail> {
+    batch_with(event, size, SelectOptions::default())
+}
+
+/// [`batch`] with `selectBestBatch`'s options: messaging's
+/// `selectMessageBatch` allows a full mutable batch.
+pub(crate) fn batch_with(event: Event, size: u64, options: SelectOptions) -> Result<BatchId, Fail> {
     let reply = match event {
         Event::Reply(reply) => reply,
         Event::Failed(failed) => return Err(Fail::transport(failed)),
@@ -321,7 +327,7 @@ pub(crate) fn batch(event: Event, size: u64) -> Result<BatchId, Fail> {
         });
     }
     let stamps = read_stamps(&reply.body).map_err(Fail::reply)?;
-    let selection = select_best_batch(&stamps, size, SelectOptions::default())
+    let selection = select_best_batch(&stamps, size, options)
         .map_err(|err| Fail::thrown(&ServiceError::from(&err)))?;
     match selection.outcome {
         Ok(Some(batch)) => Ok(batch),
@@ -727,7 +733,7 @@ pub(crate) fn closing(
         return None;
     }
     let text = match outcome {
-        Outcome::Result(_) => return None,
+        Outcome::Result(_) | Outcome::Subscribe(_) => return None,
         Outcome::Error(failure) => failure.message.clone(),
         Outcome::Cancelled => JsString::from("cancelled"),
         Outcome::Protocol(_) => Failure::internal_error().message,
