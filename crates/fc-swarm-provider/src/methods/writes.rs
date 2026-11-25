@@ -409,33 +409,71 @@ fn bee_upload_tagged(event: Event, tagged: bool) -> Result<Vec<u8>, Fail> {
             Err(failed) => Fail::transport(failed),
         });
     }
-    let reference = match upload_reference(strip_bom(&reply.body))? {
-        Ok(reference) => reference_bytes(&reference).map_err(Fail::text)?,
-        Err(issue) => return Err(Fail::text(zod_message(issue)?)),
+    let tag = reply.header("swarm-tag").map(|v| v.text());
+    match bee_upload_read(&reply.body, tag.as_deref().filter(|_| tagged)) {
+        Ok((reference, _)) => Ok(reference),
+        Err(BeeRead::Reply(err)) => Err(Fail::reply(err)),
+        Err(BeeRead::Thrown(message)) => Err(Fail::text(message)),
+    }
+}
+
+/// Why bee-js refused an upload's success reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BeeRead {
+    /// Not JSON, past the reply's cap or nested past the bound.
+    Reply(ReplyError),
+    /// What bee-js threw: zod's message, or core-sdk's `Reference`'s.
+    Thrown(String),
+}
+
+/// bee-js's reading of an upload's 2xx reply (`file.upload`,
+/// `collection.upload`, `bytes.upload`, `createFeedManifest`): the text
+/// (a byte-order mark dropped; an empty text is `null`) through
+/// `UploadResultBody` (`{ reference: string }`, then core-sdk's
+/// `Reference`: 32 or 64 bytes), then, when `swarm_tag` is given and has a
+/// value, `makeTagUid` (`z.coerce.number().min(0)`): the reference's bytes
+/// and the tag's number.
+pub(crate) fn bee_upload_read(
+    body: &[u8],
+    swarm_tag: Option<&str>,
+) -> Result<(Vec<u8>, Option<f64>), BeeRead> {
+    let text = strip_bom(body);
+    let read = if text.is_empty() {
+        // `text ? JSON.parse(text) : null`.
+        Ok(Err(Issue::new(Expected::Object, Received::Null, &[])))
+    } else {
+        upload_reference(text)
     };
-    if tagged {
-        // `response.headers['swarm-tag'] ? makeTagUid(…) : undefined`.
-        let tag = reply.header("swarm-tag").map(|v| v.text());
-        if let Some(tag) = tag.filter(|t| !t.is_empty()) {
-            let uid = crate::js::string_to_number(&tag);
+    let reference = match read.map_err(|err| BeeRead::Reply(err.into()))? {
+        Ok(reference) => {
+            reference_bytes(&reference).map_err(|m| BeeRead::Thrown(m.as_str().to_owned()))?
+        }
+        Err(issue) => return Err(BeeRead::Thrown(zod_message(issue)?)),
+    };
+    // `response.headers['swarm-tag'] ? makeTagUid(…) : undefined`.
+    let tag = match swarm_tag.filter(|t| !t.is_empty()) {
+        None => None,
+        Some(tag) => {
+            let uid = crate::js::string_to_number(tag);
             if !uid.is_finite() {
                 let issue = Issue::new(Expected::Number, Received::of_number(uid), &[]);
-                return Err(Fail::text(zod_message(issue)?));
+                return Err(BeeRead::Thrown(zod_message(issue)?));
             }
             if uid < 0.0 {
-                return Err(Fail::text(crate::zod::too_small_number(0.0)));
+                return Err(BeeRead::Thrown(crate::zod::too_small_number(0.0)));
             }
+            Some(uid)
         }
-    }
-    Ok(reference)
+    };
+    Ok((reference, tag))
 }
 
 /// One issue's `ZodError` message.
-fn zod_message(issue: Issue) -> Result<String, Fail> {
+fn zod_message(issue: Issue) -> Result<String, BeeRead> {
     let mut issues = Issues::new();
     issues
         .push(issue, JSON_REPLY_CAP)
-        .map_err(|_| Fail::transport(Failed::TooLarge))?;
+        .map_err(|_| BeeRead::Reply(ReplyError::TooLarge))?;
     Ok(issues.message())
 }
 
