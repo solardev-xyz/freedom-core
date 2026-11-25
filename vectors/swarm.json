@@ -461,7 +461,7 @@
     "node": "stamps, addresses, tags, node: JSON answers (stamps_label_bytes: the usable batch with a label of that many bytes of l); data: blobs stored as their whole ChunkSplitter tree and joined from /bytes; chunks: raw bytes at an address; entries: feed updates, SOCs signed under the named test key ({ key, topic (the topic string), index, data, wrap }); latest: GET /feeds/<o>/<t>'s reply; probes: the feeds whose updates 0 to head exist (a hit answers 105 zero bytes); probeFail: one index's status; rules: replies tried first, { match: { method, path | prefix }, reply: { status, statusText, headers, json | body_utf8 | body_hex | body_base64 | body_data, chunked + pieces_data (each piece reaches the reader as one frame, whatever the socket's reads), cutAfterPieces, declare (a Content-Length longer than the body, then the connection cut), hangUp, delayMs, abortPage (the page gives up as this request arrives: the request's signal aborts) }, world (a change to the case's world as the request arrives: custody, rule_off, name) }. Unmatched, the node answers from what it stores: 404 { code, message } for what it lacks, /bzz with SHA-256 of the body as its reference.",
     "bodies": "write-side.json's shapes: tar (page-upload.js's, for window.swarm, each equal to bee-js's collection upload of the same entries; tar-paths cases are bee-js's publishCollection, as freedom://publish uses it), file (publishData's request; the body is the data), bytes (a large feed entry's POST /bytes body, ChunkSplitter's root of it and the SOC upload body that wraps that root), soc (core-sdk), chunk (POST /chunks: span ‖ payload and the address), pss (the request; the body is the message).",
     "trees": "core-sdk's ChunkSplitter: root, span, root payload, and every chunk's count and SHA-256 over address ‖ u64_le(span) ‖ payload by address.",
-    "stamps": "mapped: bee-js's stamp.getAll over one raw batch (the fields Freedom reads, or the error), and swarm-service.js's classification; select: selectBestBatch(size, options) over a /stamps answer, its batch or error, and how many /stamps reads it made; where it made two, deviation stamps-one-read, and `core` gives the core's one read, with the same batch or error.",
+    "stamps": "mapped: bee-js's stamp.getAll over one raw batch (the fields Freedom reads, or the error), and swarm-service.js's classification; select: selectBestBatch(size, options) over a /stamps answer, its batch or error, and how many /stamps reads it made; where it made two, deviation stamps-one-read, and `core` gives the core's one read, with the same batch or error. A mapped batch with a fractional depth or bucketDepth is deviation batch-depth: `core` is the core's refusal.",
     "feeds": "topic and identifier (bee-js), update (feed-service.js's updateFeed and writeFeedPayload, write-side.json's shape), index_run and entry_exists (from the methods that ran them), metered_read (readFeedPayload over a recording meter: each charge and reserve, refused or not).",
     "gsoc": "bee-js's gsocMine (write-side.json's shape): the signer's index, key, owner and SOC address, or its error.",
     "errors": "http_error: a node error at each call site (bee-js's JSON and array-buffer calls, #1057's fetchNode, the SOC upload, page-upload.js): the error's class, message and data, and isChunkNotFoundError (fetchNode at 500, which readFeedPayload reads as an empty feed, and at 503, which reaches its own text); past 8 KiB, `core` is the same reader over the first 8,192 bytes (error-body-bound). mapping: the method cases that show nodeWriteError's and mapChunkReadError's mappings.",
@@ -601,6 +601,17 @@
     "reply-bounds": {
       "cases": [
         "methods/publish-data-stamps-reply-past-cap"
+      ]
+    },
+    "reply-syntax": {
+      "cases": [
+        "methods/publish-data-stamps-not-json"
+      ]
+    },
+    "batch-depth": {
+      "cases": [
+        "stamps/mapped/depth-fraction",
+        "stamps/mapped/bucket-depth-fraction"
       ]
     },
     "error-body-bound": {
@@ -10792,6 +10803,159 @@
             "timestamp": "2026-01-01T00:00:00.123Z",
             "completedAt": "2026-01-01T00:00:00.123Z",
             "errorMessage": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "publish-data-stamps-not-json",
+      "deviation": "reply-syntax",
+      "origin": "https://app.example",
+      "grants": {
+        "https://app.example": {
+          "origin": "https://app.example",
+          "connectedAt": 1767225540123,
+          "lastUsed": 1767225540123,
+          "autoApprove": {
+            "publish": false,
+            "feeds": false,
+            "signing": false,
+            "messaging": false
+          }
+        }
+      },
+      "feeds": null,
+      "vault": "unlocked",
+      "readiness": {
+        "ok": true
+      },
+      "custody": false,
+      "node": {
+        "stamps": {
+          "stamps": [
+            {
+              "batchID": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+              "utilization": 0,
+              "usable": true,
+              "label": "freedom",
+              "depth": 22,
+              "amount": "100000000000",
+              "bucketDepth": 16,
+              "blockNumber": 1000,
+              "immutableFlag": true,
+              "exists": true,
+              "batchTTL": 864000
+            }
+          ]
+        },
+        "rules": [
+          {
+            "match": {
+              "method": "GET",
+              "path": "/stamps"
+            },
+            "reply": {
+              "status": 200,
+              "body_utf8": "<html>busy</html>"
+            }
+          }
+        ]
+      },
+      "clock": 1767225600123,
+      "steps": [
+        {
+          "method": "swarm_publishData",
+          "params": {
+            "object": [
+              [
+                "data",
+                {
+                  "string_bytes": 1,
+                  "base64": "eA=="
+                }
+              ],
+              [
+                "contentType",
+                {
+                  "string": "text/plain"
+                }
+              ]
+            ]
+          },
+          "error": {
+            "code": -32603,
+            "message": "Unexpected token '<', \"<html>busy</html>\" is not valid JSON"
+          },
+          "requests": [
+            {
+              "via": "fetch",
+              "method": "GET",
+              "path": "/stamps",
+              "headers": [
+                [
+                  "accept",
+                  "application/json, text/plain, */*"
+                ]
+              ],
+              "status": 200,
+              "form": "stamps"
+            }
+          ],
+          "events": [
+            {
+              "prompt": {
+                "kind": "swarm.publish",
+                "view": {
+                  "method": "swarm_publishData",
+                  "kind": "data",
+                  "size": 1,
+                  "contentType": "text/plain"
+                },
+                "answer": {
+                  "approve": true,
+                  "choices": {}
+                }
+              }
+            },
+            {
+              "touch": "page"
+            },
+            {
+              "service": {
+                "key": "https://app.example",
+                "page": true
+              }
+            },
+            {
+              "readiness": "publish",
+              "after_requests": 0
+            }
+          ]
+        }
+      ],
+      "core": {
+        "error": {
+          "code": -32603,
+          "message": "Swarm node reply is not valid JSON"
+        }
+      },
+      "after": {
+        "feeds": null,
+        "history": [
+          {
+            "id": 1,
+            "type": "data",
+            "name": "Published data",
+            "status": "failed",
+            "reference": null,
+            "bzzUrl": null,
+            "tagUid": null,
+            "batchIdUsed": null,
+            "origin": "https://app.example",
+            "bytesSize": 1,
+            "timestamp": "2026-01-01T00:00:00.123Z",
+            "completedAt": "2026-01-01T00:00:00.123Z",
+            "errorMessage": "Unexpected token '<', \"<html>busy</html>\" is not valid JSON"
           }
         ]
       }
@@ -109051,6 +109215,100 @@
           "theoreticalSize": 17179869184,
           "duration": 864000
         }
+      },
+      {
+        "id": "depth-fraction",
+        "raw": {
+          "batchID": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "utilization": 0,
+          "usable": true,
+          "label": "freedom",
+          "depth": 22.5,
+          "amount": "100000000000",
+          "bucketDepth": 16,
+          "blockNumber": 1000,
+          "immutableFlag": true,
+          "exists": true,
+          "batchTTL": 864000
+        },
+        "classified": {
+          "usable": true,
+          "pending": false,
+          "propagating": false,
+          "full_immutable": false,
+          "key": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+        },
+        "mapped": {
+          "batchID": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "utilization": 0,
+          "usable": true,
+          "label": "freedom",
+          "depth": 22.5,
+          "amount": "100000000000",
+          "bucketDepth": 16,
+          "blockNumber": 1000,
+          "immutableFlag": true,
+          "usage": 0,
+          "usageText": "0%",
+          "size": 21866403600,
+          "remainingSize": 21866403600,
+          "theoreticalSize": 24296004000,
+          "duration": 864000
+        },
+        "deviation": "batch-depth",
+        "core": {
+          "error": {
+            "name": "Error",
+            "message": "Swarm node reply has a non-integer batch depth"
+          }
+        }
+      },
+      {
+        "id": "bucket-depth-fraction",
+        "raw": {
+          "batchID": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "utilization": 0,
+          "usable": true,
+          "label": "freedom",
+          "depth": 22,
+          "amount": "100000000000",
+          "bucketDepth": 16.5,
+          "blockNumber": 1000,
+          "immutableFlag": true,
+          "exists": true,
+          "batchTTL": 864000
+        },
+        "classified": {
+          "usable": true,
+          "pending": false,
+          "propagating": false,
+          "full_immutable": false,
+          "key": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+        },
+        "mapped": {
+          "batchID": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "utilization": 0,
+          "usable": true,
+          "label": "freedom",
+          "depth": 22,
+          "amount": "100000000000",
+          "bucketDepth": 16.5,
+          "blockNumber": 1000,
+          "immutableFlag": true,
+          "usage": 0,
+          "usageText": "0%",
+          "size": 7070000000,
+          "remainingSize": 7070000000,
+          "theoreticalSize": 17179869184,
+          "duration": 864000
+        },
+        "deviation": "batch-depth",
+        "core": {
+          "error": {
+            "name": "Error",
+            "message": "Swarm node reply has a non-integer batch depth"
+          }
+        }
       }
     ],
     "select": [
@@ -117907,6 +118165,7 @@
         "publish-data-node-not-json",
         "publish-data-node-stopped-after-ready",
         "publish-data-stamps-reply-past-cap",
+        "publish-data-stamps-not-json",
         "publish-files-no-stamps",
         "publish-files-stamps-capacity",
         "publish-files-node-500",

@@ -257,6 +257,11 @@ function methodCases(env) {
   // A /stamps answer past its form's 1 MiB cap: bee-js reads it whole.
   pd('stamps-reply-past-cap', () => ({ data: 'x', contentType: 'text/plain' }), { node: { stamps_label_bytes: 1048576 },
     deviation: { id: 'reply-bounds', core: { error: { code: -32603, message: 'Swarm node reply too large' } } } });
+  // A /stamps answer that isn't JSON: the page reads V8's SyntaxError text,
+  // the core one fixed text (reply-syntax).
+  pd('stamps-not-json', () => ({ data: 'x', contentType: 'text/plain' }), { node: { stamps: STAMPS.usable, rules: [
+    { match: { method: 'GET', path: '/stamps' }, reply: { status: 200, body_utf8: '<html>busy</html>' } },
+  ] }, deviation: { id: 'reply-syntax', core: { error: { code: -32603, message: 'Swarm node reply is not valid JSON' } } } });
   // The dispatcher's approval path (page/page-swarm.js): the publish prompt,
   // or the site's publish rule, which never answers for a tab in Agent
   // custody, read when the rule is chosen and again just before the upload

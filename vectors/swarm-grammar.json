@@ -997,7 +997,7 @@
   },
   "checked": {
     "publishData": {
-      "form stamps": 41,
+      "form stamps": 42,
       "form bzz_file": 32,
       "deviation stamps-one-read": 2
     },
@@ -3881,6 +3881,53 @@
           },
           "reply": {
             "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "publish-data-stamps-not-json",
+      "row": "publishData",
+      "from": "methods/publish-data-stamps-not-json",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ],
+          [
+            "contentType",
+            {
+              "string": "text/plain"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
           }
         }
       ]

@@ -477,7 +477,13 @@ const RAW_BATCHES = [
   ['missing-label', (({ label, ...rest }) => rest)(C.batch())],
   ['amount-number', C.batch({ amount: 5 })],
   ['extra-fields', C.batch({ extra: true, owner: '0x00' })],
+  // zod's number admits a fractional depth, which bee-js raises 2 to; the
+  // core refuses the batch instead (batch-depth).
+  ['depth-fraction', C.batch({ depth: 22.5 })],
+  ['bucket-depth-fraction', C.batch({ bucketDepth: 16.5 })],
 ];
+const BATCH_DEPTH = { error: { name: 'Error', message: 'Swarm node reply has a non-integer batch depth' } };
+const MAPPED_DEVIATIONS = { 'depth-fraction': BATCH_DEPTH, 'bucket-depth-fraction': BATCH_DEPTH };
 
 const SELECT_SETS = [
   ['usable', C.STAMPS.usable], ['two', C.STAMPS.two], ['none', C.STAMPS.none], ['small', C.STAMPS.small],
@@ -510,7 +516,7 @@ async function buildStamps(env) {
         return { classified, error: errorRecord(err) };
       }
     });
-    mapped.push({ id, raw, ...record });
+    mapped.push({ id, raw, ...record, ...(MAPPED_DEVIATIONS[id] ? { deviation: 'batch-depth', core: MAPPED_DEVIATIONS[id] } : {}) });
   }
   const select = [];
   for (const [setId, stamps] of SELECT_SETS) {
