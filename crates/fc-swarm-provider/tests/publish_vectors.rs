@@ -199,6 +199,8 @@ struct Played {
     turns: usize,
     /// The statements written after the outcome (the row's last update).
     closing: usize,
+    /// The history writes the store refused.
+    failed_writes: usize,
 }
 
 struct MainSide<'a> {
@@ -208,23 +210,30 @@ struct MainSide<'a> {
     parts: &'a BTreeMap<u32, Vec<u8>>,
     /// The case's key, which a node rule's world change is made for.
     case_key: &'a JsString,
+    /// How many of the next history updates fail, each `write failed <n>`.
+    fail_updates: std::cell::Cell<usize>,
 }
 
 fn play(world: &mut TestWorld, main: &MainSide<'_>, call: &Call, sid: &str) -> Played {
     let mut request = Request::start(call, world).expect("a method this piece brings");
-    let mut queue: VecDeque<Effect> = request.take_effects().into();
+    let mut open_calls = BTreeSet::new();
+    let mut most_open = 0usize;
+    let mut queue: VecDeque<Effect> =
+        take_effects(&mut request, &mut open_calls, &mut most_open).into();
     let mut played = Played {
         ran: Ran {
             outcome: Outcome::Cancelled,
             ready: Vec::new(),
             calls: Vec::new(),
             cancels_after_outcome: 0,
+            most_open: 0,
         },
         sent: Vec::new(),
         dialed: Vec::new(),
         parts: Vec::new(),
         turns: 0,
         closing: 0,
+        failed_writes: 0,
     };
     let mut feeds: BTreeMap<AskId, PartFeed> = BTreeMap::new();
     let mut bodies: BTreeMap<AskId, BodyIn> = BTreeMap::new();
@@ -239,8 +248,20 @@ fn play(world: &mut TestWorld, main: &MainSide<'_>, call: &Call, sid: &str) -> P
 
     macro_rules! give {
         ($id:expr, $event:expr) => {{
-            request.answer(world, $id, $event);
-            queue.extend(request.take_effects());
+            let event = $event;
+            let terminal = matches!(
+                event,
+                Event::Reply(_)
+                    | Event::Failed(_)
+                    | Event::End
+                    | Event::Abort(_)
+                    | Event::Refused(_)
+            );
+            request.answer(world, $id, event);
+            if terminal {
+                open_calls.remove(&$id);
+            }
+            queue.extend(take_effects(&mut request, &mut open_calls, &mut most_open));
         }};
     }
 
@@ -360,6 +381,16 @@ fn play(world: &mut TestWorld, main: &MainSide<'_>, call: &Call, sid: &str) -> P
                     }
                     Need::Write(StoreWrite::History(statements)) => {
                         assert_eq!(ask.charge, 0, "{sid}");
+                        if statements.iter().any(|s| s.sql == history::UPDATE_SQL)
+                            && main.fail_updates.get() > 0
+                        {
+                            // The store refuses this write: nothing is run.
+                            main.fail_updates.set(main.fail_updates.get() - 1);
+                            played.failed_writes += 1;
+                            let text = format!("write failed {}", played.failed_writes);
+                            give!(ask.id, Event::Written(Err(JsString::from(text))));
+                            continue;
+                        }
                         for statement in &statements {
                             if statement.sql == history::TRIM_SQL {
                                 let kept = untrimmed.take();
@@ -512,6 +543,7 @@ fn play(world: &mut TestWorld, main: &MainSide<'_>, call: &Call, sid: &str) -> P
         }
     }
     played.ran.outcome = request.outcome().unwrap().clone();
+    played.ran.most_open = most_open;
     played
 }
 
@@ -923,6 +955,7 @@ fn publish_methods() {
                 readiness: publish_readiness(case),
                 parts: &parts,
                 case_key: &origin,
+                fail_updates: std::cell::Cell::new(0),
             };
             let played = play(&mut world, &main, &call, &sid);
             played_steps += 1;
@@ -1114,6 +1147,7 @@ fn run_site(
         readiness: Ok(()),
         parts,
         case_key: &key,
+        fail_updates: std::cell::Cell::new(0),
     };
     let call = Call {
         method: Value::str(method),
@@ -1459,6 +1493,29 @@ fn a_cancel_mid_upload_ends_the_row() {
         let effects = request.take_effects();
         assert!(effects.contains(&Effect::Cancel(upload)), "{end}: the call");
         assert!(effects.contains(&Effect::Cancel(part)), "{end}: the part");
+        // The body's one terminal, `cancelled`, before the call goes.
+        let terminals: Vec<usize> = effects
+            .iter()
+            .enumerate()
+            .filter(
+                |(_, e)| matches!(e, Effect::Body { id, out: BodyOut::Abort(_) } if *id == upload),
+            )
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(terminals.len(), 1, "{end}: one terminal");
+        assert_eq!(
+            effects[terminals[0]],
+            Effect::Body {
+                id: upload,
+                out: BodyOut::Abort(fc_swarm_provider::machine::node::BodyAbort::Cancelled)
+            },
+            "{end}"
+        );
+        let call_cancel = effects
+            .iter()
+            .position(|e| *e == Effect::Cancel(upload))
+            .unwrap();
+        assert!(terminals[0] < call_cancel, "{end}: the terminal first");
         let writes: Vec<_> = effects
             .iter()
             .filter_map(|e| match e {
@@ -1587,6 +1644,27 @@ fn parts_are_read_strictly() {
                     Some(&Outcome::Protocol(Protocol::PartLength)),
                     "{what}"
                 );
+                // One terminal for the body: `internal`.
+                let terminals: Vec<_> = effects
+                    .iter()
+                    .filter(|e| {
+                        matches!(
+                            e,
+                            Effect::Body {
+                                out: BodyOut::Abort(_),
+                                ..
+                            }
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    terminals,
+                    vec![&Effect::Body {
+                        id: upload,
+                        out: BodyOut::Abort(BodyAbort::Internal)
+                    }],
+                    "{what}"
+                );
                 // The row ends with the request.
                 let closing = request.take_effects();
                 assert!(
@@ -1632,6 +1710,7 @@ fn an_upload_keeps_the_history_bound() {
             readiness: Ok(()),
             parts: &BTreeMap::new(),
             case_key: &key,
+            fail_updates: std::cell::Cell::new(0),
         };
         let call = Call {
             method: Value::str("swarm_publishChunk"),
@@ -1750,6 +1829,7 @@ fn the_guard_keeps_the_references_order() {
             readiness: Ok(()),
             parts: &BTreeMap::new(),
             case_key: &key,
+            fail_updates: std::cell::Cell::new(0),
         };
         let call = Call {
             method: Value::str("swarm_publishData"),
@@ -1819,4 +1899,245 @@ fn a_forgotten_tag_is_another_sites() {
     );
     // Done: forgotten, as the reference forgets it.
     assert_eq!(world.tags.get(2), None);
+}
+
+/// A cancel, `busy` or a protocol error while the history insert is in
+/// flight: the insert is still made, so its rowid, when it comes after the
+/// outcome, is taken; the bound's trim keeping that row runs, and the row
+/// ends `failed` with the request's end. Nothing else is asked.
+#[test]
+fn an_insert_in_flight_still_ends_its_row() {
+    for (end, text) in [
+        ("cancel", "cancelled"),
+        ("busy", "busy"),
+        ("protocol", "Internal error"),
+    ] {
+        let mut world = site_world();
+        let db = HistoryDb::open(CLOCK);
+        let call = Call {
+            method: Value::str("swarm_publishChunk"),
+            params: Value::object([("data", bytes_value(b"x".to_vec()))]),
+            key: JsString::from(KEY),
+            approval: Some(Approval::User),
+        };
+        let mut request = Request::start(&call, &mut world).unwrap();
+        let Some(Effect::Ask(ready)) = request.take_effects().pop() else {
+            panic!("{end}: the readiness")
+        };
+        request.answer(&mut world, ready.id, Event::Ready(Ok(())));
+        let Some(Effect::Ask(insert)) = request.take_effects().pop() else {
+            panic!("{end}: the insert")
+        };
+        let Need::Write(StoreWrite::HistoryInsert(statement)) = &insert.need else {
+            panic!("{end}: {insert:?}")
+        };
+        // The thread makes the insert; its answer is still on the way.
+        let rowid = db.insert(statement);
+        world.now = CLOCK + 7_000;
+        match end {
+            "cancel" => request.cancel(),
+            "busy" => request.busy(),
+            _ => request.answer(&mut world, AskId(999), Event::End),
+        }
+        let effects = request.take_effects();
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::Ask(_))),
+            "{end}: nothing asked before the rowid: {effects:?}"
+        );
+        request.answer(&mut world, insert.id, Event::Inserted(Ok(rowid)));
+        let effects = request.take_effects();
+        assert_eq!(effects.len(), 1, "{end}: {effects:?}");
+        let Effect::Ask(write) = &effects[0] else {
+            panic!("{end}")
+        };
+        let Need::Write(StoreWrite::History(statements)) = &write.need else {
+            panic!("{end}: {write:?}")
+        };
+        assert_eq!(statements.len(), 2, "{end}");
+        assert_eq!(
+            statements[0],
+            history::trim(Some(rowid)),
+            "{end}: the trim first"
+        );
+        statements.iter().for_each(|s| {
+            db.run(s);
+        });
+        let rows = db.entries();
+        assert!(rows.contains("\"status\":\"failed\""), "{end}: {rows}");
+        assert!(
+            rows.contains(&format!("\"errorMessage\":\"{text}\"")),
+            "{end}: {rows}"
+        );
+        assert!(
+            rows.contains("\"completedAt\":\"2026-01-01T00:00:00.123Z\""),
+            "{end}: {rows}"
+        );
+        // Anything after is dropped.
+        request.answer(&mut world, write.id, Event::Written(Ok(())));
+        assert!(request.take_effects().is_empty(), "{end}");
+    }
+}
+
+/// The row's last update fails: the reference's `catch` updates it
+/// `failed` with the write's message, once, then answers. After the
+/// `completed` update or a refusal's update (inside the `try`), the page
+/// gets `nodeWriteError` of the write's error; after a failure's update
+/// (in the `catch`), its message. A second failure answers the second's
+/// message after a `try`, the first's after a `catch`, and the row stays
+/// `uploading`.
+#[test]
+fn a_failed_last_update_is_retried_once() {
+    let stamps_500 = ReplySpec {
+        status: 500,
+        status_text: "Internal Server Error".to_owned(),
+        headers: Vec::new(),
+        body: br#"{"code":500,"message":"stamps failed"}"#.to_vec(),
+        ..ReplySpec::ok(Vec::new(), "")
+    };
+    for (what, failures, want_message, want_status) in [
+        ("completed", 1, "write failed 1", "failed"),
+        ("refused", 1, "write failed 1", "failed"),
+        ("node error", 1, "write failed 1", "failed"),
+        ("completed twice", 2, "write failed 2", "uploading"),
+        ("refused twice", 2, "write failed 2", "uploading"),
+        ("node error twice", 2, "write failed 1", "uploading"),
+    ] {
+        let mut node = Node {
+            stamps: Some(usable_stamps()),
+            ..Node::new()
+        };
+        let mut world = site_world();
+        if what.starts_with("node error") {
+            node.rules.push(rule("GET", "/stamps", stamps_500.clone()));
+        }
+        if what.starts_with("refused") {
+            // The rule turned off while /stamps was read.
+            world.rules.insert((JsString::from(KEY), "publish"));
+            node.rules.push(Rule {
+                world: vec![("rule_off".to_owned(), "publish".to_owned())],
+                ..rule(
+                    "GET",
+                    "/stamps",
+                    ReplySpec::ok(usable_stamps(), "application/json"),
+                )
+            });
+        }
+        let db = HistoryDb::open(CLOCK);
+        let key = JsString::from(KEY);
+        let main = MainSide {
+            node: &node,
+            db: &db,
+            readiness: Ok(()),
+            parts: &BTreeMap::new(),
+            case_key: &key,
+            fail_updates: std::cell::Cell::new(failures),
+        };
+        let call = Call {
+            method: Value::str("swarm_publishChunk"),
+            params: Value::object([("data", bytes_value(b"x".to_vec()))]),
+            key: key.clone(),
+            approval: Some(if what.starts_with("refused") {
+                Approval::Auto
+            } else {
+                Approval::User
+            }),
+        };
+        let played = play(&mut world, &main, &call, what);
+        assert_eq!(played.failed_writes, failures, "{what}");
+        assert_eq!(
+            played.ran.outcome,
+            Outcome::Error(Failure::internal(want_message)),
+            "{what}"
+        );
+        let rows = db.entries();
+        assert!(
+            rows.contains(&format!("\"status\":\"{want_status}\"")),
+            "{what}: {rows}"
+        );
+        if want_status == "failed" {
+            assert!(
+                rows.contains(&format!("\"errorMessage\":\"{want_message}\"")),
+                "{what}: {rows}"
+            );
+        }
+        assert_eq!(played.closing, 0, "{what}");
+    }
+}
+
+/// A body main asks for after the request ended (a cancel racing main's
+/// `swarm.body`) still gets its one terminal, `cancelled`; main's own
+/// terminal for the call then closes it.
+#[test]
+fn a_body_asked_for_after_a_cancel_ends_cancelled() {
+    let node = Node {
+        stamps: Some(usable_stamps()),
+        ..Node::new()
+    };
+    let mut world = site_world();
+    let db = HistoryDb::open(CLOCK);
+    let call = Call {
+        method: Value::str("swarm_publishFiles"),
+        params: Value::object([(
+            "files",
+            Value::Array(vec![Some(Value::object([
+                ("path", Value::str("a.txt")),
+                ("bytes", bytes_value(b"a".to_vec())),
+            ]))]),
+        )]),
+        key: JsString::from(KEY),
+        approval: Some(Approval::User),
+    };
+    let mut request = Request::start(&call, &mut world).unwrap();
+    let mut queue: VecDeque<Effect> = request.take_effects().into();
+    let upload = loop {
+        let Some(Effect::Ask(ask)) = queue.pop_front() else {
+            continue;
+        };
+        let event = match ask.need {
+            Need::Ready(_) => Event::Ready(Ok(())),
+            Need::Write(StoreWrite::HistoryInsert(s)) => Event::Inserted(Ok(db.insert(&s))),
+            Need::Write(StoreWrite::History(statements)) => {
+                statements.iter().for_each(|s| {
+                    db.run(s);
+                });
+                Event::Written(Ok(()))
+            }
+            Need::Node(call) if call.form == Form::Stamps => {
+                forward(&node.reply("GET", "/stamps"), &call).1.remove(0)
+            }
+            Need::Upload => Event::Turn,
+            Need::Node(_) => break ask.id,
+            other => panic!("{other:?}"),
+        };
+        request.answer(&mut world, ask.id, event);
+        queue.extend(request.take_effects());
+    };
+    request.cancel();
+    let effects = request.take_effects();
+    assert!(effects.contains(&Effect::Cancel(upload)));
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Body { .. })),
+        "no terminal for a body main hasn't asked for: {effects:?}"
+    );
+    request.answer(&mut world, upload, Event::BodyOpen);
+    assert_eq!(
+        request.take_effects(),
+        vec![Effect::Body {
+            id: upload,
+            out: BodyOut::Abort(fc_swarm_provider::machine::node::BodyAbort::Cancelled)
+        }]
+    );
+    request.answer(&mut world, upload, Event::Failed(Failed::Aborted));
+    // Only the row's last update is still open, until it is written.
+    let write = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::Ask(ask) => Some(ask.id),
+            _ => None,
+        })
+        .expect("the row's update");
+    assert_eq!(request.open_asks(), 1);
+    request.answer(&mut world, write, Event::Written(Ok(())));
+    assert_eq!(request.open_asks(), 0);
+    assert_eq!(request.outcome(), Some(&Outcome::Cancelled));
 }

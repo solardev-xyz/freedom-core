@@ -40,8 +40,8 @@ use crate::errors::{self, ServiceError, Site};
 use crate::machine::node::{Body, BodyAbort, Failed, INLINE_BODY};
 use crate::machine::params::{empty_options, require_params};
 use crate::machine::{
-    Approval, AskId, Capability, Cx, Event, Failure, Form, NodeCall, Outcome, Protocol, ReadyCheck,
-    Reply, Step, StoreWrite, World, fail,
+    AfterInsert, Approval, AskId, Capability, Closing, Cx, Effect, Event, Failure, Form, NodeCall,
+    Outcome, Protocol, ReadyCheck, Reply, Step, StoreWrite, World, fail,
 };
 use crate::replies::{self, ChunkUpload, NO_REFERENCE_MESSAGE, PageUpload};
 use crate::stamps::{SelectOptions, read_stamps, select_best_batch};
@@ -84,7 +84,25 @@ enum Stage {
     Turn(AskId),
     Upload(AskId),
     /// The row's last update, then the answer.
-    Closing(AskId, Outcome),
+    Closing(AskId, Outcome, Last),
+}
+
+/// Where the row's last update sits in the reference's handler, which
+/// decides what follows when the write fails.
+#[derive(Debug)]
+enum Last {
+    /// Inside its `try`: the `completed` update, or a refusal's `failed`
+    /// one. If it throws, the `catch` updates the row `failed` with the
+    /// write's message, and answers `nodeWriteError` of it.
+    Try,
+    /// In its `catch`. If it throws, the provider's catch answers the
+    /// write's message; the core still asks once to end the row `failed`
+    /// with it, so the row doesn't stay `uploading`.
+    Catch,
+    /// The one retry after the last update failed with `first`; `in_try`
+    /// says where that update sat. If the retry throws too, the answer is
+    /// its message after a `try` (the `catch` threw), else `first`.
+    Retry { first: JsString, in_try: bool },
 }
 
 /// One upload.
@@ -195,17 +213,20 @@ impl Publish {
                     Err(fault) => self.fault(cx, fault),
                 }
             }
-            Stage::Closing(ask, _) if ask == id => {
-                let Stage::Closing(_, outcome) =
+            Stage::Closing(ask, _, _) if ask == id => {
+                let Stage::Closing(_, outcome, last) =
                     std::mem::replace(&mut self.stage, Stage::Ready(ask))
                 else {
                     return fail(Failure::internal_error());
                 };
-                match event {
-                    Event::Written(Ok(())) => Step::Done(outcome),
-                    // `updateEntry` threw: the provider's catch answers its
-                    // message.
-                    Event::Written(Err(text)) => fail(Failure::internal(text)),
+                match (event, last) {
+                    (Event::Written(Ok(())), _) => Step::Done(outcome),
+                    // `updateEntry` threw.
+                    (Event::Written(Err(text)), Last::Try) => self.retry(cx, text, true),
+                    (Event::Written(Err(text)), Last::Catch) => self.retry(cx, text, false),
+                    (Event::Written(Err(text)), Last::Retry { first, in_try }) => {
+                        fail(Failure::internal(if in_try { text } else { first }))
+                    }
                     _ => fail(Failure::internal_error()),
                 }
             }
@@ -215,10 +236,11 @@ impl Publish {
 
     /// What the request still writes when it ends without its machine: the
     /// row `failed`, with the request's end as its text (`cancelled`,
-    /// `busy`, `Internal error`). Nothing once the machine asked for the
-    /// row's last update, which is made whatever comes after.
-    pub(crate) fn closing(&self, outcome: &Outcome) -> Option<StoreWrite> {
-        let row = self.row?;
+    /// `busy`, `Internal error`); for an insert still in flight, once it
+    /// answers its rowid, the bound's trim keeping that row first. Nothing
+    /// once the machine asked for the row's last update, which is made
+    /// whatever comes after.
+    pub(crate) fn closing(&self, outcome: &Outcome) -> Option<Closing> {
         if self.closed {
             return None;
         }
@@ -228,7 +250,27 @@ impl Publish {
             Outcome::Cancelled => JsString::from("cancelled"),
             Outcome::Protocol(_) => Failure::internal_error().message,
         };
-        update(row, &failed_update(&text), self.now).map(|s| StoreWrite::History(vec![s]))
+        match (self.row, &self.stage) {
+            (Some(row), _) => update(row, &failed_update(&text), self.now)
+                .map(|s| Closing::Write(StoreWrite::History(vec![s]))),
+            (None, Stage::Insert(id)) => Some(Closing::AfterInsert(AfterInsert {
+                id: *id,
+                text,
+                now: self.now,
+            })),
+            (None, _) => None,
+        }
+    }
+
+    /// The terminal an opened body still needs when the request ends
+    /// without its machine: `cancelled`, or `internal` at a protocol error.
+    pub(crate) fn end(&mut self, outcome: &Outcome) -> Option<Effect> {
+        let why = match outcome {
+            Outcome::Protocol(_) => BodyAbort::Internal,
+            _ => BodyAbort::Cancelled,
+        };
+        let (id, out) = self.body.as_mut()?.terminal(why)?;
+        Some(Effect::Body { id, out })
     }
 
     /// Whether the body streams (a tar, or a file the params carry as a
@@ -301,7 +343,9 @@ impl Publish {
     /// The effect's guard, then the upload.
     fn send<W: World>(&mut self, cx: &mut Cx<'_, W>) -> Step {
         if let Err(refused) = guard(cx, self.approval) {
-            return self.close_failed(cx, (refused.message.clone(), refused));
+            // Inside the reference's `try`.
+            let updates = failed_update(&refused.message);
+            return self.close(cx, updates, Outcome::Error(refused), Last::Try);
         }
         let batch = self.batch.clone();
         let call = match &mut self.upload {
@@ -496,7 +540,7 @@ impl Publish {
         row.set("tagUid", tag_uid.map_or(JsValue::Null, number));
         row.set("batchIdUsed", text(&self.batch));
         row.set("bytesSize", number(self.size));
-        self.close(cx, row, Outcome::Result(Value::object(result)))
+        self.close(cx, row, Outcome::Result(Value::object(result)), Last::Try)
     }
 
     /// bee-js's reading of `POST /chunks`' answer, then the core's check of
@@ -546,6 +590,7 @@ impl Publish {
             cx,
             row,
             Outcome::Result(Value::object([("reference", Value::str(&reference))])),
+            Last::Try,
         )
     }
 
@@ -575,13 +620,48 @@ impl Publish {
         }
     }
 
-    /// The row `failed` with the failure's text, then the page's error.
+    /// The row `failed` with the failure's text (the reference's `catch`),
+    /// then the page's error.
     fn close_failed<W: World>(&mut self, cx: &mut Cx<'_, W>, (text, failure): Failing) -> Step {
-        self.close(cx, failed_update(&text), Outcome::Error(failure))
+        self.close(
+            cx,
+            failed_update(&text),
+            Outcome::Error(failure),
+            Last::Catch,
+        )
+    }
+
+    /// The row's last update failed with `first`: the `failed` update with
+    /// its message, once, then the answer (`nodeWriteError` of it after a
+    /// `try`; after a `catch`, its message, as the provider's catch gives
+    /// it).
+    fn retry<W: World>(&mut self, cx: &mut Cx<'_, W>, first: JsString, in_try: bool) -> Step {
+        let outcome = Outcome::Error(if in_try {
+            write_error(&ServiceError::plain(first.clone())).1
+        } else {
+            Failure::internal(first.clone())
+        });
+        let Some(row) = self.row else {
+            return Step::Done(outcome);
+        };
+        match update(row, &failed_update(&first), cx.world.now()) {
+            Some(statement) => {
+                let id = cx.write(StoreWrite::History(vec![statement]));
+                self.stage = Stage::Closing(id, outcome, Last::Retry { first, in_try });
+                Step::Wait
+            }
+            None => fail(Failure::internal_error()),
+        }
     }
 
     /// The row's last update, then `outcome`; at once when there's no row.
-    fn close<W: World>(&mut self, cx: &mut Cx<'_, W>, updates: JsValue, outcome: Outcome) -> Step {
+    fn close<W: World>(
+        &mut self,
+        cx: &mut Cx<'_, W>,
+        updates: JsValue,
+        outcome: Outcome,
+        last: Last,
+    ) -> Step {
         let Some(row) = self.row else {
             return Step::Done(outcome);
         };
@@ -592,12 +672,22 @@ impl Publish {
         match update(row, &updates, cx.world.now()) {
             Some(statement) => {
                 let id = cx.write(StoreWrite::History(vec![statement]));
-                self.stage = Stage::Closing(id, outcome);
+                self.stage = Stage::Closing(id, outcome, last);
                 Step::Wait
             }
             None => fail(Failure::internal_error()),
         }
     }
+}
+
+/// An insert that answered after the request ended: the bound's trim
+/// keeping its row, then the row `failed` with the request's end.
+pub(crate) fn after_insert(rowid: i64, text: &JsString, now: u64) -> Option<StoreWrite> {
+    let failed = update(rowid, &failed_update(text), now)?;
+    Some(StoreWrite::History(vec![
+        history::trim(Some(rowid)),
+        failed,
+    ]))
 }
 
 /// Whether one file's body streams: a part, or (which main doesn't send)
