@@ -19,7 +19,17 @@
 //! (`received − returned > 128 KiB`); a data or terminal frame for a stream
 //! that isn't open; a frame for an ID above the highest request sent; a
 //! reply that isn't pending; a credit frame, which names the other side's
-//! requests and goes to the [`super::Sender`].
+//! requests and goes to the [`super::Sender`]; an abort with a code the
+//! stream doesn't take.
+//!
+//! **Codes, per request** (design 0015, Streams): each request carries the
+//! codes main may end its stream with, given when the core sends it
+//! ([`Inbound::request_with`]): a piece's three ([`Codes::Piece`], the
+//! default), or a `shell.swarm_api` body's, which adds `too_large`
+//! ([`Codes::SwarmPiece`]). A retiring stream keeps its codes. An abort for
+//! an ID the core holds no record of is checked against every code a
+//! stream of the core's may end with, before its ID is: so a code no
+//! stream takes is refused as such, as before the codes were per request.
 //!
 //! **Credit from the consumer** is the core's own accounting: crediting
 //! more than the stream holds is refused ([`Overcredit`]) without failing
@@ -100,6 +110,17 @@ pub struct InboundInfo {
     pub returned: u64,
 }
 
+/// The codes some stream of the core's may end with: an abort for no
+/// record of the core's is checked against these.
+const ANY_INBOUND: [Codes; 2] = [Codes::Piece, Codes::SwarmPiece];
+
+#[derive(Debug)]
+struct Record {
+    entry: Entry,
+    /// The codes main may end this request's stream with.
+    codes: Codes,
+}
+
 #[derive(Debug)]
 enum Entry {
     Pending,
@@ -117,7 +138,7 @@ enum Entry {
 #[derive(Debug, Default)]
 pub struct Inbound {
     highest: u64,
-    entries: BTreeMap<u64, Entry>,
+    entries: BTreeMap<u64, Record>,
     failed: Option<StreamError>,
 }
 
@@ -126,9 +147,18 @@ impl Inbound {
         Self::default()
     }
 
-    /// The core sent request `id`. Its ID must be above every earlier one
-    /// it sent; an error here is the core's own bug.
+    /// The core sent request `id`, whose stream, if its reply opens one,
+    /// main ends only with a piece's codes ([`Codes::Piece`]). Its ID must
+    /// be above every earlier one it sent; an error here is the core's own
+    /// bug.
     pub fn request(&mut self, id: u64) -> Result<(), StreamError> {
+        self.request_with(id, Codes::Piece)
+    }
+
+    /// The core sent request `id`, whose stream main ends only with
+    /// `codes`: [`Codes::SwarmPiece`] for a `shell.swarm_api` call that may
+    /// stream its body (design 0015). As [`Inbound::request`] otherwise.
+    pub fn request_with(&mut self, id: u64, codes: Codes) -> Result<(), StreamError> {
         self.alive()?;
         check_id(id).map_err(|_| StreamError::BadId(id))?;
         if id <= self.highest {
@@ -138,7 +168,13 @@ impl Inbound {
             });
         }
         self.highest = id;
-        self.entries.insert(id, Entry::Pending);
+        self.entries.insert(
+            id,
+            Record {
+                entry: Entry::Pending,
+                codes,
+            },
+        );
         Ok(())
     }
 
@@ -146,7 +182,7 @@ impl Inbound {
     /// `body: true`.
     pub fn reply(&mut self, id: u64, opens: bool) -> Result<Replied, StreamError> {
         self.alive()?;
-        let replied = match self.entries.get_mut(&id) {
+        let replied = match self.entries.get_mut(&id).map(|r| &mut r.entry) {
             Some(entry @ Entry::Pending) => {
                 if opens {
                     *entry = Entry::Open {
@@ -178,7 +214,11 @@ impl Inbound {
     /// the core has cancelled opens a retiring stream, as without a length.
     pub fn reply_sized(&mut self, id: u64, len: u64) -> Result<Replied, StreamError> {
         let replied = self.reply(id, true)?;
-        if let Some(Entry::Open { declared, .. }) = self.entries.get_mut(&id) {
+        if let Some(Record {
+            entry: Entry::Open { declared, .. },
+            ..
+        }) = self.entries.get_mut(&id)
+        {
             *declared = Some(len);
         }
         Ok(replied)
@@ -198,16 +238,22 @@ impl Inbound {
         {
             return Err(self.fail(StreamError::Frame(error)));
         }
-        // Main ends a piece only with a piece's codes (design 0009).
-        if let StreamFrame::Abort { abort, .. } = frame
-            && !Codes::Piece.allows(abort.code)
-        {
-            return Err(self.fail(StreamError::AbortCode(id)));
+        // Main ends a stream only with its request's codes (designs 0009 and
+        // 0015); for no record of the core's, only with a code some stream
+        // of its takes.
+        if let StreamFrame::Abort { abort, .. } = frame {
+            let allowed = match self.entries.get(&id) {
+                Some(record) => record.codes.allows(abort.code),
+                None => ANY_INBOUND.iter().any(|codes| codes.allows(abort.code)),
+            };
+            if !allowed {
+                return Err(self.fail(StreamError::AbortCode(id)));
+            }
         }
         if id > self.highest {
             return Err(self.fail(StreamError::Unknown(id)));
         }
-        let (received, returned, declared) = match self.entries.get_mut(&id) {
+        let (received, returned, declared) = match self.entries.get_mut(&id).map(|r| &mut r.entry) {
             Some(Entry::Open {
                 received,
                 returned,
@@ -236,8 +282,10 @@ impl Inbound {
                     && next > declared
                 {
                     // Past its length: it fails alone, retiring as on a
-                    // local cancel.
-                    self.entries.insert(id, Entry::Retiring);
+                    // local cancel, with its codes.
+                    if let Some(record) = self.entries.get_mut(&id) {
+                        record.entry = Entry::Retiring;
+                    }
                     return Ok(Arrived::Mismatch {
                         id,
                         declared,
@@ -281,8 +329,11 @@ impl Inbound {
         if self.failed.is_some() {
             return Ok(None);
         }
-        let Some(Entry::Open {
-            received, returned, ..
+        let Some(Record {
+            entry: Entry::Open {
+                received, returned, ..
+            },
+            ..
         }) = self.entries.get_mut(&id)
         else {
             return Ok(None);
@@ -309,7 +360,7 @@ impl Inbound {
 
     /// A local cancel of request `id`: its frames are dropped as they come.
     pub fn cancel(&mut self, id: u64) -> Retire {
-        match self.entries.get_mut(&id) {
+        match self.entries.get_mut(&id).map(|r| &mut r.entry) {
             Some(entry @ Entry::Pending) => {
                 *entry = Entry::RetiredPending;
                 Retire::SendCancel
@@ -329,7 +380,7 @@ impl Inbound {
             received: 0,
             returned: 0,
         };
-        Some(match self.entries.get(&id)? {
+        Some(match &self.entries.get(&id)?.entry {
             Entry::Pending => info(InboundState::Pending),
             Entry::RetiredPending => info(InboundState::RetiredPending),
             Entry::Retiring => info(InboundState::Retiring),

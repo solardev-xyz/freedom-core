@@ -1,6 +1,7 @@
 //! Both ends of the streams on one connection: `freedom-cored`'s, at
-//! protocol 2 (design 0009, Streams in the core), and a service's that
-//! takes main's bodies (design 0014, COL-3: [`Duplex::service`]).
+//! protocol 2 (design 0009, Streams in the core; design 0015's Swarm
+//! thread: [`Duplex::swarm`]), and a service's that takes main's bodies
+//! (design 0014, COL-3: [`Duplex::service`]).
 //!
 //! A stream is the body of a response, sent by whichever side answers the
 //! request, and its ID is the request's, in the requester's ID space. So
@@ -94,6 +95,16 @@ impl Duplex {
         Self::with_sender(Sender::with_data_cap(data_cap).with_codes(Codes::Service))
     }
 
+    /// The Swarm thread's streams (design 0015, Streams): the `swarm.body`
+    /// uploads it sends main end only with an upload's codes
+    /// ([`Codes::CoreUpload`]), and main's bodies with their own request's
+    /// ([`Duplex::ask_with`]): a part's, or a `shell.swarm_api` body's,
+    /// which may also end `too_large`. Its sender's writer holds at most
+    /// `data_cap` queued body bytes: 4 uploads' 128 KiB windows, 512 KiB.
+    pub fn swarm(data_cap: usize) -> Self {
+        Self::with_sender(Sender::with_data_cap(data_cap).with_codes(Codes::CoreUpload))
+    }
+
     fn with_sender(sender: Sender) -> Self {
         Self {
             sender,
@@ -145,8 +156,15 @@ impl Duplex {
     /// The core sent request `id` ([`Inbound::request`]): an error is the
     /// core's own bug, and the connection is fine.
     pub fn ask(&mut self, id: u64) -> Result<(), StreamError> {
+        self.ask_with(id, Codes::Piece)
+    }
+
+    /// The core sent request `id`, whose stream main ends only with
+    /// `codes` ([`Inbound::request_with`]): [`Codes::SwarmPiece`] for a
+    /// `shell.swarm_api` body (design 0015). As [`Duplex::ask`] otherwise.
+    pub fn ask_with(&mut self, id: u64, codes: Codes) -> Result<(), StreamError> {
         self.alive()?;
-        self.inbound.request(id)
+        self.inbound.request_with(id, codes)
     }
 
     /// Main's reply to the core's request `id` arrived ([`Inbound::reply`]).
@@ -474,6 +492,111 @@ mod tests {
         out.clear();
         assert_eq!(d.next_frame(&mut out), None);
         assert_eq!(d.failed(), None);
+    }
+
+    /// Design 0015: each of the core's requests carries its stream's codes.
+    /// `too_large` ends only a `shell.swarm_api` body; a part's stream, or
+    /// any other piece, ending with it is a protocol error. A retiring
+    /// stream keeps its codes. An abort for no record of the core's is
+    /// checked against every code some stream of its takes, so one no
+    /// stream takes is refused as such, before its ID is.
+    #[test]
+    fn each_request_carries_its_streams_codes() {
+        let too_large = || Abort::new(AbortCode::TooLarge, "past max_bytes");
+        let mut d = Duplex::swarm(512 << 10);
+        d.ask_with(1, Codes::SwarmPiece).unwrap();
+        d.ask(2).unwrap();
+        d.ask_with(3, Codes::SwarmPiece).unwrap();
+        for id in 1..=2 {
+            d.answered(id, true).unwrap();
+            d.receive(StreamFrame::Data { id, bytes: &[7] }).unwrap();
+        }
+        assert_eq!(
+            d.receive(StreamFrame::Abort {
+                id: 1,
+                abort: too_large()
+            }),
+            Ok(Received::Arrived(Arrived::Abort {
+                id: 1,
+                abort: too_large()
+            }))
+        );
+        // Retiring, before its head: its codes hold, and take `too_large`.
+        assert_eq!(d.withdraw(3), Retire::SendCancel);
+        assert_eq!(d.answered(3, true), Ok(Replied::Retired));
+        assert_eq!(
+            d.receive(StreamFrame::Abort {
+                id: 3,
+                abort: too_large()
+            }),
+            Ok(Received::Arrived(Arrived::Dropped { id: 3 }))
+        );
+        assert_eq!(
+            d.receive(StreamFrame::Abort {
+                id: 2,
+                abort: too_large()
+            }),
+            Err(StreamError::AbortCode(2))
+        );
+        assert_eq!(d.failed(), Some(StreamError::AbortCode(2)));
+
+        // A retiring part keeps a part's codes.
+        let mut d = Duplex::swarm(512 << 10);
+        d.ask(4).unwrap();
+        d.answered(4, true).unwrap();
+        assert_eq!(d.withdraw(4), Retire::SendCancel);
+        assert_eq!(
+            d.receive(StreamFrame::Abort {
+                id: 4,
+                abort: too_large()
+            }),
+            Err(StreamError::AbortCode(4))
+        );
+
+        // No record: a code some stream takes is checked by its ID; one no
+        // stream takes is refused as such.
+        let mut d = Duplex::swarm(512 << 10);
+        d.ask(5).unwrap();
+        assert_eq!(
+            d.receive(StreamFrame::Abort {
+                id: 9,
+                abort: too_large()
+            }),
+            Err(StreamError::Unknown(9))
+        );
+        let mut d = Duplex::swarm(512 << 10);
+        d.ask(5).unwrap();
+        assert_eq!(
+            d.receive(StreamFrame::Abort {
+                id: 9,
+                abort: Abort::new(AbortCode::Internal, "x")
+            }),
+            Err(StreamError::AbortCode(9))
+        );
+        // The dweb thread's duplex: a piece never ends `too_large`.
+        let mut d = Duplex::new();
+        d.ask(6).unwrap();
+        d.answered(6, true).unwrap();
+        assert_eq!(
+            d.receive(StreamFrame::Abort {
+                id: 6,
+                abort: too_large()
+            }),
+            Err(StreamError::AbortCode(6))
+        );
+    }
+
+    /// Design 0015: the Swarm thread's uploads end only with an upload's
+    /// codes.
+    #[test]
+    fn the_swarm_threads_uploads_keep_to_their_codes() {
+        for code in AbortCode::ALL {
+            let mut d = Duplex::swarm(512 << 10);
+            d.request(1).unwrap();
+            d.sender_mut().head(1, b"{}".to_vec(), true).unwrap();
+            let sent = d.sender_mut().abort(1, &Abort::new(code, "x"));
+            assert_eq!(sent.is_ok(), Codes::CoreUpload.allows(code), "{code:?}");
+        }
     }
 
     /// Many streams owed at once, some gone before the writer runs: what it
