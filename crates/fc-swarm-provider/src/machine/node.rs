@@ -295,6 +295,15 @@ impl NodeCall {
         NodeCall::get(Form::Stamps, "/stamps".to_owned(), STAMPS_REPLY_CAP)
     }
 
+    /// `GET /stamps/<b>`, whole, at most 64 KiB.
+    pub fn stamp(batch: &[u8; 32]) -> NodeCall {
+        NodeCall::get(
+            Form::Stamp,
+            format!("/stamps/{}", hex(batch)),
+            JSON_REPLY_CAP,
+        )
+    }
+
     /// `GET /addresses`, whole, at most 64 KiB.
     pub fn addresses() -> NodeCall {
         NodeCall::get(Form::Addresses, "/addresses".to_owned(), JSON_REPLY_CAP)
