@@ -2735,24 +2735,7 @@ fn a_read_error_on_a_node_reply_is_a_protocol_error() {
 
 /// The `shell` cases of these four methods this test doesn't play, each
 /// with why. The test fails on any case it neither plays nor names here.
-const SHELL_LEFT_OUT: &[(&str, &str)] = &[
-    (
-        "feed-read-latest",
-        "`swarm.feed`'s `op: \"read\"` (readFeedState, SWM-8's) has no machine yet",
-    ),
-    (
-        "feed-read-empty",
-        "`swarm.feed`'s `op: \"read\"` (readFeedState, SWM-8's) has no machine yet",
-    ),
-    (
-        "feed-read-probe",
-        "`swarm.feed`'s `op: \"read\"` (readFeedState, SWM-8's) has no machine yet",
-    ),
-    (
-        "feed-read-node-500",
-        "`swarm.feed`'s `op: \"read\"` (readFeedState, SWM-8's) has no machine yet",
-    ),
-];
+const SHELL_LEFT_OUT: &[(&str, &str)] = &[];
 
 /// A call the reference made, as the core makes it, and main's reply.
 struct WantCall {
@@ -2796,12 +2779,29 @@ fn recorded_reply(reply: V<'_, '_>, keep: &[&str]) -> Reply {
 /// The calls the core makes for a step's recorded requests: the reference's
 /// own, but its second `/stamps` dropped (`stamps-one-read`) and its whole
 /// `GET /feeds` index lookup asked as `feed_head` (`index-probe`).
+/// `swarm.feed`'s read (readFeedState) learns the latest index by the same
+/// whole download (bee-js's `downloadPayload`, recorded as `feed_latest`,
+/// unmarked while the read has no grammar row): the core asks `feed_head`
+/// for it too, as for the update.
 fn want_calls(step: V<'_, '_>) -> Vec<WantCall> {
     let mut out = Vec::new();
     for r in get(step, "requests").children() {
         let reply = get(r, "reply");
-        match r.get("deviation").map(string).as_deref() {
+        let deviation = r.get("deviation").map(string);
+        let read_lookup =
+            deviation.is_none() && r.get("form").map(string).as_deref() == Some("feed_latest");
+        match deviation.as_deref() {
             Some("stamps-one-read") => continue,
+            _ if read_lookup => out.push(WantCall {
+                form: "feed_head".to_owned(),
+                method: "GET".to_owned(),
+                path: string(get(r, "path")),
+                query: Vec::new(),
+                headers: vec![("swarm-only-root-chunk".to_owned(), "true".to_owned())],
+                body: None,
+                feed: None,
+                reply: recorded_reply(reply, &["swarm-feed-index", "swarm-feed-index-next"]),
+            }),
             Some("index-probe") => out.push(WantCall {
                 form: "feed_head".to_owned(),
                 method: "GET".to_owned(),
@@ -3022,5 +3022,5 @@ fn every_shell_case_through_the_machines() {
         .collect();
     named.sort();
     assert_eq!(left_out, named, "every left-out case is in the vectors");
-    assert_eq!(played, 41, "cases played");
+    assert_eq!(played, 45, "cases played");
 }
