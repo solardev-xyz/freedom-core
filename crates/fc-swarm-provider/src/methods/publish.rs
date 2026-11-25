@@ -12,9 +12,10 @@
 //! 4. `/stamps` read once (deviation `stamps-one-read`) and the batch chosen
 //!    by `selectBestBatch`;
 //! 5. for a streamed body, the upload's turn among the four that stream;
-//! 6. the effect's guard: the document still holds its key, and for a
-//!    request a site's rule approved, the agent doesn't hold its tab and
-//!    the rule still stands; the site is still connected;
+//! 6. the effect's guard, on the live facts asked for it (design 0015's
+//!    D1): the name still binds the key, and for a request a site's rule
+//!    approved, the agent doesn't hold its tab and the rule still stands;
+//!    the document still holds its key; the site is still connected;
 //! 7. the upload: `POST /bzz` with one file (`{ base64 }` when the params
 //!    carry it inline, else `{ stream }` from its part) or a tar (`{ stream
 //!    }`, page-upload.js's ustar byte for byte, through `fc_swarm::tar`),
@@ -23,8 +24,9 @@
 //!    `{ reference }` and `swarm-tag`, or bee-js's for a chunk, whose
 //!    reference the core checks against its own (deviation
 //!    `reference-check`);
-//! 9. for a collection, the tag's owner, while the document holds its key;
-//!    the row updated; the answer.
+//! 9. for a collection with a tag, the live facts asked again, and the
+//!    tag's owner kept while the name and the document still hold the key
+//!    (`afterEffect`, custody left out); the row updated; the answer.
 //!
 //! A failure after the row exists updates it `failed` with the text the
 //! reference gives it (the service's error's message) before the answer.
@@ -35,13 +37,13 @@ use fc_json::{JsString, JsValue, number_to_string};
 
 use super::body::{BodyWriter, Fault, Piece};
 use super::upload_status::{call_failed, reply_failed};
-use super::{limits, no_address, permitted};
+use super::{limits, live_of, no_address, permitted};
 use crate::errors::{self, ServiceError, Site};
 use crate::machine::node::{Body, BodyAbort, Failed, INLINE_BODY};
 use crate::machine::params::{empty_options, require_params};
 use crate::machine::{
     AfterInsert, Approval, AskId, Capability, Closing, Cx, Effect, Event, Failure, Form, InFlight,
-    NodeCall, Outcome, Protocol, ReadyCheck, Reply, RowEnd, Step, StoreWrite, World, fail,
+    Live, NodeCall, Outcome, Protocol, ReadyCheck, Reply, RowEnd, Step, StoreWrite, World, fail,
 };
 use crate::replies::{self, ChunkUpload, NO_REFERENCE_MESSAGE, PageUpload};
 use crate::stamps::{SelectOptions, read_stamps, select_best_batch};
@@ -82,7 +84,17 @@ enum Stage {
     Trim(AskId),
     Stamps(AskId),
     Turn(AskId),
+    /// The live facts for the effect's guard.
+    Guard(AskId),
     Upload(AskId),
+    /// The live facts for a collection's tag owner (`afterEffect`), then
+    /// the row's update and the answer.
+    Tag {
+        id: AskId,
+        tag: u64,
+        row: JsValue,
+        result: Value,
+    },
     /// The row's last update, then the answer.
     Closing(AskId, Outcome, Last),
 }
@@ -191,18 +203,42 @@ impl Publish {
                     self.batch = batch;
                     if self.streams() {
                         self.stage = Stage::Turn(cx.turn());
-                        Step::Wait
                     } else {
-                        self.send(cx)
+                        self.stage = Stage::Guard(cx.live());
                     }
+                    Step::Wait
                 }
                 Err(failing) => self.close_failed(cx, failing),
             },
             Stage::Turn(ask) if ask == id => match event {
-                Event::Turn => self.send(cx),
+                Event::Turn => {
+                    self.stage = Stage::Guard(cx.live());
+                    Step::Wait
+                }
                 _ => self.close_failed(cx, internal()),
             },
+            Stage::Guard(ask) if ask == id => match live_of(&event) {
+                Some(live) => self.send(cx, live),
+                None => self.close_failed(cx, internal()),
+            },
             Stage::Upload(ask) if ask == id => self.upload_event(cx, event),
+            Stage::Tag { id: ask, .. } if ask == id => {
+                let Stage::Tag {
+                    tag, row, result, ..
+                } = std::mem::replace(&mut self.stage, Stage::Ready(ask))
+                else {
+                    return fail(Failure::internal_error());
+                };
+                let Some(live) = live_of(&event) else {
+                    return self.close_failed(cx, internal());
+                };
+                if live.holds() {
+                    // `afterEffect`: held under the key only while the name
+                    // still answers and the document still holds it.
+                    cx.world.tags().set(tag, cx.origin.clone());
+                }
+                self.close(cx, row, Outcome::Result(result), Last::Try)
+            }
             Stage::Upload(_) if self.body.as_ref().is_some_and(|b| b.copies(id)) => {
                 let Some(body) = self.body.as_mut() else {
                     return self.close_failed(cx, internal());
@@ -253,7 +289,7 @@ impl Publish {
             };
         }
         let text = match outcome {
-            Outcome::Result(_) | Outcome::Subscribe(_) => return None,
+            Outcome::Result(_) => return None,
             Outcome::Error(failure) => failure.message.clone(),
             Outcome::Cancelled => JsString::from("cancelled"),
             Outcome::Protocol(_) => Failure::internal_error().message,
@@ -351,9 +387,9 @@ impl Publish {
         }
     }
 
-    /// The effect's guard, then the upload.
-    fn send<W: World>(&mut self, cx: &mut Cx<'_, W>) -> Step {
-        if let Err(refused) = guard(cx, self.approval) {
+    /// The effect's guard on the live facts just asked, then the upload.
+    fn send<W: World>(&mut self, cx: &mut Cx<'_, W>, live: Live) -> Step {
+        if let Err(refused) = guard(cx, live, self.approval) {
             // Inside the reference's `try`.
             let updates = failed_update(&refused.message);
             return self.close(cx, updates, Outcome::Error(refused), Last::Try);
@@ -534,14 +570,6 @@ impl Publish {
             ("bzzUrl", Value::str(&bzz_url)),
         ];
         if self.method == Method::Files {
-            if let Some(tag) = tag_uid
-                && cx.name_holds()
-                && cx.key_holds()
-            {
-                // `afterEffect`: held under the key only while the document
-                // still holds it.
-                cx.world.tags().set(tag, cx.origin.clone());
-            }
             result.push(("tagUid", tag_value));
         }
         let mut row = JsValue::Object(Vec::new());
@@ -551,7 +579,21 @@ impl Publish {
         row.set("tagUid", tag_uid.map_or(JsValue::Null, number));
         row.set("batchIdUsed", text(&self.batch));
         row.set("bytesSize", number(self.size));
-        self.close(cx, row, Outcome::Result(Value::object(result)), Last::Try)
+        let result = Value::object(result);
+        match tag_uid {
+            // A collection's tag is held under the key (`afterEffect`):
+            // the live facts first.
+            Some(tag) if self.method == Method::Files => {
+                self.stage = Stage::Tag {
+                    id: cx.live(),
+                    tag,
+                    row,
+                    result,
+                };
+                Step::Wait
+            }
+            _ => self.close(cx, row, Outcome::Result(result), Last::Try),
+        }
     }
 
     /// bee-js's reading of `POST /chunks`' answer, then the core's check of
@@ -718,23 +760,23 @@ fn file_streams(data: &Piece) -> bool {
 pub const OTHER_REFERENCE_MESSAGE: &str = "The Swarm node returned another reference";
 
 /// The effect's guard (page-swarm.js's `guardEffect`, then the provider's
-/// `whileGranted`), after the upload's last wait, in its order: the name
-/// still binds the key; for a request the site's rule approved, the agent
-/// doesn't hold its tab and the rule stands; the document is still under
-/// its key; the site is still connected.
-fn guard<W: World>(cx: &Cx<'_, W>, approval: Option<Approval>) -> Result<(), Failure> {
-    if !cx.name_holds() {
+/// `whileGranted`), on the live facts asked after the upload's last wait,
+/// in its order: the name still binds the key; for a request the site's
+/// rule approved, the agent doesn't hold its tab and the rule stands; the
+/// document is still under its key; the site is still connected.
+fn guard<W: World>(cx: &Cx<'_, W>, live: Live, approval: Option<Approval>) -> Result<(), Failure> {
+    if !live.name {
         return Err(no_address());
     }
     if approval == Some(Approval::Auto) {
-        if cx.agent() {
+        if live.agent {
             return Err(Failure::not_authorized("agent_custody"));
         }
         if !cx.auto_approve(Capability::Publish) {
             return Err(Failure::not_authorized("not_auto_approved"));
         }
     }
-    if !cx.key_holds() {
+    if !live.live {
         return Err(no_address());
     }
     if !cx.connected() {

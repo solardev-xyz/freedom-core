@@ -20,13 +20,26 @@
 //!   (0013's durable write, or the history's statements; a feed-store
 //!   change through SW-1's [`keeper`]), a key's owner and a signature (the
 //!   vault, the signature with SW-1's hold), a topic's turn among the
-//!   writes to it, and a GSOC search (the mining lane, [`crate::mining`]).
+//!   writes to it, a GSOC search (the mining lane, [`crate::mining`]), and
+//!   a subscription main opens for the request's document and its close
+//!   (D16).
 //!   A node call whose body streams is answered
 //!   with main's `swarm.body` and its credit too, and the request writes
 //!   that body ([`Effect::Body`]).
+//! - **The live facts** ([`Need::Live`], design 0015's D1): whether the
+//!   page's name still binds its key, whether the document is still under
+//!   it, and whether the agent holds its tab are asked, not read: the swarm
+//!   thread answers from a naming check and main's `approval.recheck`, as
+//!   0012's APR-5 does for Ethereum. The machine asks at every effect's
+//!   guard, before a signature, at the reference's three `afterEffect`
+//!   checks (an upload's tag owner, a new feed's record, a feed's updated
+//!   reference) and before the answers page-swarm.js gives only while the
+//!   name answers, and reads the rest of the check from the world in the
+//!   step the answer comes, with the effect.
 //! - **A request that ends without its machine** (a cancel, its deadline,
 //!   `busy`, a protocol error) still makes the one write its method needs
-//!   then: an upload's history row ends `failed`.
+//!   then: an upload's history row ends `failed`; and it closes a
+//!   subscription main opened for it, or opens once its open answers.
 //! - **The world** ([`World`]), read synchronously on the swarm thread
 //!   between two answers: the clock, the Swarm grants (0012) and the feed
 //!   store (part 2's [`Reads`]), and the read budgets every request
@@ -99,19 +112,6 @@ pub trait World: Reads {
     fn now(&self) -> u64;
     /// The read budgets (`READ_BUDGETS`' buckets), one for every request.
     fn budgets(&mut self) -> &mut ReadBudgets;
-    /// Whether the page's name still binds `key`: 0012's `transport_key`
-    /// check, which the core makes again before each effect (design 0015,
-    /// "Methods main calls": name checks), as page-swarm.js's `nameHolds`
-    /// does.
-    fn name_holds(&self, key: &JsString) -> bool;
-    /// Whether the document that sent the request is current and still
-    /// under `key` (page-documents.js's `holdsKey`), read in the same run
-    /// as an effect.
-    fn key_holds(&self, key: &JsString) -> bool;
-    /// Whether the agent holds that document's tab now (0012's `agent`,
-    /// read live): a request a site's rule approved reads it again before
-    /// its effect (design 0015, "What moves into the core": the rules).
-    fn agent(&self, key: &JsString) -> bool;
     /// Which site owns each upload's tag (`tagOwnership`, session-scoped,
     /// at most 4,096: deviation `tag-owners-bound`).
     fn tags(&mut self) -> &mut TagOwners;
@@ -221,6 +221,42 @@ pub enum Need {
     /// `withWriteLock`): answered [`Event::Locked`] once no other request
     /// holds `topic`, which this request then holds until it ends.
     Lock([u8; 32]),
+    /// The live facts of the request's page (design 0015's D1): a naming
+    /// check when its `PageContext.transport_key` binds, then main's
+    /// `approval.recheck` for its document, as 0012's APR-5 asks them.
+    /// Answered [`Event::Live`]. The machine asks just before each effect
+    /// and reads the answer with the rest of its check, in the step that
+    /// makes the effect.
+    Live,
+    /// `shell.swarm_subscribe { for, kind, key }` (design 0015's D16): main
+    /// opens the subscription for the request's document, under its own
+    /// limits. Answered [`Event::Opened`].
+    Subscribe(Subscription),
+    /// `shell.swarm_unsubscribe { id }` (D16): main closes subscription
+    /// `id`, which it opened for this request, if it is still open.
+    /// Answered [`Event::Closed`]. A whole call that is never called back,
+    /// like a store write: neither a cancel nor the request's deadline ends
+    /// it, so it can stay open after the request's outcome (the close a
+    /// cancel, the deadline, `busy` or a protocol error sends). Instead it
+    /// carries its own bound: main must answer within `answer_within_ms`
+    /// ([`CLOSE_BOUND_MS`]) of the ask, and past it the driver ends the
+    /// connection, as for a peer that breaks the protocol (D13's rule for
+    /// a cancelled ask). No close holds its request for ever.
+    Unsubscribe { id: JsString, answer_within_ms: u64 },
+}
+
+/// How long main has to answer a close ([`Need::Unsubscribe`]) before the
+/// connection ends (design 0015's D16).
+pub const CLOSE_BOUND_MS: u64 = 60_000;
+
+impl Need {
+    /// A close of subscription `id`, with its bound.
+    pub(crate) fn close(id: JsString) -> Need {
+        Need::Unsubscribe {
+            id,
+            answer_within_ms: CLOSE_BOUND_MS,
+        }
+    }
 }
 
 /// What the vault signs: a SOC over `span ‖ payload` with `identifier`,
@@ -354,6 +390,51 @@ pub enum Event {
     Owner(Result<Option<[u8; 20]>, JsString>),
     /// The topic is this request's ([`Need::Lock`]).
     Locked,
+    /// The live facts ([`Need::Live`]).
+    Live(Live),
+    /// Main's answer to [`Need::Subscribe`]: `{ id }` once the
+    /// subscription is open, or `{ failed }` with the registry's reason and
+    /// message.
+    Opened(Result<JsString, OpenFailed>),
+    /// Main's answer to [`Need::Unsubscribe`]: closed, or already gone.
+    Closed,
+}
+
+/// Why main's subscription didn't open (subscription-registry.js's
+/// error): its `reason` (`too_many_subscriptions`,
+/// `node_subscription_limit`, `establish_timeout`, `subscription_cancelled`,
+/// `cancelled`, or none for a socket's own error) and its `message`, which
+/// the method answers as `subscribeError` does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenFailed {
+    pub reason: Option<JsString>,
+    pub message: JsString,
+}
+
+/// The answer to [`Need::Live`]: the page's live facts, read just before
+/// an effect (design 0015's D1). The machine reads them in page-swarm.js's
+/// order: `name`, then, for a request a site's rule approved, `agent` (and
+/// the rule, from the world), then `live`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Live {
+    /// The page's name still binds the request's key: 0012's
+    /// `transport_key` check (page-swarm.js's `nameHolds`), made by the
+    /// core's naming; `true` for a document whose key no name binds.
+    pub name: bool,
+    /// The document that sent the request is current and still under the
+    /// key (page-documents.js's `holdsKey`): `approval.recheck`'s `live`.
+    pub live: bool,
+    /// The agent holds that document's tab (0012's `agent`):
+    /// `approval.recheck`'s `agent`.
+    pub agent: bool,
+}
+
+impl Live {
+    /// page-swarm.js's `afterEffect` and the answers given only while the
+    /// name answers: the name and the document's key, custody left out.
+    pub fn holds(&self) -> bool {
+        self.name && self.live
+    }
 }
 
 /// A SOC signature.
@@ -393,20 +474,22 @@ pub use methods::read_data::{Job, JobDone};
 pub enum Outcome {
     /// `{ result }`.
     Result(Value),
-    /// `swarm_subscribe`'s `{ subscribe: { kind, key } }`, which main
-    /// opens (design 0015, "Methods main calls").
-    Subscribe(Subscription),
     /// `{ error }`.
     Error(Failure),
-    /// Cancelled by main or past its deadline: answered `cancelled`, with
-    /// nothing more asked.
+    /// Cancelled by main or past its deadline: answered `cancelled`. Every
+    /// open ask is cancelled and nothing more is asked, but for what the
+    /// method still owes as it ends: an upload's history row ended
+    /// `failed`, and a subscription main opened, or opens once its
+    /// cancelled open answers, closed ([`Need::Unsubscribe`], which no
+    /// cancel ends; its answer comes within its bound).
     Cancelled,
     /// Main broke the protocol: answered -32603 `Internal error`.
     Protocol(Protocol),
 }
 
-/// A subscription for main to open: `kind` and the 32-byte `key` it
-/// listens on (the GSOC address, or the PSS topic's hash).
+/// A subscription for main to open ([`Need::Subscribe`]): `kind` and the
+/// 32-byte `key` it listens on (the GSOC address, or the PSS topic's
+/// hash).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Subscription {
     pub kind: SubscriptionKind,
@@ -426,20 +509,6 @@ impl SubscriptionKind {
             SubscriptionKind::Gsoc => "gsoc",
             SubscriptionKind::Pss => "pss",
         }
-    }
-}
-
-impl Subscription {
-    /// The answer as main reads it: `{ subscribe: { kind, key } }`, the key
-    /// in lowercase hex.
-    pub fn to_value(&self) -> Value {
-        Value::object([(
-            "subscribe",
-            Value::object([
-                ("kind", Value::str(self.kind.as_str())),
-                ("key", Value::str(&crate::chunks::hex(&self.key))),
-            ]),
-        )])
     }
 }
 
@@ -514,6 +583,9 @@ enum Kind {
     Mine,
     Owner,
     Lock,
+    Live,
+    Subscribe,
+    Unsubscribe,
 }
 
 #[derive(Debug)]
@@ -561,6 +633,9 @@ impl Asks {
             Need::Mine(_) => Kind::Mine,
             Need::Owner(_) => Kind::Owner,
             Need::Lock(_) => Kind::Lock,
+            Need::Live => Kind::Live,
+            Need::Subscribe(_) => Kind::Subscribe,
+            Need::Unsubscribe { .. } => Kind::Unsubscribe,
         };
         self.open.insert(
             id,
@@ -578,9 +653,13 @@ impl Asks {
             && !open.cancelled
         {
             open.cancelled = true;
-            // Work on the hashing pool and a store write can't be called
-            // back; the answer is dropped when it comes.
-            if !matches!(open.kind, Kind::Hash | Kind::Write | Kind::Insert) {
+            // Work on the hashing pool, a store write and a subscription's
+            // close can't be called back; the answer is dropped when it
+            // comes (a close's within its bound, or the connection ends).
+            if !matches!(
+                open.kind,
+                Kind::Hash | Kind::Write | Kind::Insert | Kind::Unsubscribe
+            ) {
                 self.effects.push(Effect::Cancel(id));
             }
         }
@@ -711,7 +790,10 @@ impl Asks {
             | (Kind::Turn, Event::Turn)
             | (Kind::Mine, Event::Mined(_))
             | (Kind::Owner, Event::Owner(_))
-            | (Kind::Lock, Event::Locked) => true,
+            | (Kind::Lock, Event::Locked)
+            | (Kind::Live, Event::Live(_))
+            | (Kind::Subscribe, Event::Opened(_))
+            | (Kind::Unsubscribe, Event::Closed) => true,
             _ => return Err(Protocol::WrongKind),
         };
         let cancelled = open.cancelled;
@@ -838,20 +920,20 @@ impl<W: World> Cx<'_, W> {
         self.world.auto_approve(self.origin, capability)
     }
 
-    /// The page's name still binds the request's key (0012's
-    /// `transport_key`).
-    pub fn name_holds(&self) -> bool {
-        self.world.name_holds(self.origin)
+    /// The page's live facts (D1): the name's binding, the document's key
+    /// and custody, asked just before an effect.
+    pub fn live(&mut self) -> AskId {
+        self.asks.push(Need::Live, 0)
     }
 
-    /// The document is current and still under the request's key.
-    pub fn key_holds(&self) -> bool {
-        self.world.key_holds(self.origin)
+    /// Main opens a subscription for the request's document (D16).
+    pub fn subscribe(&mut self, subscription: Subscription) -> AskId {
+        self.asks.push(Need::Subscribe(subscription), 0)
     }
 
-    /// The agent holds the document's tab (0012's `agent`).
-    pub fn agent(&self) -> bool {
-        self.world.agent(self.origin)
+    /// Main closes subscription `id`, which it opened for this request.
+    pub fn unsubscribe(&mut self, id: JsString) -> AskId {
+        self.asks.push(Need::close(id), 0)
     }
 
     /// The vault: a key's owner.
@@ -922,6 +1004,7 @@ impl Running {
             Running::CreateFeed(m) => m.closing(outcome),
             Running::FeedWrite(m) => m.closing(outcome),
             Running::SocWrite(m) => m.closing(outcome),
+            Running::Subscribe(m) => m.closing(),
             _ => None,
         }
     }
@@ -938,6 +1021,11 @@ pub(crate) enum Closing {
     /// the request ends: nothing more is asked unless it fails, and then
     /// the failed update with the write's error once, if a retry is left.
     InFlight(InFlight),
+    /// Main opened subscription `id` for the request: it is closed.
+    Unsubscribe(JsString),
+    /// Main is opening a subscription (ask `id`): what it opens is closed
+    /// once it answers.
+    AfterOpen(AskId),
 }
 
 /// A row's last write the machine asked before the outcome, still open.
@@ -979,6 +1067,8 @@ enum After {
         id: AskId,
         retry: Option<(i64, u64, bool)>,
     },
+    /// The subscription's open `id`: its `{ id }` is closed.
+    Open(AskId),
 }
 
 /// One `swarm.request`.
@@ -1148,7 +1238,8 @@ impl Request {
     }
 
     /// Main cancelled the request, or its deadline passed: every open ask
-    /// is cancelled and the request answers `cancelled`.
+    /// is cancelled and the request answers `cancelled`; what the method
+    /// still owes as it ends is asked then ([`Outcome::Cancelled`]).
     pub fn cancel(&mut self) {
         if self.outcome.is_none() {
             self.finish(Outcome::Cancelled);
@@ -1178,6 +1269,10 @@ impl Request {
                     retry: write.retry.then_some((write.row, write.now, false)),
                 });
             }
+            Some(Closing::Unsubscribe(id)) => {
+                self.asks.push(Need::close(id), 0);
+            }
+            Some(Closing::AfterOpen(id)) => self.after = Some(After::Open(id)),
             None => {}
         }
         self.outcome = Some(outcome);
@@ -1209,6 +1304,11 @@ impl Request {
             }
             // No row was made.
             (Some(After::Insert(insert)), Event::Inserted(Err(_))) if insert.id == id => {}
+            // Opened as the request ended: closed at once.
+            (Some(After::Open(open)), Event::Opened(Ok(subscription))) if open == id => {
+                self.asks.push(Need::close(subscription), 0);
+            }
+            (Some(After::Open(open)), Event::Opened(Err(_))) if open == id => {}
             (Some(After::Write { id: write, retry }), Event::Written(result)) if write == id => {
                 if let (Err(error), Some((row, now, trim))) = (result, retry)
                     && let Some(again) = methods::publish::row_failed(row, &error, now, trim)
@@ -1288,15 +1388,6 @@ mod tests {
         }
         fn budgets(&mut self) -> &mut ReadBudgets {
             &mut self.budgets
-        }
-        fn name_holds(&self, _key: &JsString) -> bool {
-            true
-        }
-        fn key_holds(&self, _key: &JsString) -> bool {
-            true
-        }
-        fn agent(&self, _key: &JsString) -> bool {
-            false
         }
         fn tags(&mut self) -> &mut TagOwners {
             &mut self.tags

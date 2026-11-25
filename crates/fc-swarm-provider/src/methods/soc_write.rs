@@ -14,11 +14,13 @@
 //! `shared_identity`.
 //! - **The check** stays in today's place, with today's cases and errors.
 //! - **The re-check:** the vault, the readiness check and the history row
-//!   are waits, so in the step that hands the signature to the vault the
-//!   machine runs the feed-grant check, #89's and SW-1 again. If one fails
-//!   now, the request ends with its error and nothing is signed. If the
-//!   site's active identity changed to another exclusive one meanwhile,
-//!   the vault is asked for that key's owner, and the re-check runs again.
+//!   are waits, so in the step that hands the signature to the vault (the
+//!   answer to the live facts asked just before it, design 0015's D1) the
+//!   machine runs the feed-grant check, #89's and SW-1 again, then the
+//!   name's and the document's. If one fails now, the request ends with
+//!   its error and nothing is signed. If the site's active identity changed
+//!   to another exclusive one meanwhile, the vault is asked for that key's
+//!   owner, and the re-check runs again.
 //! - **The hold:** the signature is asked with [`SignSoc::hold`] naming the
 //!   site's key, so the swarm thread defers the listed store changes until
 //!   the vault answers or the request ends ([`crate::machine::keeper`]).
@@ -30,16 +32,16 @@ use fc_json::JsValue;
 use fc_swarm::PreparedChunk;
 use fc_swarm::verify::soc_address;
 
-use super::permitted;
 use super::writes::{
     Ended, Ending, Fail, add_row, batch, closing, feed_not_granted, guard, inserted, owner, row, s,
     signature, signer_key, soc_up, soc_uploaded, stamps_call, still_here, unavailable, written,
 };
+use super::{live_of, permitted};
 use crate::chunks::hex;
 use crate::machine::params::{bytes32, empty_options, hex_string, require_params};
 use crate::machine::{
-    Approval, AskId, Closing, Cx, Event, Failure, Outcome, ReadyCheck, SignKey, SignSoc, SocKind,
-    Step, World, fail,
+    Approval, AskId, Closing, Cx, Event, Failure, Live, Outcome, ReadyCheck, SignKey, SignSoc,
+    SocKind, Step, World, fail,
 };
 use crate::methods::feed_write::{Data, data_of};
 use crate::methods::limits::MAX_CHUNK_PAYLOAD_BYTES;
@@ -89,6 +91,8 @@ enum Stage {
     Ready(AskId),
     Insert(AskId),
     Trim(AskId),
+    /// The live facts for the re-check before the signature.
+    Recheck(AskId),
     Sign {
         id: AskId,
         prepared: PreparedChunk,
@@ -96,6 +100,12 @@ enum Stage {
     Stamps {
         id: AskId,
         signature: [u8; 65],
+    },
+    /// The live facts for the upload's guard.
+    Guard {
+        id: AskId,
+        signature: [u8; 65],
+        batch: BatchId,
     },
     SocUp {
         id: AskId,
@@ -196,7 +206,7 @@ impl SocWrite {
                     Err(failure) => return fail(failure),
                 };
                 if recheck {
-                    return self.sign(cx);
+                    return self.recheck(cx);
                 }
                 self.stage = Stage::Ready(cx.ready(ReadyCheck::Publish));
                 Step::Wait
@@ -231,8 +241,12 @@ impl SocWrite {
                 Err(failure) => fail(failure),
             },
             Stage::Trim(asked) if asked == id => match written(event) {
-                Ok(()) => self.sign(cx),
+                Ok(()) => self.recheck(cx),
                 Err(text) => self.end(cx, Err(Fail::text(text))),
+            },
+            Stage::Recheck(asked) if asked == id => match live_of(&event) {
+                Some(live) => self.sign(cx, live),
+                None => self.end(cx, Err(Fail::internal())),
             },
             Stage::Sign {
                 id: asked,
@@ -256,7 +270,22 @@ impl SocWrite {
                     Err(failure) => return self.end(cx, Err(failure)),
                 };
                 // After the batch's wait, the guard owns the upload.
-                if let Err(refused) = guard(cx, self.approval, Capability::Signing) {
+                self.stage = Stage::Guard {
+                    id: cx.live(),
+                    signature,
+                    batch,
+                };
+                Step::Wait
+            }
+            Stage::Guard {
+                id: asked,
+                signature,
+                batch,
+            } if asked == id => {
+                let Some(live) = live_of(&event) else {
+                    return self.end(cx, Err(Fail::internal()));
+                };
+                if let Err(refused) = guard(cx, live, self.approval, Capability::Signing) {
                     return self.end(cx, Err(Fail::refused(refused)));
                 }
                 let call = soc_up(
@@ -306,10 +335,17 @@ impl SocWrite {
         }
     }
 
-    /// The step that hands the signature to the vault: SW-1 again, with
-    /// the feed-grant check, then the signature under the hold.
-    fn sign<W: World>(&mut self, cx: &mut Cx<'_, W>) -> Step {
-        let key = match check(cx).and_then(|key| still_here(cx).map(|()| key)) {
+    /// Before the signature, the live facts.
+    fn recheck<W: World>(&mut self, cx: &mut Cx<'_, W>) -> Step {
+        self.stage = Stage::Recheck(cx.live());
+        Step::Wait
+    }
+
+    /// The step that hands the signature to the vault, on the live facts
+    /// just asked: SW-1 again, with the feed-grant check, then the name and
+    /// the document, then the signature under the hold.
+    fn sign<W: World>(&mut self, cx: &mut Cx<'_, W>, live: Live) -> Step {
+        let key = match check(cx).and_then(|key| still_here(live).map(|()| key)) {
             Ok(key) => key,
             Err(failure) => return self.end(cx, Err(Fail::refused(failure))),
         };

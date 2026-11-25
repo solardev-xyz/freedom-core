@@ -6,16 +6,16 @@
 //! its record under the effect's guard; then #89's refusal, the readiness
 //! check, the vault (the owner), the history row, one `/stamps` read, the
 //! guard, `POST /feeds/<o>/<t>`, the feed's record (`setFeed`) and the
-//! row's update.
+//! row's update. Each guard, and the record (`afterEffect`, custody left
+//! out), reads the live facts asked just before it (design 0015's D1).
 
 use fc_json::{JsString, JsValue};
 
-use super::permitted;
 use super::writes::{
     Ended, Ending, Fail, add_row, batch, bee_upload, closing, feed_manifest, feed_not_granted,
-    guard, holds_key, inserted, owner, row as fields, s, signer_key, stamps_call, unavailable,
-    written,
+    guard, inserted, owner, row as fields, s, signer_key, stamps_call, unavailable, written,
 };
+use super::{live_of, permitted};
 use crate::chunks::hex;
 use crate::js::concat;
 use crate::machine::params::{feed_name, require_params};
@@ -23,6 +23,7 @@ use crate::machine::{
     Approval, AskId, Closing, Cx, Event, Failure, Outcome, ReadyCheck, SignKey, Step, StoreWrite,
     World, fail,
 };
+use crate::stamps::BatchId;
 use crate::stores::feeds::{FeedChange, identity_mode};
 use crate::stores::manifests::Capability;
 use crate::stores::{UNDEFINED, template};
@@ -45,13 +46,36 @@ pub(crate) struct CreateFeed {
 }
 
 enum Stage {
+    /// The feed exists: the live facts for the guard its record answers
+    /// under.
+    Existing {
+        id: AskId,
+        result: Value,
+    },
     Ready(AskId),
-    Owner { id: AskId, key: SignKey },
+    Owner {
+        id: AskId,
+        key: SignKey,
+    },
     Insert(AskId),
     Trim(AskId),
     Stamps(AskId),
+    /// The live facts for the manifest's guard.
+    Guard {
+        id: AskId,
+        batch: BatchId,
+    },
     Manifest(AskId),
-    Record { id: AskId, result: Value },
+    /// The live facts for the feed's record (`afterEffect`).
+    Kept {
+        id: AskId,
+        record: JsValue,
+        result: Value,
+    },
+    Record {
+        id: AskId,
+        result: Value,
+    },
     Ending(Ending),
     Gone,
 }
@@ -98,8 +122,20 @@ impl CreateFeed {
                     Value::from_js(&identity_mode(identity.as_ref())),
                 ),
             ]);
-            guard(cx, approval, Capability::Feeds)?;
-            return Err(Outcome::Result(result));
+            return Ok(CreateFeed {
+                approval,
+                name,
+                topic,
+                identity: None,
+                owner: [0; 20],
+                row: None,
+                closed: false,
+                now: cx.world.now(),
+                stage: Stage::Existing {
+                    id: cx.live(),
+                    result,
+                },
+            });
         }
         let identity = feeds.active_origin_identity(cx.origin);
         unavailable(identity.as_ref())?;
@@ -119,6 +155,15 @@ impl CreateFeed {
     pub(crate) fn on<W: World>(&mut self, cx: &mut Cx<'_, W>, id: AskId, event: Event) -> Step {
         self.now = cx.world.now();
         match std::mem::replace(&mut self.stage, Stage::Gone) {
+            Stage::Existing { id: asked, result } if asked == id => {
+                let Some(live) = live_of(&event) else {
+                    return fail(Failure::internal_error());
+                };
+                match guard(cx, live, self.approval, Capability::Feeds) {
+                    Ok(()) => Step::Done(Outcome::Result(result)),
+                    Err(refused) => fail(refused),
+                }
+            }
             Stage::Ready(asked) if asked == id => {
                 if let Err(step) = super::chunk_reads::ready(event) {
                     return step;
@@ -172,7 +217,17 @@ impl CreateFeed {
                     Ok(batch) => batch,
                     Err(failure) => return self.end(cx, Err(failure)),
                 };
-                if let Err(refused) = guard(cx, self.approval, Capability::Feeds) {
+                self.stage = Stage::Guard {
+                    id: cx.live(),
+                    batch,
+                };
+                Step::Wait
+            }
+            Stage::Guard { id: asked, batch } if asked == id => {
+                let Some(live) = live_of(&event) else {
+                    return self.end(cx, Err(Fail::internal()));
+                };
+                if let Err(refused) = guard(cx, live, self.approval, Capability::Feeds) {
                     return self.end(cx, Err(Fail::refused(refused)));
                 }
                 self.stage =
@@ -210,7 +265,22 @@ impl CreateFeed {
                         Value::from_js(&identity_mode(self.identity.as_ref())),
                     ),
                 ]);
-                if !holds_key(cx) {
+                self.stage = Stage::Kept {
+                    id: cx.live(),
+                    record,
+                    result,
+                };
+                Step::Wait
+            }
+            Stage::Kept {
+                id: asked,
+                record,
+                result,
+            } if asked == id => {
+                let Some(live) = live_of(&event) else {
+                    return self.end(cx, Err(Fail::internal()));
+                };
+                if !live.holds() {
                     // `afterEffect`: the record is kept only while the
                     // name answers; the manifest stands either way.
                     let updates = row_of_result(&result);

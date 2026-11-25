@@ -26,6 +26,10 @@
 //!   the SOC's own address; `updateFeed`'s last reference recorded; the
 //!   row's update.
 //!
+//! Each guard, the re-check before the signature and the reference's
+//! record (`afterEffect`, custody left out) read the live facts asked just
+//! before them (design 0015's D1).
+//!
 //! A feed entry is at most 10 MiB (deviation `feed-entry-bound`, question
 //! 3), refused with the params, where #1233 refuses it on browser main.
 
@@ -35,18 +39,18 @@ use fc_swarm::verify::{feed_update_address, feed_update_id, soc_address};
 
 use super::body::{BodyWriter, Fault, Piece};
 use super::feed_index::{Next, NextIndex, wrapping_index};
-use super::permitted;
 use super::writes::{
     Ended, Ending, Fail, add_row, batch, bytes_up, bytes_uploaded, closing, feed_not_granted,
-    guard, holds_key, inserted, owner, row, s, signature, signer_key, soc_up, soc_uploaded,
-    stamps_call, still_here, unavailable, written,
+    guard, inserted, owner, row, s, signature, signer_key, soc_up, soc_uploaded, stamps_call,
+    still_here, unavailable, written,
 };
+use super::{live_of, permitted};
 use crate::chunks::single_owner;
 use crate::machine::node::BodyAbort;
 use crate::machine::params::{feed_name, is_hex, require_params};
 use crate::machine::{
-    Approval, AskId, Closing, Cx, Effect, Event, Failure, NodeCall, Outcome, Protocol, ReadyCheck,
-    SignKey, SignSoc, SocKind, Step, StoreWrite, World, fail,
+    Approval, AskId, Closing, Cx, Effect, Event, Failure, Live, NodeCall, Outcome, Protocol,
+    ReadyCheck, SignKey, SignSoc, SocKind, Step, StoreWrite, World, fail,
 };
 use crate::methods::limits::MAX_DATA_BYTES;
 use crate::stamps::BatchId;
@@ -140,16 +144,28 @@ enum Stage {
     },
     /// A large entry waits for its turn among the streaming uploads.
     Turn(AskId),
+    /// The live facts for its upload's guard.
+    UploadGuard(AskId),
     /// Its `POST /bytes`, the body hashed as it goes out.
     Upload {
         call: AskId,
         body: Box<BodyWriter>,
     },
+    /// The live facts for the re-check before the signature.
+    Recheck {
+        id: AskId,
+        span: u64,
+        payload: Vec<u8>,
+    },
     Sign(Box<Signing>),
+    /// The live facts for the SOC upload's guard.
+    Guard(Box<Signed>),
     SocUp {
         id: AskId,
         address: [u8; 32],
     },
+    /// The live facts for `updateFeed`'s record (`afterEffect`).
+    Kept(AskId),
     Record(AskId),
     Ending(Ending),
     Gone,
@@ -160,6 +176,15 @@ struct Signing {
     id: AskId,
     identifier: [u8; 32],
     prepared: PreparedChunk,
+    span: u64,
+    payload: Vec<u8>,
+}
+
+/// The signed update, waiting for its upload's guard.
+struct Signed {
+    id: AskId,
+    identifier: [u8; 32],
+    signature: [u8; 65],
     span: u64,
     payload: Vec<u8>,
 }
@@ -454,7 +479,14 @@ impl FeedWrite {
                 if !matches!(event, Event::Turn) {
                     return self.end(cx, Err(Fail::internal()));
                 }
-                if let Err(refused) = guard(cx, self.approval, Capability::Feeds) {
+                self.stage = Stage::UploadGuard(cx.live());
+                Step::Wait
+            }
+            Stage::UploadGuard(asked) if asked == id => {
+                let Some(live) = live_of(&event) else {
+                    return self.end(cx, Err(Fail::internal()));
+                };
+                if let Err(refused) = guard(cx, live, self.approval, Capability::Feeds) {
                     return self.end(cx, Err(Fail::refused(refused)));
                 }
                 let (Kind::Entry { data, .. }, Some(batch)) = (&self.kind, &self.batch) else {
@@ -476,13 +508,42 @@ impl FeedWrite {
             Stage::Upload { call, body } if id == call || body.copies(id) => {
                 self.upload(cx, call, body, id, event)
             }
+            Stage::Recheck {
+                id: asked,
+                span,
+                payload,
+            } if asked == id => {
+                let Some(live) = live_of(&event) else {
+                    return self.end(cx, Err(Fail::internal()));
+                };
+                self.sign(cx, live, span, payload)
+            }
             Stage::Sign(signing) if signing.id == id => {
                 let sig = match signature(event, &self.owner, &signing.prepared) {
                     Ok(sig) => sig,
                     Err(failure) => return self.end(cx, Err(failure)),
                 };
                 // After the vault's wait, the guard owns the upload.
-                if let Err(refused) = guard(cx, self.approval, Capability::Feeds) {
+                let Signing {
+                    identifier,
+                    span,
+                    payload,
+                    ..
+                } = *signing;
+                self.stage = Stage::Guard(Box::new(Signed {
+                    id: cx.live(),
+                    identifier,
+                    signature: sig,
+                    span,
+                    payload,
+                }));
+                Step::Wait
+            }
+            Stage::Guard(signed) if signed.id == id => {
+                let Some(live) = live_of(&event) else {
+                    return self.end(cx, Err(Fail::internal()));
+                };
+                if let Err(refused) = guard(cx, live, self.approval, Capability::Feeds) {
                     return self.end(cx, Err(Fail::refused(refused)));
                 }
                 let Some(batch) = &self.batch else {
@@ -490,16 +551,16 @@ impl FeedWrite {
                 };
                 let call = soc_up(
                     &self.owner,
-                    &signing.identifier,
-                    &sig,
+                    &signed.identifier,
+                    &signed.signature,
                     batch,
                     false,
-                    signing.span,
-                    &signing.payload,
+                    signed.span,
+                    &signed.payload,
                 );
                 self.stage = Stage::SocUp {
                     id: cx.whole(call),
-                    address: soc_address(&signing.identifier, &self.owner),
+                    address: soc_address(&signed.identifier, &self.owner),
                 };
                 Step::Wait
             }
@@ -508,9 +569,25 @@ impl FeedWrite {
                     return self.end(cx, Err(failure));
                 }
                 match &self.kind {
+                    // `afterEffect`: the live facts first.
+                    Kind::Update { .. } => {
+                        self.stage = Stage::Kept(cx.live());
+                        Step::Wait
+                    }
+                    Kind::Entry { .. } => {
+                        let result = Value::object([("index", self.shown.clone())]);
+                        self.end(cx, Ok((result, row(&[("status", s("completed"))]))))
+                    }
+                }
+            }
+            Stage::Kept(asked) if asked == id => {
+                let Some(live) = live_of(&event) else {
+                    return self.end(cx, Err(Fail::internal()));
+                };
+                match &self.kind {
                     // `afterEffect`: recorded only while the name answers;
                     // the write stands either way.
-                    Kind::Update { .. } if !holds_key(cx) => self.updated(cx),
+                    Kind::Update { .. } if !live.holds() => self.updated(cx),
                     Kind::Update { reference, .. } => {
                         let change = FeedChange::UpdateFeedReference {
                             key: cx.origin.clone(),
@@ -520,10 +597,7 @@ impl FeedWrite {
                         self.stage = Stage::Record(cx.write(StoreWrite::Feeds(change)));
                         Step::Wait
                     }
-                    Kind::Entry { .. } => {
-                        let result = Value::object([("index", self.shown.clone())]);
-                        self.end(cx, Ok((result, row(&[("status", s("completed"))]))))
-                    }
+                    Kind::Entry { .. } => self.end(cx, Err(Fail::internal())),
                 }
             }
             Stage::Record(asked) if asked == id => {
@@ -606,11 +680,28 @@ impl FeedWrite {
             }
         };
         let span = payload.len() as u64;
-        self.sign(cx, span, payload)
+        self.recheck(cx, span, payload)
     }
 
-    fn sign<W: World>(&mut self, cx: &mut Cx<'_, W>, span: u64, payload: Vec<u8>) -> Step {
-        if let Err(moved) = still_here(cx) {
+    /// Before the signature, the live facts.
+    fn recheck<W: World>(&mut self, cx: &mut Cx<'_, W>, span: u64, payload: Vec<u8>) -> Step {
+        self.stage = Stage::Recheck {
+            id: cx.live(),
+            span,
+            payload,
+        };
+        Step::Wait
+    }
+
+    /// The re-check on the live facts just asked, then the signature.
+    fn sign<W: World>(
+        &mut self,
+        cx: &mut Cx<'_, W>,
+        live: Live,
+        span: u64,
+        payload: Vec<u8>,
+    ) -> Step {
+        if let Err(moved) = still_here(live) {
             return self.end(cx, Err(Fail::refused(moved)));
         }
         let identifier = feed_update_id(&self.topic, self.index);
@@ -672,7 +763,7 @@ impl FeedWrite {
                         }
                     };
                     return match fc_swarm::feed::Update::wrap(root) {
-                        Ok(update) => self.sign(cx, update.span(), update.payload().to_vec()),
+                        Ok(update) => self.recheck(cx, update.span(), update.payload().to_vec()),
                         Err(_) => self.end(cx, Err(Fail::internal())),
                     };
                 }
