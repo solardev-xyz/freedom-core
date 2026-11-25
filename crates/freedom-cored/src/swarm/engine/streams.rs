@@ -227,12 +227,15 @@ impl Engine {
     }
 
     /// Main cancelled `swarm.body` `body` (its sender has written its
-    /// `cancelled`): no credit for it follows, so its route goes (D4). The
-    /// machine's later parts of it are dropped; main answers the call.
+    /// `cancelled`): no credit for it follows, so its route closes (D4). The
+    /// machine's later parts of it are dropped; main answers the call. A
+    /// body the thread had closed already (refused, or its call answered)
+    /// is closed once.
     pub fn body_cancelled(&mut self, io: &mut impl Io, now: Ms, body: u64) -> Result<(), Fault> {
         self.deadlines(io, now)?;
-        self.bodies.remove(&body);
-        self.close_body(io, body);
+        if self.bodies.remove(&body).is_some() {
+            self.close_body(io, body);
+        }
         self.drive(io, now)
     }
 
@@ -370,9 +373,13 @@ impl Engine {
     }
 
     /// Main sends no credit for `swarm.body` `body` any more: its route
-    /// closes (D4), here and at the event loop.
+    /// closes (D4), here and at the event loop, each remembering it once
+    /// among the last [`crate::transport::CLOSED_BODIES`].
     pub(super) fn close_body(&mut self, io: &mut impl Io, body: u64) {
         io.forget(StreamKey::Body(body));
+        if self.closed_bodies.contains(&body) {
+            return;
+        }
         if self.closed_bodies.len() >= crate::transport::CLOSED_BODIES {
             self.closed_bodies.pop_front();
         }

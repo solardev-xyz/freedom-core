@@ -664,3 +664,30 @@ fn a_body_main_cancels_closes_its_route() {
     nothing_held(&engine);
     assert_eq!(engine.late_credit(BODY), Err(Fault("stream_closed")));
 }
+
+/// #500's review: the engine remembers each closed body once (close 0
+/// once, 1 twice, then 2 to 63: 0 is still refused), and a cancel of a
+/// body it had closed already closes nothing more.
+#[test]
+fn a_closed_body_is_remembered_once() {
+    let mut engine = fresh(Bounds::default());
+    let mut io = Fake::default();
+    engine.close_body(&mut io, 0);
+    engine.close_body(&mut io, 1);
+    engine.close_body(&mut io, 1);
+    for body in 2..crate::transport::CLOSED_BODIES as u64 {
+        engine.close_body(&mut io, body);
+    }
+    assert_eq!(engine.late_credit(0), Err(Fault("stream_closed")));
+    engine.close_body(&mut io, 1000);
+    assert_eq!(engine.late_credit(0), Ok(()));
+    assert_eq!(engine.late_credit(1), Err(Fault("stream_closed")));
+
+    // A refused swarm.body, then main's cancel of it: one close.
+    let mut engine = fresh(Bounds::default());
+    let mut io = Fake::default();
+    engine.body_request(&mut io, 0, 7, Some("[]")).unwrap();
+    assert_eq!(io.forgotten, [StreamKey::Body(7)]);
+    engine.body_cancelled(&mut io, 0, 7).unwrap();
+    assert_eq!(io.forgotten, [StreamKey::Body(7)], "closed once");
+}
