@@ -544,6 +544,8 @@ struct Thread<'k> {
     db: rusqlite::Connection,
     /// Every feed-store write fails (the gate's write failures).
     fail_writes: bool,
+    /// History writes that fail, from the next one on.
+    failing_history: usize,
     parts_data: BTreeMap<u32, Vec<u8>>,
     request: Option<Request>,
     queue: VecDeque<Effect>,
@@ -561,6 +563,9 @@ struct Thread<'k> {
     bodies: BTreeMap<usize, Vec<u8>>,
     answers: Vec<(Ticket, Result<ChangeAnswer, ChangeError>)>,
     cancels_after_outcome: usize,
+    /// Node calls asked and not yet answered, and the most at once.
+    open_calls: usize,
+    most_open: usize,
 }
 
 impl<'k> Thread<'k> {
@@ -578,6 +583,7 @@ impl<'k> Thread<'k> {
             node,
             db,
             fail_writes: false,
+            failing_history: 0,
             parts_data: BTreeMap::new(),
             request: None,
             queue: VecDeque::new(),
@@ -591,6 +597,8 @@ impl<'k> Thread<'k> {
             bodies: BTreeMap::new(),
             answers: Vec::new(),
             cancels_after_outcome: 0,
+            open_calls: 0,
+            most_open: 0,
         }
     }
 
@@ -603,6 +611,8 @@ impl<'k> Thread<'k> {
         self.vault.signed.clear();
         self.node.soc_posts = 0;
         self.cancels_after_outcome = 0;
+        self.open_calls = 0;
+        self.most_open = 0;
         self.cancelled.clear();
         self.parts.clear();
         self.uploads.clear();
@@ -815,6 +825,10 @@ impl<'k> Thread<'k> {
                         execute(&self.db, &insert);
                         Event::Inserted(Ok(self.db.last_insert_rowid()))
                     }
+                    StoreWrite::History(_) if self.failing_history > 0 => {
+                        self.failing_history -= 1;
+                        Event::Written(Err(JsString::from("SQLITE_FULL: database or disk is full")))
+                    }
                     StoreWrite::History(statements) => {
                         for statement in &statements {
                             execute(&self.db, statement);
@@ -838,6 +852,8 @@ impl<'k> Thread<'k> {
                 self.give(ask.id, Event::PartHead(len));
             }
             Need::Node(call) => {
+                self.open_calls += 1;
+                self.most_open = self.most_open.max(self.open_calls);
                 if let Some(Body::Stream { .. }) = call.body {
                     assert_eq!(ask.charge, whole_charge(call.form));
                     self.uploads
@@ -866,11 +882,9 @@ impl<'k> Thread<'k> {
                     self.cancel();
                 }
                 for event in events {
-                    if self.cancelled.contains(&ask.id) {
-                        break;
-                    }
                     self.give(ask.id, event);
                 }
+                self.open_calls -= 1;
             }
             other => panic!("an ask these machines don't make: {other:?}"),
         }
@@ -899,6 +913,7 @@ impl<'k> Thread<'k> {
         for event in events {
             self.give(id, event);
         }
+        self.open_calls -= 1;
     }
 
     fn world_change(&mut self, change: Option<WorldChange>) {
@@ -1527,7 +1542,9 @@ fn feed_and_soc_writes() {
                 ready: thread.ready.clone(),
                 calls: thread.calls.clone(),
                 cancels_after_outcome: thread.cancels_after_outcome,
+                most_open: thread.most_open,
             };
+            assert!(thread.most_open <= 1, "{sid}: one call at a time");
             check_row_shape(&sid, grammar, row, &shape);
             check_binds(&sid, row, &handoff.key, &handoff.params, &outcome, &thread);
             // The core's own error ends the request where the reference
@@ -2457,5 +2474,140 @@ fn a_large_entrys_tag_reads_as_bee_js() {
                 assert_eq!(thread.node.soc_posts, 1, "{tag:?}");
             }
         }
+    }
+}
+
+/// A request that ends while its history insert is in flight: once the
+/// insert answers, its row is trimmed around and ended `failed` with
+/// `cancelled` (part 3b's `after_insert`), and nothing is signed.
+#[test]
+fn a_cancel_during_the_insert_ends_its_row() {
+    let text = text_of("keys.json");
+    let index = Index::new(&text).unwrap();
+    let keys = keys(&index);
+    let mut thread = gate_thread(&keys);
+    raw_soc(&mut thread);
+    let insert = thread
+        .run_until(|need| matches!(need, Need::Write(StoreWrite::HistoryInsert(_))))
+        .expect("the row's insert");
+    thread.cancel();
+    thread.answer(insert);
+    assert_eq!(thread.run(), Outcome::Cancelled);
+    let rows = thread.history();
+    let row = &rows.as_array().unwrap()[0];
+    assert_eq!(row.get("status").and_then(JsValue::as_str), Some("failed"));
+    assert_eq!(
+        row.get("errorMessage").and_then(JsValue::as_str),
+        Some("cancelled")
+    );
+    assert!(thread.vault.signed.is_empty() && thread.node.soc_posts == 0);
+}
+
+/// A large entry's body cut by the request's end gets its one terminal,
+/// `cancelled`, and its row ends `failed`.
+#[test]
+fn a_cancel_mid_body_ends_the_body_once() {
+    let text = text_of("keys.json");
+    let index = Index::new(&text).unwrap();
+    let keys = keys(&index);
+    let (key, mut store) = feed_site();
+    let record = fc_json::parse(&format!(
+        r#"{{"topic":"t","owner":"o","manifestReference":"{}","identityId":"bee-wallet"}}"#,
+        "cd".repeat(32)
+    ))
+    .unwrap();
+    store
+        .set_feed(&key, &JsString::from("blog"), &record, 1)
+        .unwrap();
+    let mut node = WriteNode::new();
+    node.stamps = Some(STAMPS.to_owned());
+    let mut thread = Thread::new(site_world(&key, store), &keys, node);
+    let data = content("cut/70000", 70_000);
+    thread.parts_data.insert(0, data.clone());
+    thread.start(&Call {
+        method: Value::str("swarm_writeFeedEntry"),
+        params: Value::object([
+            ("name", Value::str("blog")),
+            (
+                "data",
+                Value::Bytes(fc_swarm_provider::value::Bytes {
+                    len: data.len() as u64,
+                    kind: fc_swarm_provider::value::BytesKind::Uint8Array,
+                    source: fc_swarm_provider::value::Source::Part(0),
+                    data: true,
+                }),
+            ),
+        ]),
+        key,
+        approval: Some(Approval::User),
+    });
+    // Paused as the body asks for its part: the body is open, not ended.
+    thread
+        .run_until(|need| matches!(need, Need::Part(0)))
+        .expect("the part");
+    let upload = *thread.uploads.keys().next().expect("the body open");
+    thread.cancel();
+    let terminals: Vec<&Effect> = thread
+        .queue
+        .iter()
+        .filter(|e| matches!(e, Effect::Body { id, out: BodyOut::Abort(_) } if *id == upload))
+        .collect();
+    assert_eq!(
+        terminals,
+        [&Effect::Body {
+            id: upload,
+            out: BodyOut::Abort(fc_swarm_provider::machine::node::BodyAbort::Cancelled)
+        }]
+    );
+    assert_eq!(thread.run(), Outcome::Cancelled);
+    let rows = thread.history();
+    assert_eq!(
+        rows.as_array().unwrap()[0]
+            .get("errorMessage")
+            .and_then(JsValue::as_str),
+        Some("cancelled")
+    );
+    assert!(thread.vault.signed.is_empty() && thread.node.soc_posts == 0);
+}
+
+/// The row's last update fails: after the `completed` update (inside the
+/// reference's `try`), the row ends `failed` with the write's message and
+/// the page reads `nodeWriteError` of it; if that fails too, the
+/// provider's catch answers its message.
+#[test]
+fn a_failed_last_update_ends_the_row_failed() {
+    let text = text_of("keys.json");
+    let index = Index::new(&text).unwrap();
+    let keys = keys(&index);
+    for failing in [1, 2] {
+        let mut thread = gate_thread(&keys);
+        raw_soc(&mut thread);
+        // Fail the history writes from the completed update on (the trim
+        // after the insert is the first history write).
+        let insert = thread
+            .run_until(|need| matches!(need, Need::Write(StoreWrite::HistoryInsert(_))))
+            .unwrap();
+        thread.answer(insert);
+        let trim = thread
+            .run_until(|need| matches!(need, Need::Write(StoreWrite::History(_))))
+            .unwrap();
+        thread.answer(trim);
+        thread.failing_history = failing;
+        let outcome = thread.run();
+        assert_eq!(
+            outcome,
+            Outcome::Error(Failure::internal("SQLITE_FULL: database or disk is full")),
+            "{failing}"
+        );
+        assert_eq!(thread.node.soc_posts, 1, "the SOC went up");
+        let rows = thread.history();
+        let row = &rows.as_array().unwrap()[0];
+        let (status, message) = if failing == 1 {
+            ("failed", Some("SQLITE_FULL: database or disk is full"))
+        } else {
+            ("uploading", None)
+        };
+        assert_eq!(row.get("status").and_then(JsValue::as_str), Some(status));
+        assert_eq!(row.get("errorMessage").and_then(JsValue::as_str), message);
     }
 }
