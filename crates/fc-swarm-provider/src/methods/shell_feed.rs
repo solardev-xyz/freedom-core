@@ -26,7 +26,9 @@ use fc_swarm::PreparedChunk;
 use fc_swarm::verify::{feed_update_id, soc_address};
 
 use super::feed_index::{Next, NextIndex};
-use super::writes::{BeeRead, bee_upload_read, feed_manifest, owner, signature, soc_up, soc_uploaded};
+use super::writes::{
+    BeeRead, bee_upload_read, feed_manifest, owner, signature, soc_up, soc_uploaded,
+};
 use crate::chunks::hex;
 use crate::errors::{ServiceError, Site};
 use crate::machine::shell::{self, FeedCall, FeedOp, ShellError, ShellOutcome, ShellStep};
@@ -50,9 +52,16 @@ enum Stage {
     Stamps(AskId),
     Manifest(AskId),
     Lock(AskId),
-    Lookup { id: AskId, next: NextIndex },
+    Lookup {
+        id: AskId,
+        next: NextIndex,
+    },
     Sign(Box<Signing>),
-    SocUp { id: AskId, address: [u8; 32], index: u64 },
+    SocUp {
+        id: AskId,
+        address: [u8; 32],
+        index: u64,
+    },
     Gone,
 }
 
@@ -77,7 +86,12 @@ impl ShellFeed {
         }
     }
 
-    pub(crate) fn on<W: World>(&mut self, cx: &mut Cx<'_, W>, id: AskId, event: Event) -> ShellStep {
+    pub(crate) fn on<W: World>(
+        &mut self,
+        cx: &mut Cx<'_, W>,
+        id: AskId,
+        event: Event,
+    ) -> ShellStep {
         match std::mem::replace(&mut self.stage, Stage::Gone) {
             Stage::Owner(asked) if asked == id => match owner(SignKey::BeeWallet, event) {
                 Ok(owner) => {
@@ -109,7 +123,10 @@ impl ShellFeed {
                 };
                 ShellStep::Wait
             }
-            Stage::Lookup { id: asked, mut next } if asked == id => {
+            Stage::Lookup {
+                id: asked,
+                mut next,
+            } if asked == id => {
                 let step = match event {
                     Event::Reply(reply) => next.reply(&reply),
                     Event::Failed(class) => next.failed(class),

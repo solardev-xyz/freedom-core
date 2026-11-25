@@ -104,7 +104,10 @@ pub(crate) fn batch_value(batch: &PostageBatch, raw: RawBatchView<'_>) -> Value 
         ("usageText".into(), Value::str(&batch.usage_text)),
         ("size".into(), Value::Number(batch.size)),
         ("remainingSize".into(), Value::Number(batch.remaining_size)),
-        ("theoreticalSize".into(), Value::Number(batch.theoretical_size)),
+        (
+            "theoreticalSize".into(),
+            Value::Number(batch.theoretical_size),
+        ),
         ("duration".into(), Value::Number(batch.duration)),
     ];
     if let Some(exists) = raw.exists() {

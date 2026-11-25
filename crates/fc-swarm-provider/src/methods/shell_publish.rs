@@ -37,8 +37,7 @@ use crate::chunks::hex;
 use crate::errors::{self, ServiceError, Site};
 use crate::machine::node::{Body, BodyAbort, INLINE_BODY};
 use crate::machine::shell::{
-    self, HistoryEntry, HistoryKind, PublishCall, PublishKind, ShellError, ShellOutcome,
-    ShellStep,
+    self, HistoryEntry, HistoryKind, PublishCall, PublishKind, ShellError, ShellOutcome, ShellStep,
 };
 use crate::machine::{
     AfterInsert, AskId, Closing, Cx, Effect, Event, Form, InFlight, NodeCall, Protocol, Reply,
@@ -127,7 +126,8 @@ impl ShellPublish {
             .parts
             .iter()
             .fold(0u64, |total, p| total.saturating_add(p.bytes));
-        let text = |s: Option<&JsString>| s.filter(|s| !s.is_empty()).map(|s| s.as_str().to_owned());
+        let text =
+            |s: Option<&JsString>| s.filter(|s| !s.is_empty()).map(|s| s.as_str().to_owned());
         let (name, content_type) = match call.kind {
             // `options.name || 'data'`, `options.contentType || 'text/plain'`.
             PublishKind::Data => (
@@ -199,7 +199,12 @@ impl ShellPublish {
         }
     }
 
-    pub(crate) fn on<W: World>(&mut self, cx: &mut Cx<'_, W>, id: AskId, event: Event) -> ShellStep {
+    pub(crate) fn on<W: World>(
+        &mut self,
+        cx: &mut Cx<'_, W>,
+        id: AskId,
+        event: Event,
+    ) -> ShellStep {
         self.now = cx.world.now();
         match std::mem::replace(&mut self.stage, Stage::Gone) {
             Stage::Insert(ask) if ask == id => match event {
@@ -435,7 +440,12 @@ impl ShellPublish {
 
     /// An answer to the upload call: main's `swarm.body` and its credit,
     /// then the node's answer.
-    fn upload_event<W: World>(&mut self, cx: &mut Cx<'_, W>, ask: AskId, event: Event) -> ShellStep {
+    fn upload_event<W: World>(
+        &mut self,
+        cx: &mut Cx<'_, W>,
+        ask: AskId,
+        event: Event,
+    ) -> ShellStep {
         match event {
             Event::BodyOpen | Event::BodyCredit(_) => {
                 let Some(body) = self.body.as_mut() else {
@@ -557,9 +567,7 @@ impl ShellPublish {
             ShellOutcome::Error(err) => err.message.clone(),
             ShellOutcome::Busy => JsString::from("busy"),
             ShellOutcome::Cancelled => JsString::from("cancelled"),
-            ShellOutcome::Result(_) | ShellOutcome::Protocol(_) => {
-                JsString::from("Internal error")
-            }
+            ShellOutcome::Result(_) | ShellOutcome::Protocol(_) => JsString::from("Internal error"),
         };
         let updates = failed_update(&self.row_text(&message));
         self.close(cx, updates, outcome, Last::Catch)

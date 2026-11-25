@@ -249,7 +249,10 @@ impl ShellError {
 
     /// `{ message, code?, status?, capacity? }`.
     pub fn to_value(&self) -> Value {
-        let mut members = vec![(JsString::from("message"), Value::String(self.message.clone()))];
+        let mut members = vec![(
+            JsString::from("message"),
+            Value::String(self.message.clone()),
+        )];
         if let Some(code) = self.code {
             members.push((JsString::from("code"), Value::str(code)));
         }
@@ -262,7 +265,10 @@ impl ShellError {
                 Value::object([
                     ("uploadBytes", Value::Number(c.upload_bytes)),
                     ("requiredBytes", Value::Number(c.required_bytes)),
-                    ("largestRemainingBytes", Value::Number(c.largest_remaining_bytes)),
+                    (
+                        "largestRemainingBytes",
+                        Value::Number(c.largest_remaining_bytes),
+                    ),
                 ]),
             ));
         }
@@ -354,9 +360,13 @@ pub enum ShellCall {
     Publish(PublishCall),
     Feed(FeedCall),
     /// `{ id? }`.
-    Stamps { id: Option<BatchId> },
+    Stamps {
+        id: Option<BatchId>,
+    },
     /// `{ tag_uid }`.
-    UploadStatus { tag_uid: u64 },
+    UploadStatus {
+        tag_uid: u64,
+    },
 }
 
 /// `swarm.publish`'s `kind`.
@@ -427,7 +437,10 @@ pub enum FeedOp {
     Create,
     /// `reference` (32 bytes, or 64 for an encrypted one), and the least
     /// index to write at.
-    Update { reference: Vec<u8>, min_index: u64 },
+    Update {
+        reference: Vec<u8>,
+        min_index: u64,
+    },
 }
 
 /// `swarm.feed`'s params: `{ op, key: { kind: "bee_wallet" }, topic,
@@ -512,7 +525,8 @@ impl<'v> Members<'v> {
 /// A safe non-negative integer.
 fn safe_integer(value: &JsValue) -> Option<u64> {
     match value {
-        JsValue::Number(n) if n.is_finite() && n.trunc() == *n && (0.0..=MAX_SAFE).contains(n) => {
+        JsValue::Number(n) if n.is_finite() && n.trunc() == *n && (0.0..=MAX_SAFE).contains(n) =>
+        {
             #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
@@ -609,9 +623,7 @@ fn parse_publish(params: &JsValue) -> Result<PublishCall, Invalid> {
     for item in items {
         let part = parse_part(item, collection)?;
         if let Source::Part(k) = part.source
-            && parts
-                .iter()
-                .any(|p: &PartSpec| p.source == Source::Part(k))
+            && parts.iter().any(|p: &PartSpec| p.source == Source::Part(k))
         {
             return Err(invalid("params.parts", "a part named twice"));
         }
@@ -695,7 +707,11 @@ fn parse_publish(params: &JsValue) -> Result<PublishCall, Invalid> {
 /// A part: `{ path?, bytes, base64 }` (at most 64 KiB) or `{ path?, bytes,
 /// part }`; a collection's parts have a path, data and a file's don't.
 fn parse_part(value: &JsValue, collection: bool) -> Result<PartSpec, Invalid> {
-    let m = Members::of(value, "params.parts[]", &["path", "bytes", "base64", "part"])?;
+    let m = Members::of(
+        value,
+        "params.parts[]",
+        &["path", "bytes", "base64", "part"],
+    )?;
     let path = m.string("path")?.cloned();
     match (&path, collection) {
         (Some(p), true) if !p.is_empty() => {}
@@ -837,12 +853,12 @@ impl Shell {
         let started = match call {
             ShellCall::Publish(call) => shell_publish::ShellPublish::start(&mut cx, call)
                 .map(|m| Running::Publish(Box::new(m))),
-            ShellCall::Feed(call) => {
-                Ok(Running::Feed(Box::new(shell_feed::ShellFeed::start(&mut cx, call))))
-            }
-            ShellCall::Stamps { id } => {
-                Ok(Running::Stamps(shell_stamps::ShellStamps::start(&mut cx, id)))
-            }
+            ShellCall::Feed(call) => Ok(Running::Feed(Box::new(shell_feed::ShellFeed::start(
+                &mut cx, call,
+            )))),
+            ShellCall::Stamps { id } => Ok(Running::Stamps(shell_stamps::ShellStamps::start(
+                &mut cx, id,
+            ))),
             ShellCall::UploadStatus { tag_uid } => Ok(Running::Status(
                 shell_status::ShellStatus::start(&mut cx, tag_uid),
             )),
@@ -992,7 +1008,10 @@ mod tests {
             ]
         );
         assert!(ShellMethod::ALL.iter().all(|m| m.gated()));
-        assert_eq!(ShellMethod::from_name("swarm.feed"), Some(ShellMethod::Feed));
+        assert_eq!(
+            ShellMethod::from_name("swarm.feed"),
+            Some(ShellMethod::Feed)
+        );
         assert_eq!(ShellMethod::from_name("swarm.request"), None);
         assert_eq!(Deadline::Swarm.total_ms(None), Some(300_000));
         assert_eq!(Deadline::Swarm.total_ms(Some(10_000)), Some(10_000));
@@ -1058,21 +1077,81 @@ mod tests {
         };
         assert_eq!(call.parts[0].source, Source::Inline(b"hello".to_vec()));
         for (method, text, why) in [
-            (ShellMethod::Publish, r#"{"kind":"data","parts":[{"bytes":5,"base64":"aGVsbG8="}],"pin":true,"deferred":false,"extra":1}"#, "params: an unknown member extra"),
-            (ShellMethod::Publish, r#"{"kind":"data","parts":[{"bytes":4,"base64":"aGVsbG8="}],"pin":true,"deferred":false}"#, "params.parts[].base64: not base64 of its bytes, at most 64 KiB"),
-            (ShellMethod::Publish, r#"{"kind":"data","parts":[{"bytes":5,"part":0}],"pin":false,"deferred":false}"#, "params.pin: only true"),
-            (ShellMethod::Publish, r#"{"kind":"data","parts":[{"bytes":5,"part":0}],"pin":true}"#, "params.deferred: missing"),
-            (ShellMethod::Publish, r#"{"kind":"file","parts":[{"bytes":5,"part":0}],"pin":true,"deferred":true}"#, "params.name: a file's name is required"),
-            (ShellMethod::Publish, r#"{"kind":"collection","parts":[{"bytes":5,"part":0}],"pin":true,"deferred":true}"#, "params.parts[].path: a collection's part needs one"),
-            (ShellMethod::Publish, r#"{"kind":"collection","parts":[{"path":"a","bytes":5,"part":0}],"pin":true,"deferred":false}"#, "params.deferred: a collection defers"),
-            (ShellMethod::Publish, r#"{"kind":"collection","parts":[{"path":"a","bytes":5,"part":0},{"path":"b","bytes":1,"part":0}],"pin":true,"deferred":true}"#, "params.parts: a part named twice"),
-            (ShellMethod::Publish, r#"{"kind":"data","parts":[{"bytes":5,"part":0}],"content_type":"テキスト","pin":true,"deferred":false}"#, "params.content_type: not a header value"),
-            (ShellMethod::Publish, r#"{"kind":"data","parts":[],"pin":true,"deferred":false}"#, "params.parts: one part for data or a file"),
-            (ShellMethod::Feed, r#"{"op":"create","key":{"kind":"publisher"},"topic":"00"}"#, "params.key.kind: only bee_wallet"),
-            (ShellMethod::Feed, r#"{"op":"update","key":{"kind":"bee_wallet"},"topic":"00"}"#, "params.topic: not 64 hex"),
-            (ShellMethod::Stamps, r#"{"id":"0xab"}"#, "params.id: not 64 hex digits"),
-            (ShellMethod::UploadStatus, r#"{"tag_uid":0}"#, "params.tag_uid: not a positive safe integer"),
-            (ShellMethod::UploadStatus, r#"{"tag_uid":9007199254740992}"#, "params.tag_uid: not a positive safe integer"),
+            (
+                ShellMethod::Publish,
+                r#"{"kind":"data","parts":[{"bytes":5,"base64":"aGVsbG8="}],"pin":true,"deferred":false,"extra":1}"#,
+                "params: an unknown member extra",
+            ),
+            (
+                ShellMethod::Publish,
+                r#"{"kind":"data","parts":[{"bytes":4,"base64":"aGVsbG8="}],"pin":true,"deferred":false}"#,
+                "params.parts[].base64: not base64 of its bytes, at most 64 KiB",
+            ),
+            (
+                ShellMethod::Publish,
+                r#"{"kind":"data","parts":[{"bytes":5,"part":0}],"pin":false,"deferred":false}"#,
+                "params.pin: only true",
+            ),
+            (
+                ShellMethod::Publish,
+                r#"{"kind":"data","parts":[{"bytes":5,"part":0}],"pin":true}"#,
+                "params.deferred: missing",
+            ),
+            (
+                ShellMethod::Publish,
+                r#"{"kind":"file","parts":[{"bytes":5,"part":0}],"pin":true,"deferred":true}"#,
+                "params.name: a file's name is required",
+            ),
+            (
+                ShellMethod::Publish,
+                r#"{"kind":"collection","parts":[{"bytes":5,"part":0}],"pin":true,"deferred":true}"#,
+                "params.parts[].path: a collection's part needs one",
+            ),
+            (
+                ShellMethod::Publish,
+                r#"{"kind":"collection","parts":[{"path":"a","bytes":5,"part":0}],"pin":true,"deferred":false}"#,
+                "params.deferred: a collection defers",
+            ),
+            (
+                ShellMethod::Publish,
+                r#"{"kind":"collection","parts":[{"path":"a","bytes":5,"part":0},{"path":"b","bytes":1,"part":0}],"pin":true,"deferred":true}"#,
+                "params.parts: a part named twice",
+            ),
+            (
+                ShellMethod::Publish,
+                r#"{"kind":"data","parts":[{"bytes":5,"part":0}],"content_type":"テキスト","pin":true,"deferred":false}"#,
+                "params.content_type: not a header value",
+            ),
+            (
+                ShellMethod::Publish,
+                r#"{"kind":"data","parts":[],"pin":true,"deferred":false}"#,
+                "params.parts: one part for data or a file",
+            ),
+            (
+                ShellMethod::Feed,
+                r#"{"op":"create","key":{"kind":"publisher"},"topic":"00"}"#,
+                "params.key.kind: only bee_wallet",
+            ),
+            (
+                ShellMethod::Feed,
+                r#"{"op":"update","key":{"kind":"bee_wallet"},"topic":"00"}"#,
+                "params.topic: not 64 hex",
+            ),
+            (
+                ShellMethod::Stamps,
+                r#"{"id":"0xab"}"#,
+                "params.id: not 64 hex digits",
+            ),
+            (
+                ShellMethod::UploadStatus,
+                r#"{"tag_uid":0}"#,
+                "params.tag_uid: not a positive safe integer",
+            ),
+            (
+                ShellMethod::UploadStatus,
+                r#"{"tag_uid":9007199254740992}"#,
+                "params.tag_uid: not a positive safe integer",
+            ),
             (ShellMethod::UploadStatus, "[]", "params: not an object"),
         ] {
             assert_eq!(parse(method, text).unwrap_err().0, why, "{text}");
