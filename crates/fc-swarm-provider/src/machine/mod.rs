@@ -61,10 +61,11 @@ pub mod keeper;
 pub mod node;
 pub mod page;
 pub(crate) mod params;
+pub mod shell;
 
 pub use node::{
-    Abort, Body, BodyAbort, BodyOut, CHUNK_REPLY_CAP, Failed, FeedRef, Form, Head, JSON_REPLY_CAP,
-    MAX_FRAME, NodeCall, Reply, Rule, TreeRef, stream_charge, whole_charge,
+    Abort, Body, BodyAbort, BodyOut, CHUNK_REPLY_CAP, ErrorCode, Failed, FeedRef, Form, Head,
+    JSON_REPLY_CAP, MAX_FRAME, NodeCall, Reply, Rule, TreeRef, stream_charge, whole_charge,
 };
 pub use page::Failure;
 
@@ -125,6 +126,19 @@ pub const UPLOAD_CHARGE: usize = 300 * 1024;
 /// How many uploads stream at once (design 0015, "Bounds"); the rest wait
 /// for a turn ([`Need::Upload`]).
 pub const STREAMING_UPLOADS: usize = 4;
+
+/// What a request reserves in the swarm thread's memory when it is
+/// admitted: its params, state and texts (design 0015, "The swarm thread's
+/// memory"). Every `swarm.request` and every shell parent
+/// ([`shell::Shell`]) holds it until it ends.
+pub const REQUEST_CHARGE: usize = 64 * 1024;
+
+/// The admission gate (design 0015, "Budgets"): at most this many requests
+/// run at once, `swarm.request` and the shell parents that take a place
+/// ([`shell::ShellMethod::gated`]) together.
+pub const RUNNING_REQUESTS: usize = 64;
+/// At most this many wait for a place; past that a request is `busy`.
+pub const WAITING_REQUESTS: usize = 256;
 
 /// How main approved a request (`approval`): its prompt, or a standing
 /// rule. A request a rule approved has no admission check at its start:
@@ -769,6 +783,10 @@ impl Asks {
                 frame(bytes.len(), received, *window)?;
                 false
             }
+            // A file's read error is a part's reason, never a node reply's.
+            (Kind::Stream { .. }, Event::Abort(Abort::Unreadable(_))) => {
+                return Err(Protocol::WrongKind);
+            }
             (Kind::Stream { head, .. } | Kind::Part { head, .. }, Event::End | Event::Abort(_)) => {
                 if !*head {
                     return Err(Protocol::BeforeHead);
@@ -801,6 +819,18 @@ impl Asks {
             self.open.remove(&id);
         }
         Ok(cancelled)
+    }
+
+    /// Main asked for the body of a call the machine had already cancelled
+    /// (its `swarm.body` crossed the cancel): the body still gets its one
+    /// terminal, `cancelled`, at once.
+    fn terminate_body(&mut self, id: AskId, event: &Event) {
+        if *event == Event::BodyOpen {
+            self.effects.push(Effect::Body {
+                id,
+                out: BodyOut::Abort(BodyAbort::Cancelled),
+            });
+        }
     }
 
     fn credit(&mut self, id: AskId, bytes: usize) {
@@ -1071,6 +1101,71 @@ enum After {
     Open(AskId),
 }
 
+impl After {
+    /// What a method's [`Closing`] leaves the request waiting for after its
+    /// outcome, asked now where it needs a write.
+    fn of(asks: &mut Asks, slot: &mut Option<After>, closing: Option<Closing>) {
+        match closing {
+            Some(Closing::AfterInsert(after)) => *slot = Some(After::Insert(after)),
+            Some(Closing::Row(end)) => After::end_row(asks, slot, end, false),
+            Some(Closing::InFlight(write)) => {
+                *slot = Some(After::Write {
+                    id: write.id,
+                    retry: write.retry.then_some((write.row, write.now, false)),
+                });
+            }
+            Some(Closing::Unsubscribe(id)) => {
+                asks.push(Need::close(id), 0);
+            }
+            Some(Closing::AfterOpen(id)) => *slot = Some(After::Open(id)),
+            None => {}
+        }
+    }
+
+    /// Ends a history row `failed` after the outcome (after the trim
+    /// keeping it, with `trim`), keeping what its one retry needs.
+    fn end_row(asks: &mut Asks, slot: &mut Option<After>, end: RowEnd, trim: bool) {
+        if let Some(write) = methods::publish::row_failed(end.row, &end.text, end.now, trim) {
+            let id = asks.push(Need::Write(write), 0);
+            *slot = Some(After::Write {
+                id,
+                retry: Some((end.row, end.now, trim)),
+            });
+        }
+    }
+
+    /// An admitted answer after the outcome, for what the history row
+    /// waits for: only its own terminal moves it on.
+    fn answer(asks: &mut Asks, slot: &mut Option<After>, id: AskId, event: Event) {
+        match (slot.take(), event) {
+            (Some(After::Insert(insert)), Event::Inserted(Ok(row))) if insert.id == id => {
+                let end = RowEnd {
+                    row,
+                    text: insert.text,
+                    now: insert.now,
+                };
+                After::end_row(asks, slot, end, true);
+            }
+            // No row was made.
+            (Some(After::Insert(insert)), Event::Inserted(Err(_))) if insert.id == id => {}
+            // Opened as the request ended: closed at once.
+            (Some(After::Open(open)), Event::Opened(Ok(subscription))) if open == id => {
+                asks.push(Need::close(subscription), 0);
+            }
+            (Some(After::Open(open)), Event::Opened(Err(_))) if open == id => {}
+            (Some(After::Write { id: write, retry }), Event::Written(result)) if write == id => {
+                if let (Err(error), Some((row, now, trim))) = (result, retry)
+                    && let Some(again) = methods::publish::row_failed(row, &error, now, trim)
+                {
+                    let id = asks.push(Need::Write(again), 0);
+                    *slot = Some(After::Write { id, retry: None });
+                }
+            }
+            (other, _) => *slot = other,
+        }
+    }
+}
+
 /// One `swarm.request`.
 pub struct Request {
     origin: JsString,
@@ -1205,6 +1300,7 @@ impl Request {
             Err(protocol) => return self.finish(Outcome::Protocol(protocol)),
         };
         if cancelled {
+            self.asks.terminate_body(id, &event);
             return;
         }
         let Some(running) = self.running.as_mut() else {
@@ -1260,65 +1356,15 @@ impl Request {
             self.asks.effects.push(terminal);
         }
         self.asks.cancel_all();
-        match running.and_then(|m| m.closing(&outcome)) {
-            Some(Closing::AfterInsert(after)) => self.after = Some(After::Insert(after)),
-            Some(Closing::Row(end)) => self.end_row(end, false),
-            Some(Closing::InFlight(write)) => {
-                self.after = Some(After::Write {
-                    id: write.id,
-                    retry: write.retry.then_some((write.row, write.now, false)),
-                });
-            }
-            Some(Closing::Unsubscribe(id)) => {
-                self.asks.push(Need::close(id), 0);
-            }
-            Some(Closing::AfterOpen(id)) => self.after = Some(After::Open(id)),
-            None => {}
-        }
+        let closing = running.and_then(|m| m.closing(&outcome));
+        After::of(&mut self.asks, &mut self.after, closing);
         self.outcome = Some(outcome);
-    }
-
-    /// Ends a history row `failed` after the outcome (after the trim
-    /// keeping it, with `trim`), keeping what its one retry needs.
-    fn end_row(&mut self, end: RowEnd, trim: bool) {
-        if let Some(write) = methods::publish::row_failed(end.row, &end.text, end.now, trim) {
-            let id = self.asks.push(Need::Write(write), 0);
-            self.after = Some(After::Write {
-                id,
-                retry: Some((end.row, end.now, trim)),
-            });
-        }
     }
 
     /// An admitted answer after the outcome, for what the history row
     /// waits for: only its own terminal moves it on.
     fn after_answer(&mut self, id: AskId, event: Event) {
-        match (self.after.take(), event) {
-            (Some(After::Insert(insert)), Event::Inserted(Ok(row))) if insert.id == id => {
-                let end = RowEnd {
-                    row,
-                    text: insert.text,
-                    now: insert.now,
-                };
-                self.end_row(end, true);
-            }
-            // No row was made.
-            (Some(After::Insert(insert)), Event::Inserted(Err(_))) if insert.id == id => {}
-            // Opened as the request ended: closed at once.
-            (Some(After::Open(open)), Event::Opened(Ok(subscription))) if open == id => {
-                self.asks.push(Need::close(subscription), 0);
-            }
-            (Some(After::Open(open)), Event::Opened(Err(_))) if open == id => {}
-            (Some(After::Write { id: write, retry }), Event::Written(result)) if write == id => {
-                if let (Err(error), Some((row, now, trim))) = (result, retry)
-                    && let Some(again) = methods::publish::row_failed(row, &error, now, trim)
-                {
-                    let id = self.asks.push(Need::Write(again), 0);
-                    self.after = Some(After::Write { id, retry: None });
-                }
-            }
-            (other, _) => self.after = other,
-        }
+        After::answer(&mut self.asks, &mut self.after, id, event);
     }
 
     /// The effects since the last call, in order.

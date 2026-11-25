@@ -5,7 +5,9 @@
 //! (`publishData`, `publishFiles`, `publishChunk`, `getUploadStatus`), the
 //! feed and SOC writes (`createFeed`, `updateFeed`, `writeFeedEntry`,
 //! `writeSingleOwnerChunk`, `getSigningIdentity`) and Messaging
-//! (`getMessagingIdentity`, `sendPss`, `sendGsoc`, `subscribe`).
+//! (`getMessagingIdentity`, `sendPss`, `sendGsoc`, `subscribe`); and main's
+//! own node methods, the shell parents ([`crate::machine::shell`]):
+//! `swarm.publish`, `swarm.feed`, `swarm.stamps` and `swarm.upload_status`.
 
 use fc_json::JsString;
 
@@ -24,6 +26,10 @@ pub mod feed_write;
 pub mod messaging;
 pub mod publish;
 pub mod read_data;
+pub(crate) mod shell_feed;
+pub mod shell_publish;
+pub(crate) mod shell_stamps;
+pub(crate) mod shell_status;
 pub mod signing;
 pub mod soc_write;
 pub mod upload_status;

@@ -780,14 +780,16 @@ impl FeedWrite {
             }
             Err(fault) => {
                 let why = match fault {
-                    Fault::Part => BodyAbort::BodyStreamError,
+                    Fault::Part | Fault::Unreadable { .. } => BodyAbort::BodyStreamError,
                     Fault::PartLength | Fault::Internal => BodyAbort::Internal,
                 };
                 body.abort(cx, why);
                 cx.cancel(call);
                 match fault {
                     Fault::PartLength => Step::Done(Outcome::Protocol(Protocol::PartLength)),
-                    Fault::Part | Fault::Internal => self.end(cx, Err(Fail::internal())),
+                    Fault::Part | Fault::Unreadable { .. } | Fault::Internal => {
+                        self.end(cx, Err(Fail::internal()))
+                    }
                 }
             }
         }

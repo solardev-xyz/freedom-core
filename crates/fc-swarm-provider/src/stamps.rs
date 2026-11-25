@@ -181,6 +181,49 @@ pub fn read_stamps(reply: &[u8]) -> Result<Stamps, ReplyError> {
     Ok(stamps.shrunk())
 }
 
+/// The `stamp` form's cap (`GET /stamps/<b>`, design 0015,
+/// `shell.swarm_api`), and its one element.
+pub const STAMP_REPLY_CAP: usize = crate::machine::node::JSON_REPLY_CAP;
+
+/// The node's `/stamps/<b>` reply, as bee-js's `stamp.get` reads it
+/// (`Response.text()`: a byte-order mark dropped; an empty text is `null`)
+/// and as `GetPostageBatchResponse` (`RawPostageBatchSchema`, one batch at
+/// the root) checks it: a [`Stamps`] of that one batch, whose
+/// [`Stamps::get_all`] is `getPostageBatch`'s `mapPostageBatch`, and whose
+/// issues' paths start at the batch (`["label"]`, not `["stamps", 0,
+/// "label"]`).
+///
+/// Fails `too_large` past [`STAMP_REPLY_CAP`] bytes; `TooDeep` past
+/// [`crate::json::MAX_NESTING`]; `Syntax` for a text `JSON.parse` refuses.
+/// One batch's issues (at most eleven) stay far under the cap.
+pub fn read_stamp(reply: &[u8]) -> Result<Stamps, ReplyError> {
+    if reply.len() > STAMP_REPLY_CAP {
+        return Err(ReplyError::TooLarge);
+    }
+    let text = js::strip_bom(reply);
+    let mut stamps = Stamps {
+        arena: Vec::with_capacity(text.len()),
+        batches: Vec::new(),
+        issues: Issues::new(),
+    };
+    if text.is_empty() {
+        stamps.push(Issue::new(Expected::Object, Received::Null, &[]))?;
+        return Ok(stamps.shrunk());
+    }
+    let mut r = Reader::new(text);
+    let root = r.token()?;
+    if root == Token::Object {
+        let batch = stamps.read_batch(&mut r)?;
+        stamps.check(&batch, &[])?;
+        stamps.batches.push(batch);
+    } else {
+        stamps.push(Issue::new(Expected::Object, received(&root), &[]))?;
+        r.skip(root)?;
+    }
+    r.finish()?;
+    Ok(stamps.shrunk())
+}
+
 impl Stamps {
     fn push(&mut self, issue: Issue) -> Result<(), ReplyError> {
         self.issues
@@ -214,7 +257,7 @@ impl Stamps {
             let token = r.token()?;
             if token == Token::Object {
                 let batch = self.read_batch(r)?;
-                self.check(&batch, index)?;
+                self.check(&batch, &[Segment::Key("stamps"), Segment::Index(index)])?;
                 self.batches.push(batch);
             } else {
                 let at = [Segment::Key("stamps"), Segment::Index(index)];
@@ -285,8 +328,9 @@ impl Stamps {
         Ok(Field::Wrong(what))
     }
 
-    /// `RawPostageBatchSchema`'s checks, in its key order.
-    fn check(&mut self, b: &RawBatch, index: u32) -> Result<(), ReplyError> {
+    /// `RawPostageBatchSchema`'s checks, in its key order, each issue's
+    /// path under `at` (the batch's place in the reply).
+    fn check(&mut self, b: &RawBatch, at: &[Segment]) -> Result<(), ReplyError> {
         fn state<T>(field: &Field<T>) -> Option<Received> {
             match field {
                 Field::Missing => Some(Received::Undefined),
@@ -317,12 +361,9 @@ impl Stamps {
         ];
         for (key, expected, wrong) in fields {
             if let Some(what) = wrong {
-                let at = [
-                    Segment::Key("stamps"),
-                    Segment::Index(index),
-                    Segment::Key(key),
-                ];
-                self.push(Issue::new(expected, what, &at))?;
+                let mut path = at.to_vec();
+                path.push(Segment::Key(key));
+                self.push(Issue::new(expected, what, &path))?;
             }
         }
         Ok(())
@@ -495,6 +536,34 @@ impl RawBatchView<'_> {
             _ => f64::NAN,
         };
         self.raw.exists != Field::Ok(false) && ttl > 0.0
+    }
+
+    /// `exists` as the node sent it, when a boolean (bee-js drops it; a
+    /// value of another type reads as absent wherever Freedom reads it:
+    /// `exists !== false`).
+    pub fn exists(&self) -> Option<bool> {
+        match self.raw.exists {
+            Field::Ok(flag) => Some(flag),
+            _ => None,
+        }
+    }
+
+    /// `propagating` as the node sent it, when a boolean (bee-js drops it;
+    /// Freedom reads only a boolean: `typeof propagating === 'boolean'`).
+    pub fn propagating(&self) -> Option<bool> {
+        match self.raw.propagating {
+            Field::Ok(flag) => Some(flag),
+            _ => None,
+        }
+    }
+
+    /// `batchTTL` as the node sent it, before bee-js's `normalizeBatchTTL`
+    /// (which `isPendingStamp` reads), when a finite number.
+    pub fn batch_ttl(&self) -> Option<f64> {
+        match self.raw.batch_ttl {
+            Field::Ok(ttl) => Some(ttl),
+            _ => None,
+        }
     }
 
     /// `isPropagatingStamp`: `usable !== true && propagating === true`.

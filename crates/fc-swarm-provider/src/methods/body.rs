@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use fc_swarm::chunker::{Chunker, Root};
 use fc_swarm::tar::TarWriter;
 
-use crate::machine::node::{BodyAbort, BodyOut, MAX_FRAME, WINDOW};
+use crate::machine::node::{Abort, BodyAbort, BodyOut, ErrorCode, MAX_FRAME, WINDOW};
 use crate::machine::{AskId, Cx, Event, World};
 
 /// Where some of a body's bytes come from.
@@ -54,6 +54,7 @@ enum Next {
 #[derive(Debug)]
 struct Copy {
     id: AskId,
+    part: u32,
     len: u64,
     received: u64,
     ended: bool,
@@ -66,6 +67,9 @@ pub(crate) enum Fault {
     PartLength,
     /// A part main couldn't stream (aborted, failed, refused).
     Part,
+    /// Part `part`'s file couldn't be read: main's abort with its reason
+    /// (`Abort::Unreadable`).
+    Unreadable { part: u32, code: ErrorCode },
     /// The tar writer refused (a size past its field), or the bytes
     /// written aren't the length announced: a core bug.
     Internal,
@@ -112,11 +116,14 @@ impl BodyWriter {
         self.root.as_ref()
     }
 
-    /// A tar of `entries` (path, bytes) as page-upload.js writes it, each
-    /// header stamped `mtime` (seconds), or `None` where the tar writer
-    /// refuses an entry.
-    pub(crate) fn tar(entries: Vec<(String, Piece)>, mtime: u64) -> Option<BodyWriter> {
-        let mut measure = TarWriter::new(mtime).ok()?;
+    /// A tar of `entries` (path, bytes) as page-upload.js and bee-js's
+    /// `TarStream` write it, or `None` where the tar writer refuses an
+    /// entry. Each header is stamped with the clock as it is written,
+    /// `Math.floor(Date.now() / 1000)`: once the entry before it has gone
+    /// out, as both read `Date.now()` for each header in turn.
+    pub(crate) fn tar(entries: Vec<(String, Piece)>) -> Option<BodyWriter> {
+        // A header's length doesn't depend on its time.
+        let mut measure = TarWriter::new(0).ok()?;
         let mut total: u64 = 0;
         let mut queue = VecDeque::new();
         for (path, piece) in entries {
@@ -135,7 +142,8 @@ impl BodyWriter {
         }
         total = total.checked_add(measure.finish().ok()?.len() as u64)?;
         queue.push_back(Next::Finish);
-        let tar = TarWriter::new(mtime).ok()?;
+        // Each entry's header makes its own writer, stamped then.
+        let tar = TarWriter::new(0).ok()?;
         Some(BodyWriter::new(total, Some(tar), queue))
     }
 
@@ -211,6 +219,12 @@ impl BodyWriter {
             }
             Event::End if copy.received == copy.len => copy.ended = true,
             Event::End => return Err(Fault::PartLength),
+            Event::Abort(Abort::Unreadable(code)) => {
+                return Err(Fault::Unreadable {
+                    part: copy.part,
+                    code,
+                });
+            }
             _ => return Err(Fault::Part),
         }
         self.pump(cx)
@@ -310,14 +324,22 @@ impl BodyWriter {
                     let id = cx.part(part);
                     self.copy = Some(Copy {
                         id,
+                        part,
                         len,
                         received: 0,
                         ended: false,
                     });
                 }
                 Some(Next::Header { path, len }) => {
-                    let tar = self.tar.as_mut().ok_or(Fault::Internal)?;
+                    if self.tar.is_none() {
+                        return Err(Fault::Internal);
+                    }
+                    // The clock now, as `Date.now()` is read for each
+                    // header; no entry is open between two.
+                    let mut tar =
+                        TarWriter::new(cx.world.now() / 1000).map_err(|_| Fault::Internal)?;
                     let header = tar.begin(&path, len).map_err(|_| Fault::Internal)?;
+                    self.tar = Some(tar);
                     self.pending.push_back((header, None));
                 }
                 Some(Next::EndEntry { len }) => {
