@@ -2152,6 +2152,31 @@ fn the_other_answers() {
     )
     .unwrap();
     assert_eq!(state.get("activeIdentityId"), Some(&s("app-scoped:2")));
+    let state = play(
+        &mut world,
+        ops::IDENTITIES,
+        "ensure-ant-wallet-identity",
+        &[("origin", s("d")), ("options", JsValue::Null)],
+        Caller::Chrome,
+    )
+    .unwrap();
+    assert_eq!(state.get("activeIdentityId"), Some(&s("bee-wallet")));
+    // Main's ops pass their options as main gives them, as page-swarm.js
+    // calls feed-store.js.
+    let null = main_with(
+        &mut world,
+        vault,
+        "ensureAntWalletIdentity",
+        &[("key", s("c")), ("options", JsValue::Null)],
+    );
+    assert_eq!(
+        null.unwrap_err(),
+        Thrown {
+            name: fc_swarm_provider::stores::ErrorName::TypeError,
+            message: "Cannot read properties of null (reading 'label')".to_owned(),
+            code: None,
+        }
+    );
     // createAppScopedIdentityAt on a taken index.
     let taken = main_with(
         &mut world,
