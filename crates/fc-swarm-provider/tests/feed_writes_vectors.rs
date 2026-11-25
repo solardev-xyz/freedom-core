@@ -74,10 +74,11 @@ const FIVE: [&str; 5] = [
 const LEFT_OUT: &[(&str, &str)] = &[
     (
         "write-feed-explicit-index-timeout",
-        "the page gives up as the explicit index's chunk read reaches the node (`abortPage`), and \
-         the vector records the reference's -32603 `Request aborted`; that is the page's timer, \
-         which the core answers `cancelled` with nothing more asked (deviation `deadlines`), but \
-         the case isn't marked with it. `the_page_giving_up_is_a_cancel` plays it as the core's",
+        "the page gives up as the explicit index's chunk read reaches the node (`abortPage`); the \
+         case is marked `deadlines`, which the core answers `cancelled` with nothing more asked, \
+         but its history row then ends with `cancelled` where the reference's has `Request \
+         aborted`, which this loop doesn't model yet. `the_page_giving_up_is_a_cancel` plays it \
+         as the core's",
     ),
     (
         "write-soc-no-page",
