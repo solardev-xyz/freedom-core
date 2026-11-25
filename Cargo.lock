@@ -709,6 +709,7 @@ dependencies = [
  "fc-json",
  "sha2",
  "thiserror",
+ "url",
 ]
 
 [[package]]

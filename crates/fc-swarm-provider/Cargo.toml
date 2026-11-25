@@ -15,10 +15,17 @@ workspace = true
 # unit) and ECMAScript's number text, for the node's replies and the texts a
 # page reads (design 0015, "JSON replies": "fc-json's rules").
 fc-json = { path = "../fc-json" }
+# A permission manifest's `rawHash` and `fingerprint`, SHA-256 as the
+# reference's `crypto.createHash('sha256')` gives them (design 0015, "The
+# stores"); one of the crates AGENTS rule 7 prefers.
+sha2 = { version = "0.11", default-features = false }
 thiserror = "2"
+# The manifest check's URLs as the WHATWG parser reads them (`new URL`): a
+# committed URL's `bzz:` host, and `normalizeOrigin`'s origin for another
+# URL. fc-approval, fc-naming, fc-dweb and fc-chain link it.
+url = "2"
 
 [dev-dependencies]
 # vectors/swarm.json's bodies (base64) and digests (SHA-256), as fc-swarm's
 # vector tests read them.
 base64 = "0.22"
-sha2 = "0.11"
