@@ -36,9 +36,11 @@
 //!   (the reference then keeps the file's sites as they are): the core
 //!   never holds a feed map it can't read as one. No reference writer makes
 //!   one (deviation `store-shapes`, `feeds-load-feed-maps-kept`).
-//! - `getEthereumWalletIdentityReferences` isn't here: it orders origins
-//!   with `localeCompare`, ICU's collation, and its caller is the account
-//!   removal's wiring.
+//! - `getEthereumWalletIdentityReferences` orders its sites with
+//!   `localeCompare`: ICU's root collation for printable ASCII, the text
+//!   permission keys are written in, and UTF-16 code-unit order for a key
+//!   with anything else (design 0015, SWM-4's D8; deviation `collation`,
+//!   [`crate::js::locale_compare`]).
 
 use fc_json::{JsString, JsValue};
 
@@ -522,6 +524,103 @@ impl FeedStore {
             return Some(identity.clone());
         }
         active_of_decorated(entry.as_ref())
+    }
+
+    /// `getEthereumWalletIdentityReferences(walletIndex)`: each site's
+    /// stored `ethereum-wallet` identity on that account (#89) that is
+    /// active or names a feed, as `{ origin, identityId, active, feedNames,
+    /// feedCount }`, the active ones first, then by site in `localeCompare`'s
+    /// order (deviation `collation` outside printable ASCII). The account
+    /// removal's references (`accounts.remove`'s `swarm_references`).
+    pub fn ethereum_wallet_identity_references(
+        &self,
+        wallet_index: &JsValue,
+    ) -> Result<JsValue, Thrown> {
+        match wallet_index {
+            JsValue::Number(n) if crate::js::is_integer(*n) && *n >= 0.0 => {}
+            _ => {
+                return Err(Thrown::error(
+                    "Wallet index must be a non-negative integer",
+                ));
+            }
+        }
+        let mut references: Vec<(JsString, bool, JsValue)> = Vec::new();
+        for (origin, entry) in props(self.origins()) {
+            let identities = field_or_undefined(entry, "identities");
+            if !is_plain_object(identities) {
+                continue;
+            }
+            let feeds = entry.get("feeds").filter(|feeds| is_plain_object(feeds));
+            for (_, identity) in props(identities) {
+                let id = identity.get("id").unwrap_or(&UNDEFINED);
+                if !is_str(identity.get("mode"), ETHEREUM_WALLET)
+                    || !strict_equals(
+                        identity.get("walletIndex").unwrap_or(&UNDEFINED),
+                        wallet_index,
+                    )
+                {
+                    continue;
+                }
+                // `.sort()`: by UTF-16 code unit, the names being strings.
+                let mut feed_names: Vec<&JsString> = feeds
+                    .map(props)
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter(|(_, feed)| strict_equals(feed.get("identityId").unwrap_or(&UNDEFINED), id))
+                    .map(|(name, _)| name)
+                    .collect();
+                crate::js::sort(&mut feed_names, |a, b| match a.cmp(b) {
+                    std::cmp::Ordering::Less => -1.0,
+                    std::cmp::Ordering::Equal => 0.0,
+                    std::cmp::Ordering::Greater => 1.0,
+                });
+                let active = strict_equals(
+                    entry.get("activeIdentityId").unwrap_or(&UNDEFINED),
+                    id,
+                );
+                if !active && feed_names.is_empty() {
+                    continue;
+                }
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "a count of a file's keys, far below 2^53"
+                )]
+                let count = feed_names.len() as f64;
+                let mut reference = object();
+                reference.set("origin", JsValue::String(origin.clone()));
+                reference.set("identityId", id.clone());
+                reference.set("active", JsValue::Bool(active));
+                reference.set(
+                    "feedNames",
+                    JsValue::Array(
+                        feed_names
+                            .into_iter()
+                            .map(|name| JsValue::String(name.clone()))
+                            .collect(),
+                    ),
+                );
+                reference.set("feedCount", JsValue::Number(count));
+                references.push((origin.clone(), active, reference));
+            }
+        }
+        let mut order: Vec<usize> = (0..references.len()).collect();
+        crate::js::sort(&mut order, |a, b| {
+            let (a, b) = (&references[a], &references[b]);
+            if a.1 != b.1 {
+                return if a.1 { -1.0 } else { 1.0 };
+            }
+            match crate::js::locale_compare(&a.0, &b.0) {
+                std::cmp::Ordering::Less => -1.0,
+                std::cmp::Ordering::Equal => 0.0,
+                std::cmp::Ordering::Greater => 1.0,
+            }
+        });
+        Ok(JsValue::Array(
+            order
+                .into_iter()
+                .map(|at| references[at].2.clone())
+                .collect(),
+        ))
     }
 
     // --- changes -------------------------------------------------------------
