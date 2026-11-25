@@ -201,6 +201,8 @@ struct Played {
     closing: usize,
     /// The history writes the store refused.
     failed_writes: usize,
+    /// The live facts asked ([`Need::Live`]).
+    live: usize,
 }
 
 struct MainSide<'a> {
@@ -234,6 +236,7 @@ fn play(world: &mut TestWorld, main: &MainSide<'_>, call: &Call, sid: &str) -> P
         turns: 0,
         closing: 0,
         failed_writes: 0,
+        live: 0,
     };
     let mut feeds: BTreeMap<AskId, PartFeed> = BTreeMap::new();
     let mut bodies: BTreeMap<AskId, BodyIn> = BTreeMap::new();
@@ -378,6 +381,12 @@ fn play(world: &mut TestWorld, main: &MainSide<'_>, call: &Call, sid: &str) -> P
                         assert_eq!(ask.charge, UPLOAD_CHARGE, "{sid}");
                         played.turns += 1;
                         give!(ask.id, Event::Turn);
+                    }
+                    Need::Live => {
+                        assert_eq!(ask.charge, 0, "{sid}");
+                        played.live += 1;
+                        let live = world.live();
+                        give!(ask.id, Event::Live(live));
                     }
                     Need::Write(StoreWrite::History(statements)) => {
                         assert_eq!(ask.charge, 0, "{sid}");
@@ -1020,6 +1029,31 @@ fn publish_methods() {
                     "{sid}: calls, and no honest scenario"
                 ),
             }
+            // One live check at the effect's guard the reference ran, one
+            // before a collection's tag owner (`afterEffect`), and one
+            // before getUploadStatus's answer.
+            let effects = step.get("events").map_or(0, |e| {
+                e.children().filter(|e| e.get("effect").is_some()).count()
+            });
+            let tagged = name == "swarm_publishFiles"
+                && matches!(&played.ran.outcome, Outcome::Result(r)
+                    if matches!(r.get("tagUid"), Value::Number(_)));
+            let status = name == "swarm_getUploadStatus"
+                && match &played.ran.outcome {
+                    Outcome::Result(_) => true,
+                    Outcome::Error(f) => f.data.as_ref().is_some_and(|d| {
+                        d.get("reason")
+                            .as_js_string()
+                            .is_some_and(|r| r.as_str() == "no_address")
+                    }),
+                    _ => false,
+                };
+            let checks = effects + usize::from(tagged) + usize::from(status);
+            if deviation.is_none() {
+                assert_eq!(played.live, checks, "{sid}: live checks");
+            } else {
+                assert!(played.live <= checks, "{sid}: live checks");
+            }
             // A collection's tag is the site's while it holds its key.
             if name == "swarm_publishFiles"
                 && let Outcome::Result(result) = &played.ran.outcome
@@ -1455,6 +1489,7 @@ fn files_up_to_the_part(
                 forward(&node.reply("GET", "/stamps"), &call).1.remove(0)
             }
             Need::Upload => Event::Turn,
+            Need::Live => Event::Live(world.live()),
             Need::Node(call) => {
                 assert_eq!(call.form, Form::BzzTar);
                 upload = Some(ask.id);
@@ -2111,6 +2146,7 @@ fn a_body_asked_for_after_a_cancel_ends_cancelled() {
                 forward(&node.reply("GET", "/stamps"), &call).1.remove(0)
             }
             Need::Upload => Event::Turn,
+            Need::Live => Event::Live(world.live()),
             Need::Node(_) => break ask.id,
             other => panic!("{other:?}"),
         };
@@ -2313,6 +2349,7 @@ fn an_end_racing_the_last_write_keeps_its_retry() {
                         Event::Written(Ok(()))
                     }
                     Need::Write(StoreWrite::History(_)) => break ask,
+                    Need::Live => Event::Live(world.live()),
                     Need::Node(call) => forward(&node.reply("GET", "/stamps"), call).1.remove(0),
                     other => panic!("{what}: {other:?}"),
                 };

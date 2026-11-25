@@ -51,7 +51,7 @@ use fc_swarm_provider::budgets::ReadBudgets;
 use fc_swarm_provider::machine::keeper::{ChangeAnswer, ChangeError, HoldId, Keeper, Ran, Ticket};
 use fc_swarm_provider::machine::node::{BodyOut, WINDOW};
 use fc_swarm_provider::machine::{
-    Approval, Ask, AskId, Body, Call, Effect, Event, Failed, Failure, Form, Need, NodeCall,
+    Approval, Ask, AskId, Body, Call, Effect, Event, Failed, Failure, Form, Live, Need, NodeCall,
     Outcome, Reads, ReadyCheck, Reply, Request, SignKey, SignSoc, Signed, StoreWrite, TagOwners,
     UPLOAD_CHARGE, World, whole_charge,
 };
@@ -116,8 +116,8 @@ struct WriteWorld {
     /// The page's name still answers and its document holds its key.
     live: bool,
     tags: TagOwners,
-    /// The name checks made: one in each effect's guard, one before each
-    /// signature, one before a write's record.
+    /// The live facts asked ([`Need::Live`]): one in each effect's guard,
+    /// one before each signature, one before a write's record.
     guards: std::cell::Cell<usize>,
 }
 
@@ -144,22 +144,23 @@ impl World for WriteWorld {
     fn budgets(&mut self) -> &mut ReadBudgets {
         &mut self.budgets
     }
-    fn name_holds(&self, _key: &JsString) -> bool {
-        self.guards.set(self.guards.get() + 1);
-        self.live
-    }
-    fn key_holds(&self, _key: &JsString) -> bool {
-        self.live
-    }
-    fn agent(&self, _key: &JsString) -> bool {
-        self.custody
-    }
     fn tags(&mut self) -> &mut TagOwners {
         &mut self.tags
     }
 }
 
 impl WriteWorld {
+    /// Main's answer to [`Need::Live`], as the synchronous reads it
+    /// replaces read the world, counted.
+    fn live(&self) -> Live {
+        self.guards.set(self.guards.get() + 1);
+        Live {
+            name: self.live,
+            live: self.live,
+            agent: self.custody,
+        }
+    }
+
     fn new(now: u64, feeds: FeedStore) -> WriteWorld {
         WriteWorld {
             now,
@@ -836,6 +837,11 @@ impl<'k> Thread<'k> {
             Need::Lock(_) => {
                 assert_eq!(ask.charge, 0);
                 self.give(ask.id, Event::Locked);
+            }
+            Need::Live => {
+                assert_eq!(ask.charge, 0);
+                let live = self.world.live();
+                self.give(ask.id, Event::Live(live));
             }
             Need::Write(write) => {
                 assert_eq!(ask.charge, 0);

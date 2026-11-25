@@ -24,6 +24,16 @@
 //!   A node call whose body streams is answered
 //!   with main's `swarm.body` and its credit too, and the request writes
 //!   that body ([`Effect::Body`]).
+//! - **The live facts** ([`Need::Live`], design 0015's D1): whether the
+//!   page's name still binds its key, whether the document is still under
+//!   it, and whether the agent holds its tab are asked, not read: the swarm
+//!   thread answers from a naming check and main's `approval.recheck`, as
+//!   0012's APR-5 does for Ethereum. The machine asks at every effect's
+//!   guard, before a signature, at the reference's three `afterEffect`
+//!   checks (an upload's tag owner, a new feed's record, a feed's updated
+//!   reference) and before the answers page-swarm.js gives only while the
+//!   name answers, and reads the rest of the check from the world in the
+//!   step the answer comes, with the effect.
 //! - **A request that ends without its machine** (a cancel, its deadline,
 //!   `busy`, a protocol error) still makes the one write its method needs
 //!   then: an upload's history row ends `failed`.
@@ -99,19 +109,6 @@ pub trait World: Reads {
     fn now(&self) -> u64;
     /// The read budgets (`READ_BUDGETS`' buckets), one for every request.
     fn budgets(&mut self) -> &mut ReadBudgets;
-    /// Whether the page's name still binds `key`: 0012's `transport_key`
-    /// check, which the core makes again before each effect (design 0015,
-    /// "Methods main calls": name checks), as page-swarm.js's `nameHolds`
-    /// does.
-    fn name_holds(&self, key: &JsString) -> bool;
-    /// Whether the document that sent the request is current and still
-    /// under `key` (page-documents.js's `holdsKey`), read in the same run
-    /// as an effect.
-    fn key_holds(&self, key: &JsString) -> bool;
-    /// Whether the agent holds that document's tab now (0012's `agent`,
-    /// read live): a request a site's rule approved reads it again before
-    /// its effect (design 0015, "What moves into the core": the rules).
-    fn agent(&self, key: &JsString) -> bool;
     /// Which site owns each upload's tag (`tagOwnership`, session-scoped,
     /// at most 4,096: deviation `tag-owners-bound`).
     fn tags(&mut self) -> &mut TagOwners;
@@ -221,6 +218,13 @@ pub enum Need {
     /// `withWriteLock`): answered [`Event::Locked`] once no other request
     /// holds `topic`, which this request then holds until it ends.
     Lock([u8; 32]),
+    /// The live facts of the request's page (design 0015's D1): a naming
+    /// check when its `PageContext.transport_key` binds, then main's
+    /// `approval.recheck` for its document, as 0012's APR-5 asks them.
+    /// Answered [`Event::Live`]. The machine asks just before each effect
+    /// and reads the answer with the rest of its check, in the step that
+    /// makes the effect.
+    Live,
 }
 
 /// What the vault signs: a SOC over `span ‖ payload` with `identifier`,
@@ -354,6 +358,34 @@ pub enum Event {
     Owner(Result<Option<[u8; 20]>, JsString>),
     /// The topic is this request's ([`Need::Lock`]).
     Locked,
+    /// The live facts ([`Need::Live`]).
+    Live(Live),
+}
+
+/// The answer to [`Need::Live`]: the page's live facts, read just before
+/// an effect (design 0015's D1). The machine reads them in page-swarm.js's
+/// order: `name`, then, for a request a site's rule approved, `agent` (and
+/// the rule, from the world), then `live`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Live {
+    /// The page's name still binds the request's key: 0012's
+    /// `transport_key` check (page-swarm.js's `nameHolds`), made by the
+    /// core's naming; `true` for a document whose key no name binds.
+    pub name: bool,
+    /// The document that sent the request is current and still under the
+    /// key (page-documents.js's `holdsKey`): `approval.recheck`'s `live`.
+    pub live: bool,
+    /// The agent holds that document's tab (0012's `agent`):
+    /// `approval.recheck`'s `agent`.
+    pub agent: bool,
+}
+
+impl Live {
+    /// page-swarm.js's `afterEffect` and the answers given only while the
+    /// name answers: the name and the document's key, custody left out.
+    pub fn holds(&self) -> bool {
+        self.name && self.live
+    }
 }
 
 /// A SOC signature.
@@ -514,6 +546,7 @@ enum Kind {
     Mine,
     Owner,
     Lock,
+    Live,
 }
 
 #[derive(Debug)]
@@ -561,6 +594,7 @@ impl Asks {
             Need::Mine(_) => Kind::Mine,
             Need::Owner(_) => Kind::Owner,
             Need::Lock(_) => Kind::Lock,
+            Need::Live => Kind::Live,
         };
         self.open.insert(
             id,
@@ -711,7 +745,8 @@ impl Asks {
             | (Kind::Turn, Event::Turn)
             | (Kind::Mine, Event::Mined(_))
             | (Kind::Owner, Event::Owner(_))
-            | (Kind::Lock, Event::Locked) => true,
+            | (Kind::Lock, Event::Locked)
+            | (Kind::Live, Event::Live(_)) => true,
             _ => return Err(Protocol::WrongKind),
         };
         let cancelled = open.cancelled;
@@ -838,20 +873,10 @@ impl<W: World> Cx<'_, W> {
         self.world.auto_approve(self.origin, capability)
     }
 
-    /// The page's name still binds the request's key (0012's
-    /// `transport_key`).
-    pub fn name_holds(&self) -> bool {
-        self.world.name_holds(self.origin)
-    }
-
-    /// The document is current and still under the request's key.
-    pub fn key_holds(&self) -> bool {
-        self.world.key_holds(self.origin)
-    }
-
-    /// The agent holds the document's tab (0012's `agent`).
-    pub fn agent(&self) -> bool {
-        self.world.agent(self.origin)
+    /// The page's live facts (D1): the name's binding, the document's key
+    /// and custody, asked just before an effect.
+    pub fn live(&mut self) -> AskId {
+        self.asks.push(Need::Live, 0)
     }
 
     /// The vault: a key's owner.
@@ -1288,15 +1313,6 @@ mod tests {
         }
         fn budgets(&mut self) -> &mut ReadBudgets {
             &mut self.budgets
-        }
-        fn name_holds(&self, _key: &JsString) -> bool {
-            true
-        }
-        fn key_holds(&self, _key: &JsString) -> bool {
-            true
-        }
-        fn agent(&self, _key: &JsString) -> bool {
-            false
         }
         fn tags(&mut self) -> &mut TagOwners {
             &mut self.tags

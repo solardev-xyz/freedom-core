@@ -1659,6 +1659,16 @@ impl Main<'_> {
             }
             Need::Upload => self.give(request, checker, id, Event::Turn),
             Need::Lock(_) => self.give(request, checker, id, Event::Locked),
+            // From the case's world, as the synchronous reads it replaces
+            // read it, with no roll (no random cancel or `busy` first): every
+            // run's answers and outcomes are those the reads gave.
+            Need::Live => {
+                if request.outcome().is_none() {
+                    let live = self.world.live();
+                    request.answer(&mut self.world, id, Event::Live(live));
+                    self.take(request);
+                }
+            }
             Need::Mine(job) => {
                 let mined = self.mined(job);
                 self.give(request, checker, id, Event::Mined(mined));

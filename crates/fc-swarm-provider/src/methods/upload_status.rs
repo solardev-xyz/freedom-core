@@ -4,14 +4,15 @@
 //! it, and `normalizeTag`'s object. A tag that is done forgets its owner,
 //! and at most 4,096 owners are held at once, the oldest forgotten first
 //! (deviation `tag-owners-bound`).
-//! As page-swarm.js's `uploadStatus` does, the document must still hold
-//! its key when the answer goes.
+//! As page-swarm.js's `uploadStatus` does, the name must still bind the
+//! key and the document still hold it when the answer goes: the live facts
+//! are asked after the call (design 0015's D1), custody left out.
 
 use std::collections::BTreeMap;
 
 use fc_json::JsString;
 
-use super::{no_address, permitted};
+use super::{live_of, no_address, permitted};
 use crate::ReplyError;
 use crate::errors::{self, Site};
 use crate::machine::node::{Failed, transport_text};
@@ -90,7 +91,17 @@ const MAX_SAFE: f64 = 9_007_199_254_740_991.0;
 /// `handleGetUploadStatus`.
 pub(crate) struct UploadStatus {
     uid: u64,
-    call: AskId,
+    stage: Stage,
+}
+
+enum Stage {
+    Call(AskId),
+    /// The live facts, then `normalizeTag`'s object.
+    Live {
+        id: AskId,
+        status: Value,
+    },
+    Gone,
 }
 
 impl UploadStatus {
@@ -120,13 +131,26 @@ impl UploadStatus {
             return Err(Failure::not_authorized("tag_ownership_mismatch").into());
         };
         let call = cx.whole(NodeCall::tag(uid));
-        Ok(UploadStatus { uid, call })
+        Ok(UploadStatus {
+            uid,
+            stage: Stage::Call(call),
+        })
     }
 
     pub(crate) fn on<W: World>(&mut self, cx: &mut Cx<'_, W>, id: AskId, event: Event) -> Step {
-        if id != self.call {
-            return fail(Failure::internal_error());
+        match std::mem::replace(&mut self.stage, Stage::Gone) {
+            Stage::Call(call) if call == id => self.tag(cx, event),
+            Stage::Live { id: asked, status } if asked == id => match live_of(&event) {
+                Some(live) if live.holds() => done(status),
+                Some(_) => fail(no_address()),
+                None => fail(Failure::internal_error()),
+            },
+            _ => fail(Failure::internal_error()),
         }
+    }
+
+    /// The `tag` call's answer, then the live facts.
+    fn tag<W: World>(&mut self, cx: &mut Cx<'_, W>, event: Event) -> Step {
         let reply = match event {
             Event::Reply(reply) => reply,
             Event::Failed(failed) => return fail(call_failed(failed)),
@@ -148,10 +172,11 @@ impl UploadStatus {
         if finished {
             cx.world.tags().remove(self.uid);
         }
-        if !cx.name_holds() || !cx.key_holds() {
-            return fail(no_address());
-        }
-        done(status)
+        self.stage = Stage::Live {
+            id: cx.live(),
+            status,
+        };
+        Step::Wait
     }
 }
 

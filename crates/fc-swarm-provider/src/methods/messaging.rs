@@ -9,7 +9,8 @@
 //!   the node's compressed PSS key and the first two bytes of its overlay.
 //!   What reveals the key's authority goes out only while the page's name
 //!   still binds its key and the document is still under it (page-swarm.js,
-//!   after the method's wait).
+//!   after the method's wait): the live facts asked then, custody left
+//!   out.
 //! - **`sendPss`:** the params, the grant, the publish readiness, the
 //!   effect's guard, one `/stamps` read and the batch through
 //!   `selectBestBatch` with `selectMessageBatch`'s rule (a full mutable
@@ -31,9 +32,10 @@
 //!   page's GSOC address, the mined one for a topic, or a PSS topic's
 //!   hash), the guard, and [`Outcome::Subscribe`] for main to open.
 //!
-//! The guard is page-swarm.js's `guardEffect` with `whileMessagingGranted`:
-//! the name, for a send a rule approved Agent custody and the rule, the
-//! document's key, then the messaging grant. The reference runs it once,
+//! The guard is page-swarm.js's `guardEffect` with `whileMessagingGranted`,
+//! on the live facts asked just before it (design 0015's D1): the name, for
+//! a send a rule approved Agent custody and the rule, the document's key,
+//! then the messaging grant. The reference runs it once,
 //! before the send's waits; the core runs it there too, so a refusal makes
 //! the reference's calls, and again after the last wait on the node,
 //! before the effect (design 0015, "Name checks"). A send a rule approved
@@ -51,7 +53,7 @@ use super::feed_write::{Data, data_of};
 use super::limits::{MAX_MESSAGE_BYTES, MAX_TARGET_DEPTH};
 use super::publish::OTHER_REFERENCE_MESSAGE;
 use super::writes::{Fail, batch_with, bytes_uploaded, soc_up};
-use super::{no_address, permitted};
+use super::{live_of, no_address, permitted};
 use crate::ReplyError;
 use crate::chunks::hex;
 use crate::errors::{self, Site, node_write_error};
@@ -60,8 +62,8 @@ use crate::json::{Reader, Token};
 use crate::machine::node::{Failed, JSON_REPLY_CAP, transport_text};
 use crate::machine::params::{empty_options, hex_string, normalize_address, require_params};
 use crate::machine::{
-    Approval, AskId, Body, Cx, Event, Failure, Form, MineJob, Mined, NodeCall, Outcome, ReadyCheck,
-    Step, Subscription, SubscriptionKind, World, done, fail,
+    Approval, AskId, Body, Cx, Event, Failure, Form, Live, MineJob, Mined, NodeCall, Outcome,
+    ReadyCheck, Step, Subscription, SubscriptionKind, World, done, fail,
 };
 use crate::stamps::{BatchId, SelectOptions};
 use crate::stores::manifests::Capability;
@@ -175,23 +177,23 @@ fn message(data: &Value, empty: Option<&str>) -> Result<Vec<u8>, Failure> {
 }
 
 /// The effect's guard (page-swarm.js's `guardEffect`, then
-/// `whileMessagingGranted`): the name still binds the key; for a send the
-/// site's rule approved, the agent doesn't hold the tab and the rule
-/// stands; the document is still under the key; the site still has its
-/// messaging grant.
-fn guard<W: World>(cx: &Cx<'_, W>, approval: Option<Approval>) -> Result<(), Failure> {
-    if !cx.name_holds() {
+/// `whileMessagingGranted`), on the live facts just asked: the name still
+/// binds the key; for a send the site's rule approved, the agent doesn't
+/// hold the tab and the rule stands; the document is still under the key;
+/// the site still has its messaging grant.
+fn guard<W: World>(cx: &Cx<'_, W>, live: Live, approval: Option<Approval>) -> Result<(), Failure> {
+    if !live.name {
         return Err(no_address());
     }
     if approval == Some(Approval::Auto) {
-        if cx.agent() {
+        if live.agent {
             return Err(Failure::not_authorized("agent_custody"));
         }
         if !cx.auto_approve(Capability::Messaging) {
             return Err(Failure::not_authorized("not_auto_approved"));
         }
     }
-    if !cx.key_holds() {
+    if !live.live {
         return Err(no_address());
     }
     if !cx.messaging() {
@@ -644,6 +646,12 @@ pub fn read_addresses(reply: &[u8]) -> Result<Result<Addresses, JsString>, Reply
 enum IdentityStage {
     Ready(AskId),
     Addresses(AskId),
+    /// The live facts, before the answer goes.
+    Live {
+        id: AskId,
+        addresses: Addresses,
+    },
+    Gone,
 }
 
 /// `handleGetMessagingIdentity`.
@@ -663,7 +671,7 @@ impl Identity {
     }
 
     pub(crate) fn on<W: World>(&mut self, cx: &mut Cx<'_, W>, id: AskId, event: Event) -> Step {
-        match self.stage {
+        match std::mem::replace(&mut self.stage, IdentityStage::Gone) {
             IdentityStage::Ready(ready_id) if id == ready_id => {
                 if let Err(step) = ready(event) {
                     return step;
@@ -691,10 +699,22 @@ impl Identity {
                     Err(ReplyError::TooLarge) => return fail(plain(Failed::TooLarge)),
                     Err(ReplyError::TooDeep) => return fail(plain(Failed::Error)),
                 };
+                self.stage = IdentityStage::Live {
+                    id: cx.live(),
+                    addresses,
+                };
+                Step::Wait
+            }
+            IdentityStage::Live {
+                id: asked,
+                addresses,
+            } if asked == id => {
                 // What reveals the key's authority goes out only while the
                 // name still binds it (page-swarm.js, after the wait).
-                if !cx.name_holds() || !cx.key_holds() {
-                    return fail(no_address());
+                match live_of(&event) {
+                    Some(live) if live.holds() => {}
+                    Some(_) => return fail(no_address()),
+                    None => return fail(Failure::internal_error()),
                 }
                 let target = addresses
                     .overlay
@@ -716,7 +736,14 @@ impl Identity {
 
 enum PssStage {
     Ready(AskId),
+    /// The live facts for the guard before `/stamps`.
+    Guard(AskId),
     Stamps(AskId),
+    /// The live facts for the guard after it, before the send.
+    Recheck {
+        id: AskId,
+        batch: BatchId,
+    },
     Send(AskId),
 }
 
@@ -809,7 +836,14 @@ impl SendPss {
                 if let Err(failure) = readiness(event) {
                     return fail(failure);
                 }
-                if let Err(refused) = guard(cx, self.approval) {
+                self.stage = PssStage::Guard(cx.live());
+                Step::Wait
+            }
+            PssStage::Guard(asked) if id == asked => {
+                let Some(live) = live_of(&event) else {
+                    return fail(Failure::internal_error());
+                };
+                if let Err(refused) = guard(cx, live, self.approval) {
                     return fail(refused);
                 }
                 self.stage = PssStage::Stamps(cx.whole(NodeCall::stamps()));
@@ -824,7 +858,17 @@ impl SendPss {
                     Ok(batch) => batch,
                     Err(failed) => return fail(failed.page),
                 };
-                if let Err(refused) = guard(cx, self.approval) {
+                self.stage = PssStage::Recheck {
+                    id: cx.live(),
+                    batch,
+                };
+                Step::Wait
+            }
+            PssStage::Recheck { id: asked, batch } if id == asked => {
+                let Some(live) = live_of(&event) else {
+                    return fail(Failure::internal_error());
+                };
+                if let Err(refused) = guard(cx, live, self.approval) {
                     return fail(refused);
                 }
                 // `new PublicKey(recipient)`: bee-js's point check, kept for
@@ -860,9 +904,24 @@ impl SendPss {
 
 enum GsocStage {
     Ready(AskId),
+    /// The live facts for the guard before the search.
+    Guard(AskId),
     Mine(AskId),
-    Stamps { id: AskId, signer: Box<Signer> },
-    Upload { id: AskId, address: [u8; 32] },
+    Stamps {
+        id: AskId,
+        signer: Box<Signer>,
+    },
+    /// The live facts for the guard after `/stamps`, before the upload.
+    Recheck {
+        id: AskId,
+        signer: Box<Signer>,
+        batch: BatchId,
+    },
+    Upload {
+        id: AskId,
+        address: [u8; 32],
+    },
+    Gone,
 }
 
 /// `handleSendGsoc`.
@@ -904,18 +963,25 @@ impl SendGsoc {
     }
 
     pub(crate) fn on<W: World>(&mut self, cx: &mut Cx<'_, W>, id: AskId, event: Event) -> Step {
-        match &self.stage {
-            GsocStage::Ready(ready_id) if id == *ready_id => {
+        match std::mem::replace(&mut self.stage, GsocStage::Gone) {
+            GsocStage::Ready(ready_id) if id == ready_id => {
                 if let Err(failure) = readiness(event) {
                     return fail(failure);
                 }
-                if let Err(refused) = guard(cx, self.approval) {
+                self.stage = GsocStage::Guard(cx.live());
+                Step::Wait
+            }
+            GsocStage::Guard(asked) if id == asked => {
+                let Some(live) = live_of(&event) else {
+                    return fail(Failure::internal_error());
+                };
+                if let Err(refused) = guard(cx, live, self.approval) {
                     return fail(refused);
                 }
                 self.stage = GsocStage::Mine(cx.mine(self.job));
                 Step::Wait
             }
-            GsocStage::Mine(mine) if id == *mine => {
+            GsocStage::Mine(mine) if id == mine => {
                 let index = match event {
                     Event::Mined(Mined::Found(index)) => index,
                     Event::Mined(other) => return fail(mined_failure(other)),
@@ -931,7 +997,7 @@ impl SendGsoc {
                 };
                 Step::Wait
             }
-            GsocStage::Stamps { id: call, signer } if id == *call => {
+            GsocStage::Stamps { id: call, signer } if id == call => {
                 let options = SelectOptions {
                     allow_full_mutable: true,
                     ..SelectOptions::default()
@@ -940,7 +1006,22 @@ impl SendGsoc {
                     Ok(batch) => batch,
                     Err(failed) => return fail(failed.page),
                 };
-                if let Err(refused) = guard(cx, self.approval) {
+                self.stage = GsocStage::Recheck {
+                    id: cx.live(),
+                    signer,
+                    batch,
+                };
+                Step::Wait
+            }
+            GsocStage::Recheck {
+                id: asked,
+                signer,
+                batch,
+            } if id == asked => {
+                let Some(live) = live_of(&event) else {
+                    return fail(Failure::internal_error());
+                };
+                if let Err(refused) = guard(cx, live, self.approval) {
                     return fail(refused);
                 }
                 // `makeContentAddressedChunk(data).toSingleOwnerChunk(id,
@@ -969,7 +1050,7 @@ impl SendGsoc {
                 };
                 Step::Wait
             }
-            GsocStage::Upload { id: call, address } if id == *call => {
+            GsocStage::Upload { id: call, address } if id == call => {
                 // bee-js's `uploadSingleOwnerChunk`: `UploadResultBody` and
                 // the tag, its errors through `nodeWriteError`; then the
                 // node's reference must be the SOC's own address, which
@@ -983,7 +1064,7 @@ impl SendGsoc {
                 }
                 done(Value::object([
                     ("sent", Value::Bool(true)),
-                    ("address", Value::str(&hex(address))),
+                    ("address", Value::str(&hex(&address))),
                 ]))
             }
             _ => fail(Failure::internal_error()),
@@ -996,6 +1077,11 @@ impl SendGsoc {
 enum SubscribeStage {
     Ready(AskId),
     Mine(AskId),
+    /// The live facts for the guard, with the key to open.
+    Guard {
+        id: AskId,
+        key: [u8; 32],
+    },
 }
 
 /// The key a subscription derives: given, a PSS topic's hash, or a GSOC
@@ -1084,15 +1170,10 @@ impl Subscribe {
         })
     }
 
-    /// The registry's slot, under the guard: the subscription for main.
-    fn open<W: World>(&self, cx: &Cx<'_, W>, key: [u8; 32]) -> Step {
-        if let Err(refused) = guard(cx, None) {
-            return fail(refused);
-        }
-        Step::Done(Outcome::Subscribe(Subscription {
-            kind: self.kind,
-            key,
-        }))
+    /// The registry's slot, under the guard: the live facts first.
+    fn open<W: World>(&mut self, cx: &mut Cx<'_, W>, key: [u8; 32]) -> Step {
+        self.stage = SubscribeStage::Guard { id: cx.live(), key };
+        Step::Wait
     }
 
     pub(crate) fn on<W: World>(&mut self, cx: &mut Cx<'_, W>, id: AskId, event: Event) -> Step {
@@ -1122,6 +1203,19 @@ impl Subscribe {
                     Ok(signer) => self.open(cx, signer.address),
                     Err(failure) => fail(failure),
                 }
+            }
+            SubscribeStage::Guard { id: asked, key } if id == asked => {
+                let Some(live) = live_of(&event) else {
+                    return fail(Failure::internal_error());
+                };
+                // The subscription for main.
+                if let Err(refused) = guard(cx, live, None) {
+                    return fail(refused);
+                }
+                Step::Done(Outcome::Subscribe(Subscription {
+                    kind: self.kind,
+                    key,
+                }))
             }
             _ => fail(Failure::internal_error()),
         }

@@ -11,10 +11,10 @@
 //!   before each upload, in the step that makes it and in the reference's
 //!   order, the page's name still binding its key, for an automatic
 //!   request Agent custody and the site's rule, the document still under
-//!   the key (read live: [`World::name_holds`], [`World::agent`],
-//!   [`World::key_holds`]), then the connection and the feed grant; and
-//!   before each signature, the name and the document (design 0015, "Name
-//!   checks": before each effect, a signature among them);
+//!   the key (asked live: [`Live`], design 0015's D1), then the connection
+//!   and the feed grant; and before each signature, the name and the
+//!   document (design 0015, "Name checks": before each effect, a signature
+//!   among them);
 //! - **the batch** from one `/stamps` read (`selectBestBatch`, deviation
 //!   `stamps-one-read`), and the node's replies to the uploads;
 //! - **the history row** (`addEntry`, `updateEntry`) and the failures after
@@ -30,8 +30,8 @@ use crate::js::{is_integer, strip_bom, to_lower};
 use crate::json::{ReadError, Reader, Token};
 use crate::machine::node::{Failed, JSON_REPLY_CAP, transport_text};
 use crate::machine::{
-    AfterInsert, Approval, AskId, Body, Closing, Cx, Event, Failure, Form, InFlight, NodeCall,
-    Outcome, RowEnd, SignKey, StoreWrite, World,
+    AfterInsert, Approval, AskId, Body, Closing, Cx, Event, Failure, Form, InFlight, Live,
+    NodeCall, Outcome, RowEnd, SignKey, StoreWrite, World,
 };
 use crate::stamps::{BatchId, SelectOptions, read_stamps, select_best_batch};
 use crate::stores::feeds::{
@@ -226,28 +226,29 @@ pub(crate) fn feed_not_granted() -> Failure {
 
 /// The effect's guard (page-swarm.js's `guardEffect`, then the provider's
 /// `whileGranted` with the feed grant), in the step that makes the effect,
-/// after its last wait, in the reference's order: the page's name still
-/// binds its key; for a request the site's rule approved, the agent
-/// doesn't hold its tab and the rule stands (`AGENT_CUSTODY`, `RULE_OFF`);
-/// the document is still under the key; the site is still connected and
-/// still has its feed grant.
+/// once the live facts asked after its last wait answer, in the
+/// reference's order: the page's name still binds its key; for a request
+/// the site's rule approved, the agent doesn't hold its tab and the rule
+/// stands (`AGENT_CUSTODY`, `RULE_OFF`); the document is still under the
+/// key; the site is still connected and still has its feed grant.
 pub(crate) fn guard<W: World>(
     cx: &Cx<'_, W>,
+    live: Live,
     approval: Option<Approval>,
     capability: Capability,
 ) -> Result<(), Failure> {
-    if !cx.name_holds() {
+    if !live.name {
         return Err(super::no_address());
     }
     if approval == Some(Approval::Auto) {
-        if cx.agent() {
+        if live.agent {
             return Err(Failure::not_authorized("agent_custody"));
         }
         if !cx.auto_approve(capability) {
             return Err(Failure::not_authorized("not_auto_approved"));
         }
     }
-    if !cx.key_holds() {
+    if !live.live {
         return Err(super::no_address());
     }
     if !cx.connected() {
@@ -261,21 +262,14 @@ pub(crate) fn guard<W: World>(
 
 /// Before a signature, the name and the document again (design 0015, "Name
 /// checks": 0012's `transport_key` before each effect, a signature among
-/// them). The reference signs without them, and its guard refuses the
-/// upload after: the page reads the same `NO_ADDRESS`, and nothing is
-/// signed for a page that moved.
-pub(crate) fn still_here<W: World>(cx: &Cx<'_, W>) -> Result<(), Failure> {
-    if !cx.name_holds() || !cx.key_holds() {
+/// them), from the live facts asked just before it. The reference signs
+/// without them, and its guard refuses the upload after: the page reads
+/// the same `NO_ADDRESS`, and nothing is signed for a page that moved.
+pub(crate) fn still_here(live: Live) -> Result<(), Failure> {
+    if !live.holds() {
         return Err(super::no_address());
     }
     Ok(())
-}
-
-/// `afterEffect`: what a write leaves under the key (a feed's record, its
-/// last reference) is kept only while the name still binds it and the
-/// document is still under it.
-pub(crate) fn holds_key<W: World>(cx: &Cx<'_, W>) -> bool {
-    cx.name_holds() && cx.key_holds()
 }
 
 // --- the batch -------------------------------------------------------------

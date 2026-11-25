@@ -247,6 +247,10 @@ impl Thread {
                     self.mines.push(job);
                     vec![Event::Mined(self.mined(&origin, job, ask.id))]
                 }
+                Need::Live => {
+                    assert_eq!(ask.charge, 0);
+                    vec![Event::Live(self.world.live())]
+                }
                 other => panic!("an ask messaging never makes: {other:?}"),
             };
             for event in events {
@@ -1050,6 +1054,7 @@ fn no_signer_answers_as_today() {
                         asked += 1;
                         Event::Mined(mined)
                     }
+                    Need::Live => Event::Live(world.live()),
                     other => panic!("{mined:?}: {other:?} after no signer"),
                 };
                 request.answer(&mut world, ask.id, event);
@@ -1082,6 +1087,12 @@ fn a_cancel_while_mining_ends_only_its_wait() {
             panic!("the ready check")
         };
         request.answer(&mut thread.world, ready.id, Event::Ready(Ok(())));
+        let Some(Effect::Ask(live)) = request.take_effects().pop() else {
+            panic!("the guard's live facts")
+        };
+        assert_eq!(live.need, Need::Live);
+        let facts = thread.world.live();
+        request.answer(&mut thread.world, live.id, Event::Live(facts));
         let Some(Effect::Ask(mine)) = request.take_effects().pop() else {
             panic!("the mining ask")
         };

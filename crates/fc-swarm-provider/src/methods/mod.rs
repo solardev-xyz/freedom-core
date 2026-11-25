@@ -11,7 +11,7 @@ use fc_json::JsString;
 
 use crate::errors::{self, ChunkRead};
 use crate::machine::node::{Failed, transport_text};
-use crate::machine::{Cx, Failure, Outcome, World};
+use crate::machine::{Cx, Event, Failure, Live, Outcome, World};
 use crate::value::Value;
 
 pub mod access;
@@ -36,6 +36,16 @@ pub(crate) fn permitted<W: World>(cx: &Cx<'_, W>) -> Result<(), Outcome> {
         Ok(())
     } else {
         Err(Failure::not_connected().into())
+    }
+}
+
+/// The live facts from their ask's answer ([`crate::machine::Need::Live`]);
+/// no other answer reaches a machine waiting for them, since the framework
+/// reads answers strictly.
+pub(crate) fn live_of(event: &Event) -> Option<Live> {
+    match event {
+        Event::Live(live) => Some(*live),
+        _ => None,
     }
 }
 

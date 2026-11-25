@@ -28,8 +28,8 @@ use fc_swarm::verify;
 use fc_swarm_provider::budgets::ReadBudgets;
 use fc_swarm_provider::machine::node::WINDOW;
 use fc_swarm_provider::machine::{
-    Abort, Ask, AskId, Call, Effect, Event, Failed, Failure, Form, Head, Need, NodeCall, Outcome,
-    Reads, ReadyCheck, Reply, Request, TagOwners, World, whole_charge,
+    Abort, Ask, AskId, Call, Effect, Event, Failed, Failure, Form, Head, Live, Need, NodeCall,
+    Outcome, Reads, ReadyCheck, Reply, Request, TagOwners, World, whole_charge,
 };
 use fc_swarm_provider::stores::feeds::FeedStore;
 use fc_swarm_provider::stores::manifests::Capability;
@@ -435,21 +435,23 @@ impl World for TestWorld {
     fn budgets(&mut self) -> &mut ReadBudgets {
         &mut self.budgets
     }
-    fn name_holds(&self, _key: &JsString) -> bool {
-        self.name_holds
-    }
-    fn key_holds(&self, _key: &JsString) -> bool {
-        self.key_holds
-    }
-    fn agent(&self, _key: &JsString) -> bool {
-        self.custody
-    }
     fn tags(&mut self) -> &mut TagOwners {
         &mut self.tags
     }
 }
 
 impl TestWorld {
+    /// Main's answer to [`Need::Live`] from the case's world, as the
+    /// synchronous reads it replaces read it: the name's binding, the
+    /// document's key and custody, as they stand when the ask is answered.
+    pub fn live(&self) -> Live {
+        Live {
+            name: self.name_holds,
+            live: self.key_holds,
+            agent: self.custody,
+        }
+    }
+
     /// A change to the case's world (`at_execute`, or a node rule's `world`
     /// as its request arrives), as swarm-run.js's `world.change` makes it
     /// for the case's key.
@@ -1200,6 +1202,12 @@ pub fn run(world: &mut TestWorld, node: &Node, call: &Call) -> Ran {
             Need::Hash(job) => {
                 assert_eq!(ask.charge, 0);
                 request.answer(world, ask.id, Event::Hashed(job.run()));
+                queue.extend(take_effects(&mut request, &mut open, &mut most_open));
+            }
+            Need::Live => {
+                assert_eq!(ask.charge, 0);
+                let live = world.live();
+                request.answer(world, ask.id, Event::Live(live));
                 queue.extend(take_effects(&mut request, &mut open, &mut most_open));
             }
             other => panic!("an ask this part's machines don't make: {other:?}"),
