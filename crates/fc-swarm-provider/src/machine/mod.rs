@@ -15,10 +15,16 @@
 //! - **Asks** ([`Need`]), answered later, each with an [`AskId`]: a
 //!   readiness check (`shell.swarm_ready`), a node call (`shell.swarm_api`,
 //!   with what it costs the swarm thread's memory, which the thread
-//!   reserves before the call goes), work for the hashing pool, and, for the
-//!   pieces to come, a payload part (`shell.swarm_part`), a signature (the
-//!   vault, with SW-1's hold), a store write (0013's durable write) and a
-//!   GSOC search (the mining lane).
+//!   reserves before the call goes), work for the hashing pool, a payload
+//!   part (`shell.swarm_part`), a streaming upload's turn, a store write
+//!   (0013's durable write, or the history's statements), and, for the
+//!   pieces to come, a signature (the vault, with SW-1's hold) and a GSOC
+//!   search (the mining lane). A node call whose body streams is answered
+//!   with main's `swarm.body` and its credit too, and the request writes
+//!   that body ([`Effect::Body`]).
+//! - **A request that ends without its machine** (a cancel, its deadline,
+//!   `busy`, a protocol error) still makes the one write its method needs
+//!   then: an upload's history row ends `failed`.
 //! - **The world** ([`World`]), read synchronously on the swarm thread
 //!   between two answers: the clock, the Swarm grants (0012) and the feed
 //!   store (part 2's [`Reads`]), and the read budgets every request
@@ -41,8 +47,8 @@ pub mod page;
 pub(crate) mod params;
 
 pub use node::{
-    Abort, Body, CHUNK_REPLY_CAP, Failed, FeedRef, Form, Head, MAX_FRAME, NodeCall, Reply, Rule,
-    TreeRef, stream_charge, whole_charge,
+    Abort, Body, BodyAbort, BodyOut, CHUNK_REPLY_CAP, Failed, FeedRef, Form, Head, JSON_REPLY_CAP,
+    MAX_FRAME, NodeCall, Reply, Rule, TreeRef, stream_charge, whole_charge,
 };
 pub use page::Failure;
 
@@ -50,6 +56,7 @@ use crate::budgets::{self, ReadBudgets};
 use crate::errors::INVALID_PARAMS;
 use crate::methods;
 use crate::stores::history::Statement;
+pub use crate::stores::manifests::Capability;
 pub use crate::stores::manifests::Reads;
 use crate::stores::manifests::Save;
 use crate::stores::origin::normalize_origin;
@@ -80,13 +87,40 @@ pub const KNOWN_METHODS: [&str; 21] = [
     "swarm_sendGsoc",
 ];
 
+pub use methods::upload_status::TagOwners;
+
 /// What the swarm thread holds that every request reads.
 pub trait World: Reads {
     /// The clock: `Date.now()`, in milliseconds.
     fn now(&self) -> u64;
     /// The read budgets (`READ_BUDGETS`' buckets), one for every request.
     fn budgets(&mut self) -> &mut ReadBudgets;
+    /// Whether the page's name still binds `key`: 0012's `transport_key`
+    /// check, which the core makes again before each effect (design 0015,
+    /// "Methods main calls": name checks), as page-swarm.js's `nameHolds`
+    /// does.
+    fn name_holds(&self, key: &JsString) -> bool;
+    /// Whether the document that sent the request is current and still
+    /// under `key` (page-documents.js's `holdsKey`), read in the same run
+    /// as an effect.
+    fn key_holds(&self, key: &JsString) -> bool;
+    /// Whether the agent holds that document's tab now (0012's `agent`,
+    /// read live): a request a site's rule approved reads it again before
+    /// its effect (design 0015, "What moves into the core": the rules).
+    fn agent(&self, key: &JsString) -> bool;
+    /// Which site owns each upload's tag (`tagOwnership`, session-scoped,
+    /// at most 4,096: deviation `tag-owners-bound`).
+    fn tags(&mut self) -> &mut TagOwners;
 }
+
+/// What a streaming upload's turn reserves in the swarm thread's memory:
+/// one incoming and one outgoing window, the chunker's state and a tar
+/// header (design 0015, "Bounds": about 300 KiB).
+pub const UPLOAD_CHARGE: usize = 300 * 1024;
+
+/// How many uploads stream at once (design 0015, "Bounds"); the rest wait
+/// for a turn ([`Need::Upload`]).
+pub const STREAMING_UPLOADS: usize = 4;
 
 /// How main approved a request (`approval`): its prompt, or a standing
 /// rule.
@@ -155,8 +189,14 @@ pub enum Need {
     /// [`JobDone`].
     Hash(Job),
     /// `shell.swarm_part { part }`: one payload part of the request's own
-    /// params, streamed (the Publish and write pieces).
+    /// params, streamed: [`Event::PartHead`], then its bytes within the
+    /// credit the machine gives. Its bytes are held under the upload's
+    /// turn ([`Need::Upload`]), so the ask's charge is 0.
     Part(u32),
+    /// A turn among the [`STREAMING_UPLOADS`] uploads that stream at once,
+    /// with [`UPLOAD_CHARGE`] reserved: [`Event::Turn`] once one is free.
+    /// The turn is the request's until it ends.
+    Upload,
     /// A signature from the vault (the Feeds and SOCs piece).
     Sign(SignSoc),
     /// A durable write of a store (0013), or the history's statements.
@@ -185,13 +225,17 @@ pub enum SignKey {
     Publisher(u32),
 }
 
-/// A store write.
+/// A store write. A write can't be called back: once asked it is made,
+/// and its answer is dropped if the machine no longer waits for it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StoreWrite {
     /// `swarm-feeds.json`'s text.
     Feeds(String),
     /// `publish-history.sqlite`'s statements, in order.
     History(Vec<Statement>),
+    /// One `INSERT` into `publish-history.sqlite`, answered with the new
+    /// row's rowid ([`Event::Inserted`]).
+    HistoryInsert(Statement),
     /// `swarm-manifest-grants.json`.
     Manifests(Save),
 }
@@ -216,6 +260,16 @@ pub enum Effect {
     Credit {
         id: AskId,
         bytes: usize,
+    },
+    /// The next part of a node call's streamed body (`swarm.body`'s answer
+    /// to main, for call `id`): its head once main asked for it
+    /// ([`Event::BodyOpen`]), then its bytes within main's window, then
+    /// exactly one terminal, which the request sends itself, before it
+    /// cancels the call when it ends; a body main asks for after the
+    /// request ended gets its terminal (`cancelled`) at once.
+    Body {
+        id: AskId,
+        out: BodyOut,
     },
 }
 
@@ -245,6 +299,16 @@ pub enum Event {
     Signed(Result<Signed, JsString>),
     /// The store write's outcome: its failure's text.
     Written(Result<(), JsString>),
+    /// A history insert's rowid, or its failure's text.
+    Inserted(Result<i64, JsString>),
+    /// The upload's turn.
+    Turn,
+    /// Main's `swarm.body { for }` for a call whose body streams: the core
+    /// sends the head, then the bytes within a window of
+    /// [`node::WINDOW`], which [`Event::BodyCredit`] extends.
+    BodyOpen,
+    /// Main's credit on a streamed body.
+    BodyCredit(usize),
     /// The mining lane's answer.
     Mined(Mined),
 }
@@ -302,11 +366,12 @@ pub enum Protocol {
     BeyondCredit,
     #[error("stream data past max_bytes")]
     PastMax,
+    #[error("a part that isn't the length its params gave")]
+    PartLength,
 }
 
-/// A method the later pieces bring (the Publish group, feed and SOC
-/// writes, Messaging): this part's machines answer only the Access and
-/// Reads methods.
+/// A method the later pieces bring (feed and SOC writes, Messaging): the
+/// machines so far answer Access, the Reads and the Publish group.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0} has no machine yet")]
 pub struct NotBuilt(pub String);
@@ -316,12 +381,23 @@ pub(crate) enum Step {
     Done(Outcome),
 }
 
+/// A whole call's streamed body, as main has asked for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyState {
+    /// The call's body is inline, or absent.
+    None,
+    /// It streams, and main hasn't asked for it yet.
+    Waiting,
+    Open,
+}
+
 /// What an open ask expects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Kind {
     Ready,
     Whole {
         max: usize,
+        body: BodyState,
     },
     Stream {
         max: u64,
@@ -337,6 +413,8 @@ enum Kind {
     },
     Sign,
     Write,
+    Insert,
+    Turn,
     Mine,
 }
 
@@ -367,6 +445,10 @@ impl Asks {
             },
             Need::Node(call) => Kind::Whole {
                 max: call.max_bytes,
+                body: match call.body {
+                    Some(Body::Stream { .. }) => BodyState::Waiting,
+                    _ => BodyState::None,
+                },
             },
             Need::Hash(_) => Kind::Hash,
             Need::Part(_) => Kind::Part {
@@ -375,7 +457,9 @@ impl Asks {
                 window: node::WINDOW,
             },
             Need::Sign(_) => Kind::Sign,
+            Need::Write(StoreWrite::HistoryInsert(_)) => Kind::Insert,
             Need::Write(_) => Kind::Write,
+            Need::Upload => Kind::Turn,
             Need::Mine(_) => Kind::Mine,
         };
         self.open.insert(
@@ -394,9 +478,9 @@ impl Asks {
             && !open.cancelled
         {
             open.cancelled = true;
-            // Work on the hashing pool can't be called back; its result is
-            // dropped when it comes.
-            if open.kind != Kind::Hash {
+            // Work on the hashing pool and a store write can't be called
+            // back; the answer is dropped when it comes.
+            if !matches!(open.kind, Kind::Hash | Kind::Write | Kind::Insert) {
                 self.effects.push(Effect::Cancel(id));
             }
         }
@@ -426,7 +510,23 @@ impl Asks {
                 Event::Refused(_),
             ) => true,
             (Kind::Ready, Event::Ready(_)) => true,
-            (Kind::Whole { max }, Event::Reply(reply)) => {
+            (Kind::Whole { body, .. }, Event::BodyOpen) => {
+                if *body != BodyState::Waiting {
+                    return Err(Protocol::WrongKind);
+                }
+                *body = BodyState::Open;
+                false
+            }
+            (Kind::Whole { body, .. }, Event::BodyCredit(bytes)) => {
+                if *body != BodyState::Open {
+                    return Err(Protocol::WrongKind);
+                }
+                if *bytes == 0 {
+                    return Err(Protocol::Frame);
+                }
+                false
+            }
+            (Kind::Whole { max, .. }, Event::Reply(reply)) => {
                 let cap = if reply.ok() { *max } else { node::ERROR_BODY };
                 if !node::reply_in_bounds(reply.status, &reply.status_text, &reply.headers)
                     || reply.body.len() > cap
@@ -507,6 +607,8 @@ impl Asks {
             (Kind::Hash, Event::Hashed(_))
             | (Kind::Sign, Event::Signed(_))
             | (Kind::Write, Event::Written(_))
+            | (Kind::Insert, Event::Inserted(_))
+            | (Kind::Turn, Event::Turn)
             | (Kind::Mine, Event::Mined(_)) => true,
             _ => return Err(Protocol::WrongKind),
         };
@@ -603,6 +705,52 @@ impl<W: World> Cx<'_, W> {
     pub fn credit(&mut self, id: AskId, bytes: usize) {
         self.asks.credit(id, bytes);
     }
+
+    /// A payload part of the request's own params.
+    pub fn part(&mut self, part: u32) -> AskId {
+        self.asks.push(Need::Part(part), 0)
+    }
+
+    /// A streaming upload's turn, with its memory.
+    pub fn turn(&mut self) -> AskId {
+        self.asks.push(Need::Upload, UPLOAD_CHARGE)
+    }
+
+    /// A store write.
+    pub fn write(&mut self, write: StoreWrite) -> AskId {
+        self.asks.push(Need::Write(write), 0)
+    }
+
+    /// The next part of call `id`'s streamed body.
+    pub fn body(&mut self, id: AskId, out: BodyOut) {
+        self.asks.effects.push(Effect::Body { id, out });
+    }
+
+    /// The machine no longer waits for ask `id`.
+    pub fn cancel(&mut self, id: AskId) {
+        self.asks.cancel(id);
+    }
+
+    /// `getAutoApprove(origin, capability)`: the site's standing rule.
+    pub fn auto_approve(&self, capability: Capability) -> bool {
+        self.world.auto_approve(self.origin, capability)
+    }
+
+    /// The page's name still binds the request's key (0012's
+    /// `transport_key`).
+    pub fn name_holds(&self) -> bool {
+        self.world.name_holds(self.origin)
+    }
+
+    /// The document is current and still under the request's key.
+    pub fn key_holds(&self) -> bool {
+        self.world.key_holds(self.origin)
+    }
+
+    /// The agent holds the document's tab (0012's `agent`).
+    pub fn agent(&self) -> bool {
+        self.world.agent(self.origin)
+    }
 }
 
 /// The request's method, running.
@@ -612,6 +760,93 @@ enum Running {
     ReadSoc(methods::chunk_reads::ReadSoc),
     ReadData(methods::read_data::ReadData),
     ReadFeed(methods::feed_read::ReadFeed),
+    Publish(Box<methods::publish::Publish>),
+    UploadStatus(methods::upload_status::UploadStatus),
+}
+
+impl Running {
+    /// The terminal a stream the method writes still needs when the request
+    /// ends without its machine: an opened upload body that hasn't ended
+    /// ends `cancelled` (`internal` at a protocol error), exactly once
+    /// (design 0015, "Streams").
+    fn end(&mut self, outcome: &Outcome) -> Option<Effect> {
+        match self {
+            Running::Publish(m) => m.end(outcome),
+            _ => None,
+        }
+    }
+
+    /// What a method still writes when the request ends without its
+    /// machine (a cancel, the deadline, `busy`, a protocol error): an
+    /// upload's history row ends `failed` (design 0015, "Deadlines and
+    /// cancel"), at once, or once an insert in flight answers its rowid.
+    fn closing(&self, outcome: &Outcome) -> Option<Closing> {
+        match self {
+            Running::Publish(m) => m.closing(outcome),
+            _ => None,
+        }
+    }
+}
+
+/// A method's last write after the request's outcome.
+pub(crate) enum Closing {
+    /// The write, now, with no retry: a store's write other than a history
+    /// row's end (which is [`Closing::Row`]).
+    #[allow(
+        dead_code,
+        reason = "the feed and SOC writes' closing writes (part 3c)"
+    )]
+    Write(StoreWrite),
+    /// The history insert `id` is in flight: its rowid is awaited, then
+    /// the row is trimmed around and ended `failed` with `text`, at `now`.
+    AfterInsert(AfterInsert),
+    /// The history row is known: it ends `failed`, now.
+    Row(RowEnd),
+    /// The machine's own last write of the row is already in flight when
+    /// the request ends: nothing more is asked unless it fails, and then
+    /// the failed update with the write's error once, if a retry is left.
+    InFlight(InFlight),
+}
+
+/// A row's last write the machine asked before the outcome, still open.
+pub(crate) struct InFlight {
+    /// The write's ask.
+    pub id: AskId,
+    pub row: i64,
+    /// The clock for the retry's `completed_at`.
+    pub now: u64,
+    /// Whether a retry is left: not once the write is itself the retry.
+    pub retry: bool,
+}
+
+/// The row an in-flight history insert makes, to end once it answers.
+pub(crate) struct AfterInsert {
+    pub id: AskId,
+    pub text: JsString,
+    pub now: u64,
+}
+
+/// A history row to end `failed` with `text`, at `now`.
+pub(crate) struct RowEnd {
+    pub row: i64,
+    pub text: JsString,
+    pub now: u64,
+}
+
+/// What the request still waits for after its outcome, for its history
+/// row: one thing at a time.
+enum After {
+    /// The insert in flight: its rowid.
+    Insert(AfterInsert),
+    /// The row's failed update `id` (after the trim keeping the row, for a
+    /// row whose insert was in flight), and, until it has been retried,
+    /// the row to retry it on: a failed write is followed once by the
+    /// failed update with the write's error (`history-retry`), the trim
+    /// again first where it had one. A second failure is dropped.
+    Write {
+        id: AskId,
+        retry: Option<(i64, u64, bool)>,
+    },
 }
 
 /// One `swarm.request`.
@@ -620,6 +855,9 @@ pub struct Request {
     running: Option<Running>,
     asks: Asks,
     outcome: Option<Outcome>,
+    /// After the outcome, what the history row still waits for: an insert
+    /// in flight, or its failed update and that update's one retry.
+    after: Option<After>,
 }
 
 impl Request {
@@ -632,6 +870,7 @@ impl Request {
             running: None,
             asks: Asks::default(),
             outcome: None,
+            after: None,
         };
         let method = match &call.method {
             Value::String(s) if !s.is_empty() => s.clone(),
@@ -657,7 +896,7 @@ impl Request {
             asks: &mut request.asks,
         };
         let params = &call.params;
-        use methods::{access, chunk_reads, feed_read, read_data};
+        use methods::{access, chunk_reads, feed_read, publish, read_data, upload_status};
         let started = match method.as_str() {
             "swarm_requestAccess" => Err(access::request_access(&mut cx)),
             "swarm_getCapabilities" => {
@@ -673,6 +912,13 @@ impl Request {
             "swarm_readData" => read_data::ReadData::start(&mut cx, params).map(Running::ReadData),
             "swarm_readFeedEntry" => {
                 feed_read::ReadFeed::start(&mut cx, params).map(Running::ReadFeed)
+            }
+            "swarm_publishData" | "swarm_publishFiles" | "swarm_publishChunk" => {
+                publish::Publish::start(&mut cx, method.as_str(), params, call.approval)
+                    .map(|m| Running::Publish(Box::new(m)))
+            }
+            "swarm_getUploadStatus" => {
+                upload_status::UploadStatus::start(&mut cx, params).map(Running::UploadStatus)
             }
             other => return Err(NotBuilt(other.to_owned())),
         };
@@ -691,8 +937,20 @@ impl Request {
             // or abort, a failure), since what main holds for it is held
             // until then; heads and data before it are taken, never handed
             // to the method. An answer that breaks the protocol now
-            // changes nothing.
-            let _ = self.asks.admit(id, &event);
+            // changes nothing. An insert that was in flight still gets its
+            // row trimmed around and ended.
+            let admitted = self.asks.admit(id, &event);
+            if admitted.is_ok() && event == Event::BodyOpen {
+                // A body main asked for after the request ended still gets
+                // its one terminal.
+                self.asks.effects.push(Effect::Body {
+                    id,
+                    out: BodyOut::Abort(BodyAbort::Cancelled),
+                });
+            }
+            if admitted.is_ok() {
+                self.after_answer(id, event);
+            }
             return;
         }
         let cancelled = match self.asks.admit(id, &event) {
@@ -716,6 +974,8 @@ impl Request {
             Running::ReadSoc(m) => m.on(&mut cx, id, event),
             Running::ReadData(m) => m.on(&mut cx, id, event),
             Running::ReadFeed(m) => m.on(&mut cx, id, event),
+            Running::Publish(m) => m.on(&mut cx, id, event),
+            Running::UploadStatus(m) => m.on(&mut cx, id, event),
         };
         if let Step::Done(outcome) = step {
             self.finish(outcome);
@@ -739,9 +999,66 @@ impl Request {
     }
 
     fn finish(&mut self, outcome: Outcome) {
+        let mut running = self.running.take();
+        if let Some(terminal) = running.as_mut().and_then(|m| m.end(&outcome)) {
+            self.asks.effects.push(terminal);
+        }
         self.asks.cancel_all();
-        self.running = None;
+        match running.and_then(|m| m.closing(&outcome)) {
+            // The one ask after the outcome: a write isn't called back, and
+            // its answer is dropped.
+            Some(Closing::Write(write)) => {
+                self.asks.push(Need::Write(write), 0);
+            }
+            Some(Closing::AfterInsert(after)) => self.after = Some(After::Insert(after)),
+            Some(Closing::Row(end)) => self.end_row(end, false),
+            Some(Closing::InFlight(write)) => {
+                self.after = Some(After::Write {
+                    id: write.id,
+                    retry: write.retry.then_some((write.row, write.now, false)),
+                });
+            }
+            None => {}
+        }
         self.outcome = Some(outcome);
+    }
+
+    /// Ends a history row `failed` after the outcome (after the trim
+    /// keeping it, with `trim`), keeping what its one retry needs.
+    fn end_row(&mut self, end: RowEnd, trim: bool) {
+        if let Some(write) = methods::publish::row_failed(end.row, &end.text, end.now, trim) {
+            let id = self.asks.push(Need::Write(write), 0);
+            self.after = Some(After::Write {
+                id,
+                retry: Some((end.row, end.now, trim)),
+            });
+        }
+    }
+
+    /// An admitted answer after the outcome, for what the history row
+    /// waits for: only its own terminal moves it on.
+    fn after_answer(&mut self, id: AskId, event: Event) {
+        match (self.after.take(), event) {
+            (Some(After::Insert(insert)), Event::Inserted(Ok(row))) if insert.id == id => {
+                let end = RowEnd {
+                    row,
+                    text: insert.text,
+                    now: insert.now,
+                };
+                self.end_row(end, true);
+            }
+            // No row was made.
+            (Some(After::Insert(insert)), Event::Inserted(Err(_))) if insert.id == id => {}
+            (Some(After::Write { id: write, retry }), Event::Written(result)) if write == id => {
+                if let (Err(error), Some((row, now, trim))) = (result, retry)
+                    && let Some(again) = methods::publish::row_failed(row, &error, now, trim)
+                {
+                    let id = self.asks.push(Need::Write(again), 0);
+                    self.after = Some(After::Write { id, retry: None });
+                }
+            }
+            (other, _) => self.after = other,
+        }
     }
 
     /// The effects since the last call, in order.
@@ -787,6 +1104,7 @@ mod tests {
         now: u64,
         budgets: ReadBudgets,
         feeds: FeedStore,
+        tags: TagOwners,
     }
 
     impl Reads for Plain {
@@ -811,6 +1129,18 @@ mod tests {
         fn budgets(&mut self) -> &mut ReadBudgets {
             &mut self.budgets
         }
+        fn name_holds(&self, _key: &JsString) -> bool {
+            true
+        }
+        fn key_holds(&self, _key: &JsString) -> bool {
+            true
+        }
+        fn agent(&self, _key: &JsString) -> bool {
+            false
+        }
+        fn tags(&mut self) -> &mut TagOwners {
+            &mut self.tags
+        }
     }
 
     fn world() -> Plain {
@@ -818,6 +1148,7 @@ mod tests {
             now: 1000,
             budgets: ReadBudgets::new(),
             feeds: FeedStore::empty(),
+            tags: TagOwners::new(),
         }
     }
 
@@ -952,6 +1283,19 @@ mod tests {
     }
 
     #[test]
+    fn a_stopped_node_answers_the_references_text() {
+        let mut w = world();
+        let (mut r, id) = latest(&mut w);
+        r.answer(&mut w, id, Event::Failed(Failed::Stopped));
+        assert_eq!(
+            r.outcome(),
+            Some(&Outcome::Error(Failure::internal(
+                "Swarm node is not ready"
+            )))
+        );
+    }
+
+    #[test]
     fn main_refuses_only_a_call_before_its_reply() {
         let mut w = world();
         // A ready check is never refused by a grammar rule.
@@ -1079,8 +1423,8 @@ mod tests {
             )))
         );
         assert_eq!(
-            Request::start(&call("swarm_publishData", Value::Undefined), &mut w).err(),
-            Some(NotBuilt("swarm_publishData".into()))
+            Request::start(&call("swarm_createFeed", Value::Undefined), &mut w).err(),
+            Some(NotBuilt("swarm_createFeed".into()))
         );
     }
 }

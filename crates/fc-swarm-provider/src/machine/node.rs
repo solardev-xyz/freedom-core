@@ -183,6 +183,29 @@ pub enum Body {
     Stream { bytes: u64 },
 }
 
+/// The most bytes of an inline (`{ base64 }`) body.
+pub const INLINE_BODY: usize = 64 * KIB;
+
+/// The core's answer to main's `swarm.body`, one part at a time (design
+/// 0015, "Streams"): the head with the body's length, data frames of 1 to
+/// [`MAX_FRAME`] bytes within main's window, and one terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BodyOut {
+    Head { bytes: u64 },
+    Data(Vec<u8>),
+    End,
+    Abort(BodyAbort),
+}
+
+/// How the core ends a body short (design 0015, "Streams"): main's call
+/// went, a core failure, or a part it was copying failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyAbort {
+    Cancelled,
+    Internal,
+    BodyStreamError,
+}
+
 /// One `shell.swarm_api` call: `{ for, form, method, path, query, headers,
 /// body, max_bytes, stream, feed?, tree? }` without `for`, which is the
 /// request's own. `headers` are the row's; main adds bee-js's `accept`
@@ -265,6 +288,37 @@ impl NodeCall {
             format!("/feeds/{}/{}", hex(owner), hex(topic)),
             max_bytes,
         )
+    }
+
+    /// `GET /stamps`, whole, at most 1 MiB.
+    pub fn stamps() -> NodeCall {
+        NodeCall::get(Form::Stamps, "/stamps".to_owned(), STAMPS_REPLY_CAP)
+    }
+
+    /// `GET /tags/<uid>`, whole.
+    pub fn tag(uid: u64) -> NodeCall {
+        NodeCall::get(Form::Tag, format!("/tags/{uid}"), JSON_REPLY_CAP)
+    }
+
+    /// An upload, `POST <path>` with its form's headers and `body`; its
+    /// result is whole JSON of at most 64 KiB.
+    pub fn upload(
+        form: Form,
+        path: &str,
+        query: Vec<(String, String)>,
+        headers: Vec<(String, String)>,
+        body: Body,
+    ) -> NodeCall {
+        NodeCall {
+            form,
+            path: path.to_owned(),
+            query,
+            headers,
+            body: Some(body),
+            max_bytes: JSON_REPLY_CAP,
+            feed: None,
+            tree: None,
+        }
     }
 
     /// Its HTTP method.
@@ -350,7 +404,7 @@ impl Head {
 }
 
 /// Why a call failed before any reply (`{ failed }`): 0009's closed set
-/// plus `busy`.
+/// plus `busy` and `stopped`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failed {
     Unreachable,
@@ -358,6 +412,9 @@ pub enum Failed {
     Aborted,
     TooLarge,
     Busy,
+    /// Main has no node to dial: the node stopped, or its URL went, after
+    /// a readiness answer.
+    Stopped,
 }
 
 /// A streamed reply's end before its last byte: main's abort codes.
@@ -386,13 +443,14 @@ pub enum Rule {
 
 /// The text the reference gives a transport failure of each class
 /// (deviation `transport-error-text`: one text a class, where undici's
-/// message names its cause): `unreachable`, `error` and `aborted`. Each
-/// call site answers `too_large` and `busy` itself; here they read as
-/// `error`.
+/// message names its cause): `unreachable`, `error` and `aborted`; and
+/// `stopped`'s, the reference's own for a node with no URL. Each call site
+/// answers `too_large` and `busy` itself; here they read as `error`.
 pub fn transport_text(failed: Failed) -> &'static str {
     match failed {
         Failed::Unreachable => UNREACHABLE_TEXT,
         Failed::Aborted => ABORTED_TEXT,
+        Failed::Stopped => STOPPED_TEXT,
         Failed::Error | Failed::TooLarge | Failed::Busy => ERROR_TEXT,
     }
 }
@@ -404,6 +462,10 @@ pub const UNREACHABLE_TEXT: &str = "fetch failed";
 pub const ERROR_TEXT: &str = "fetch failed: other side closed";
 /// The `AbortError`'s.
 pub const ABORTED_TEXT: &str = "This operation was aborted";
+/// The reference's text when there is no node to call
+/// (publish-service.js's `publishPageData`, swarm-service.js's `getBee`):
+/// every method answers a `stopped` call -32603 with it.
+pub const STOPPED_TEXT: &str = "Swarm node is not ready";
 
 /// What strict reading refuses in a reply (a protocol error).
 pub(crate) fn reply_in_bounds(
