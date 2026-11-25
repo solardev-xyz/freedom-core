@@ -898,6 +898,55 @@ fn a_failed_name_check_ends_the_binding_for_every_family() {
     assert!(!bindings.has(&Document::new(SITE, "ipns://k5_1", 1, 1)));
 }
 
+/// An answer handled at or after its request's deadline is the deadline's
+/// (Codex round 2 on #498): a naming verdict that fails then answers
+/// `cancelled` and ends no binding, as a deadline ends nothing, and main's
+/// recheck then lets no effect go.
+#[test]
+fn an_answer_at_the_deadline_is_the_deadline_s() {
+    let bindings = Bindings::default();
+    let mut engine = Engine::new(
+        Bounds::default(),
+        Shared::new(grants(), bindings.clone()),
+        true,
+    );
+    let mut io = Fake::default();
+    // A 60,000 ms request whose name check is out when its deadline comes,
+    // and whose verdict the thread handles at it, before any tick.
+    upload_status(&mut engine, &mut io, 1, Some("ipns://k51abc"));
+    let (tag, _, _) = io.checks.pop().unwrap();
+    engine
+        .named(&mut io, 60_000, tag, crate::eip1193::Verdict::Fails)
+        .unwrap();
+    assert_eq!(io.answer_of(1), cancelled());
+    assert!(!bindings.has(&document()), "a deadline ends no binding");
+    assert_eq!(io.name_cancels, vec![tag]);
+
+    // Main's recheck answered at the deadline: `cancelled`, not the
+    // effect's answer.
+    upload_status(&mut engine, &mut io, 2, Some("ipns://k51abc"));
+    let (tag, _, _) = io.checks.pop().unwrap();
+    engine
+        .named(&mut io, 20, tag, crate::eip1193::Verdict::Holds)
+        .unwrap();
+    let (recheck, method, _) = io.last();
+    assert_eq!(method, "approval.recheck");
+    engine
+        .response(
+            &mut io,
+            60_000,
+            recheck,
+            Ok(r#"{"live":true,"agent":false}"#),
+        )
+        .unwrap();
+    assert_eq!(io.answer_of(2), cancelled());
+    assert!(io.answers.is_empty(), "one answer");
+    for id in [1, 2] {
+        engine.written(&mut io, 60_001, id).unwrap();
+    }
+    assert_eq!((engine.memory_used(), engine.requests()), (0, 0));
+}
+
 /// A PSS subscription to its open: the subscribe check, the guard's live
 /// facts, then main's open.
 fn subscribed(engine: &mut Engine, io: &mut Fake, id: u64) -> u64 {
@@ -1319,4 +1368,32 @@ fn a_stuck_batch_is_watched_and_the_second_turns_mining_off() {
     assert!(text.contains("mining is off"), "{text}");
     assert!(io.batches.is_empty());
     let _ = KIB;
+}
+
+/// A batch's answer that reaches the engine at or after its watchdog's
+/// second, before the thread's own tick, is the stuck lane's: the job
+/// ends `mining lane stuck` and the answer is dropped, as the tick would
+/// have left them had it turned first. One just inside its second counts.
+#[test]
+fn a_batch_answered_past_its_watchdog_is_the_stuck_lanes() {
+    let mut engine = engine(Bounds::default());
+    let mut io = Fake::default();
+    subscribe_gsoc(&mut engine, &mut io, 1, "chat", 0);
+    let (lane, batch) = io.batches.remove(0);
+    engine
+        .mined(&mut io, STUCK_MS - 1, lane, batch.run())
+        .unwrap();
+    assert_eq!(io.last().1, "approval.recheck", "found, inside its second");
+    subscribe_gsoc(&mut engine, &mut io, 2, "fast-29", 2_000);
+    let (lane, batch) = io.batches.remove(0);
+    engine
+        .mined(&mut io, 2_000 + STUCK_MS, lane, batch.run())
+        .unwrap();
+    let Answer::Result(text) = io.answer_of(2) else {
+        panic!("a result")
+    };
+    assert!(text.contains("mining lane stuck"), "{text}");
+    // The next search goes to a fresh lane thread.
+    subscribe_gsoc(&mut engine, &mut io, 3, "fast-31", 3_100);
+    assert_eq!(io.batches[0].0, 1);
 }
