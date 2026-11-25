@@ -605,7 +605,8 @@
     },
     "reply-syntax": {
       "cases": [
-        "methods/publish-data-stamps-not-json"
+        "methods/publish-data-stamps-not-json",
+        "methods/write-soc-node-not-json"
       ]
     },
     "batch-depth": {
@@ -51155,6 +51156,256 @@
             "timestamp": "2026-01-01T00:00:00.123Z",
             "completedAt": "2026-01-01T00:00:00.123Z",
             "errorMessage": "SOC upload response missing reference"
+          }
+        ]
+      }
+    },
+    {
+      "id": "write-soc-node-not-json",
+      "deviation": "reply-syntax",
+      "origin": "https://app.example",
+      "grants": {
+        "https://app.example": {
+          "origin": "https://app.example",
+          "connectedAt": 1767225540123,
+          "lastUsed": 1767225540123,
+          "autoApprove": {
+            "publish": false,
+            "feeds": false,
+            "signing": false,
+            "messaging": false
+          }
+        }
+      },
+      "feeds": "{\n  \"version\": 2,\n  \"nextPublisherKeyIndex\": 1,\n  \"origins\": {\n    \"https://app.example\": {\n      \"activeIdentityId\": \"app-scoped:0\",\n      \"identities\": {\n        \"app-scoped:0\": {\n          \"id\": \"app-scoped:0\",\n          \"mode\": \"app-scoped\",\n          \"publisherKeyIndex\": 0,\n          \"walletIndex\": null,\n          \"label\": \"App-scoped identity 1\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": null\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": {}\n    }\n  }\n}",
+      "vault": "unlocked",
+      "readiness": {
+        "ok": true
+      },
+      "custody": false,
+      "node": {
+        "stamps": {
+          "stamps": [
+            {
+              "batchID": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+              "utilization": 0,
+              "usable": true,
+              "label": "freedom",
+              "depth": 22,
+              "amount": "100000000000",
+              "bucketDepth": 16,
+              "blockNumber": 1000,
+              "immutableFlag": true,
+              "exists": true,
+              "batchTTL": 864000
+            }
+          ]
+        },
+        "rules": [
+          {
+            "match": {
+              "prefix": "/soc/"
+            },
+            "reply": {
+              "status": 201,
+              "body_utf8": "<html>"
+            }
+          }
+        ]
+      },
+      "clock": 1767225600123,
+      "steps": [
+        {
+          "method": "swarm_writeSingleOwnerChunk",
+          "params": {
+            "object": [
+              [
+                "identifier",
+                {
+                  "string": "4242424242424242424242424242424242424242424242424242424242424242"
+                }
+              ],
+              [
+                "data",
+                {
+                  "string_bytes": 1,
+                  "base64": "eA=="
+                }
+              ]
+            ]
+          },
+          "error": {
+            "code": -32603,
+            "message": "Unexpected token '<', \"<html>\" is not valid JSON"
+          },
+          "requests": [
+            {
+              "via": "fetch",
+              "method": "GET",
+              "path": "/stamps",
+              "headers": [
+                [
+                  "accept",
+                  "application/json, text/plain, */*"
+                ]
+              ],
+              "status": 200,
+              "form": "stamps"
+            },
+            {
+              "via": "fetch",
+              "method": "POST",
+              "path": "/soc/a274614c1d3425568fd100b30322287c86085220/4242424242424242424242424242424242424242424242424242424242424242",
+              "query": [
+                [
+                  "sig",
+                  "5fa3e7d1f3337b04bae5f71fe219360ff73dcb19b4ce7733de72ff7ff755d2aa2afcd7de6820a1f0dc48d6e1beb171895491b00d160800ef5e33d9f1401fb6db1c"
+                ]
+              ],
+              "headers": [
+                [
+                  "content-type",
+                  "application/octet-stream"
+                ],
+                [
+                  "swarm-postage-batch-id",
+                  "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+                ],
+                [
+                  "swarm-pin",
+                  "true"
+                ],
+                [
+                  "swarm-deferred-upload",
+                  "false"
+                ]
+              ],
+              "body": {
+                "bytes": 9,
+                "base64": "AQAAAAAAAAB4"
+              },
+              "status": 201,
+              "form": "soc_up",
+              "owner": "a274614c1d3425568fd100b30322287c86085220"
+            }
+          ],
+          "events": [
+            {
+              "prompt": {
+                "kind": "swarm.feed",
+                "view": {
+                  "method": "swarm_writeSingleOwnerChunk",
+                  "mode": "signing",
+                  "identifier": "4242424242424242424242424242424242424242424242424242424242424242",
+                  "identities": [
+                    {
+                      "id": "app-scoped:0",
+                      "mode": "app-scoped",
+                      "label": "App-scoped identity 1",
+                      "owner": "0xA274614c1D3425568Fd100B30322287c86085220",
+                      "shared": false,
+                      "stored": true,
+                      "unavailable": false
+                    },
+                    {
+                      "id": "bee-wallet",
+                      "mode": "bee-wallet",
+                      "label": "Bee wallet identity",
+                      "owner": "0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0",
+                      "shared": true,
+                      "stored": false,
+                      "unavailable": false
+                    }
+                  ],
+                  "newIdentity": {
+                    "id": "app-scoped:1",
+                    "mode": "app-scoped",
+                    "label": "App-scoped identity 2",
+                    "owner": "0xd2e7208e8026bf96945d56CBCae2f509cC6e4748",
+                    "shared": false,
+                    "stored": false,
+                    "unavailable": false
+                  },
+                  "activeIdentityId": "app-scoped:0"
+                },
+                "answer": {
+                  "approve": true,
+                  "choices": {
+                    "identity": "app-scoped:0"
+                  }
+                }
+              }
+            },
+            {
+              "touch": "page"
+            },
+            {
+              "service": {
+                "key": "https://app.example",
+                "page": true,
+                "approval": "user"
+              }
+            },
+            {
+              "readiness": "publish",
+              "after_requests": 0
+            },
+            {
+              "sign_soc": {
+                "key": {
+                  "kind": "publisher",
+                  "origin_index": 0
+                },
+                "identifier": "4242424242424242424242424242424242424242424242424242424242424242",
+                "payload": {
+                  "bytes": 1,
+                  "hex": "78"
+                },
+                "authorization": {
+                  "swarm": "user",
+                  "soc": "raw"
+                },
+                "page": {
+                  "origin": "https://app.example",
+                  "top_origin": "https://app.example",
+                  "frame": 1,
+                  "navigation": 1,
+                  "agent": false
+                }
+              }
+            },
+            {
+              "effect": {
+                "custody": [],
+                "outcome": "ran"
+              }
+            }
+          ]
+        }
+      ],
+      "core": {
+        "error": {
+          "code": -32603,
+          "message": "Swarm node reply is not valid JSON"
+        }
+      },
+      "after": {
+        "feeds": "{\n  \"version\": 2,\n  \"nextPublisherKeyIndex\": 1,\n  \"origins\": {\n    \"https://app.example\": {\n      \"activeIdentityId\": \"app-scoped:0\",\n      \"identities\": {\n        \"app-scoped:0\": {\n          \"id\": \"app-scoped:0\",\n          \"mode\": \"app-scoped\",\n          \"publisherKeyIndex\": 0,\n          \"walletIndex\": null,\n          \"label\": \"App-scoped identity 1\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": 1767225600123\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": {}\n    }\n  }\n}",
+        "history": [
+          {
+            "id": 1,
+            "type": "soc",
+            "name": "SOC chunk",
+            "status": "failed",
+            "reference": null,
+            "bzzUrl": null,
+            "tagUid": null,
+            "batchIdUsed": null,
+            "origin": "https://app.example",
+            "bytesSize": 1,
+            "timestamp": "2026-01-01T00:00:00.123Z",
+            "completedAt": "2026-01-01T00:00:00.123Z",
+            "errorMessage": "Unexpected token '<', \"<html>\" is not valid JSON"
           }
         ]
       }
@@ -118180,6 +118431,7 @@
         "write-soc-node-error-text",
         "write-soc-node-other-reference",
         "write-soc-node-no-reference",
+        "write-soc-node-not-json",
         "write-soc-node-batch-not-yet-known",
         "create-feed-no-stamps",
         "create-feed-stamps-pending",

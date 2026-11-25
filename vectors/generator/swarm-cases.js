@@ -622,6 +622,11 @@ function methodCases(env) {
   ws('node-no-reference', () => ({ identifier: sid, data: 'x' }), { node: { stamps: STAMPS.usable, rules: [
     { match: { prefix: '/soc/' }, reply: { status: 201, json: {} } },
   ] } });
+  // chunk-service.js parses the success reply with Response.json(): one
+  // that isn't JSON reaches the page as V8's SyntaxError (reply-syntax).
+  ws('node-not-json', () => ({ identifier: sid, data: 'x' }), { node: { stamps: STAMPS.usable, rules: [
+    { match: { prefix: '/soc/' }, reply: { status: 201, body_utf8: '<html>' } },
+  ] }, deviation: { id: 'reply-syntax', core: { error: { code: -32603, message: 'Swarm node reply is not valid JSON' } } } });
   ws('node-batch-not-yet-known', () => ({ identifier: sid, data: 'x' }), { node: { stamps: STAMPS.usable, rules: [
     { match: { prefix: '/soc/' }, reply: { status: 500, json: { code: 500,
       message: `pushsync: postage batch 0x${BATCH_A} rejected by 1 peer(s) as not found on-chain` } } },

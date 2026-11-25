@@ -1022,8 +1022,8 @@
       "deviation read-data-verified": 14
     },
     "writeSingleOwnerChunk": {
-      "form stamps": 26,
-      "form soc_up": 23
+      "form stamps": 27,
+      "form soc_up": 24
     },
     "readSingleOwnerChunk": {
       "ready reachable": 12,
@@ -14627,6 +14627,97 @@
       "id": "write-soc-node-no-reference",
       "row": "writeSingleOwnerChunk",
       "from": "methods/write-soc-node-no-reference",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "identifier",
+            {
+              "string": "4242424242424242424242424242424242424242424242424242424242424242"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "soc_up",
+          "method": "POST",
+          "path": "/soc/a274614c1d3425568fd100b30322287c86085220/4242424242424242424242424242424242424242424242424242424242424242",
+          "query": [
+            [
+              "sig",
+              "5fa3e7d1f3337b04bae5f71fe219360ff73dcb19b4ce7733de72ff7ff755d2aa2afcd7de6820a1f0dc48d6e1beb171895491b00d160800ef5e33d9f1401fb6db1c"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ],
+            [
+              "swarm-pin",
+              "true"
+            ],
+            [
+              "swarm-deferred-upload",
+              "false"
+            ]
+          ],
+          "body": {
+            "bytes": 9,
+            "base64": "AQAAAAAAAAB4"
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "write-soc-node-not-json",
+      "row": "writeSingleOwnerChunk",
+      "from": "methods/write-soc-node-not-json",
       "key": "https://app.example",
       "params": {
         "object": [
