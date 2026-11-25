@@ -2601,3 +2601,298 @@ fn a_read_error_on_a_node_reply_is_a_protocol_error() {
         ))
     );
 }
+
+// ---------------------------------------------------------------------------
+// D12's recorded cases: vectors/swarm.json's `shell` section.
+
+/// The `shell` cases of these four methods this test doesn't play, each
+/// with why. The test fails on any case it neither plays nor names here.
+const SHELL_LEFT_OUT: &[(&str, &str)] = &[
+    (
+        "feed-read-latest",
+        "`swarm.feed`'s `op: \"read\"` (readFeedState, SWM-8's) has no machine yet",
+    ),
+    (
+        "feed-read-empty",
+        "`swarm.feed`'s `op: \"read\"` (readFeedState, SWM-8's) has no machine yet",
+    ),
+    (
+        "feed-read-probe",
+        "`swarm.feed`'s `op: \"read\"` (readFeedState, SWM-8's) has no machine yet",
+    ),
+    (
+        "feed-read-node-500",
+        "`swarm.feed`'s `op: \"read\"` (readFeedState, SWM-8's) has no machine yet",
+    ),
+];
+
+/// A call the reference made, as the core makes it, and main's reply.
+struct WantCall {
+    form: String,
+    method: String,
+    path: String,
+    query: Vec<(String, String)>,
+    headers: Vec<(String, String)>,
+    /// The body's bytes, or its length and SHA-256.
+    body: Option<(usize, Result<Vec<u8>, String>)>,
+    feed: Option<(String, u64)>,
+    reply: Reply,
+}
+
+fn pairs_of(v: Option<V<'_, '_>>) -> Vec<(String, String)> {
+    v.map(|list| {
+        list.children()
+            .map(|p| {
+                let mut it = p.children();
+                (string(it.next().unwrap()), string(it.next().unwrap()))
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// A recorded reply as main forwards it: the headers the core reads.
+fn recorded_reply(reply: V<'_, '_>, keep: &[&str]) -> Reply {
+    let body = get(reply, "body");
+    Reply {
+        status: number(get(reply, "status")) as u16,
+        status_text: string(get(reply, "status_text")),
+        headers: pairs_of(reply.get("headers"))
+            .into_iter()
+            .filter(|(k, _)| keep.contains(&k.as_str()))
+            .collect(),
+        body: common::b64(&string(get(body, "base64"))),
+    }
+}
+
+/// The calls the core makes for a step's recorded requests: the reference's
+/// own, but its second `/stamps` dropped (`stamps-one-read`) and its whole
+/// `GET /feeds` index lookup asked as `feed_head` (`index-probe`).
+fn want_calls(step: V<'_, '_>) -> Vec<WantCall> {
+    let mut out = Vec::new();
+    for r in get(step, "requests").children() {
+        let reply = get(r, "reply");
+        match r.get("deviation").map(string).as_deref() {
+            Some("stamps-one-read") => continue,
+            Some("index-probe") => out.push(WantCall {
+                form: "feed_head".to_owned(),
+                method: "GET".to_owned(),
+                path: string(get(r, "path")),
+                query: Vec::new(),
+                headers: vec![("swarm-only-root-chunk".to_owned(), "true".to_owned())],
+                body: None,
+                feed: None,
+                reply: recorded_reply(reply, &["swarm-feed-index", "swarm-feed-index-next"]),
+            }),
+            Some(other) => panic!("a shell request of deviation {other}"),
+            None => {
+                let body = r.get("body").map(|b| {
+                    let n = number(get(b, "bytes")) as usize;
+                    match b.get("base64") {
+                        Some(t) => (n, Ok(common::b64(&string(t)))),
+                        None => (n, Err(string(get(b, "sha256")))),
+                    }
+                });
+                out.push(WantCall {
+                    form: string(get(r, "form")),
+                    method: string(get(r, "method")),
+                    path: string(get(r, "path")),
+                    query: pairs_of(r.get("query")),
+                    headers: pairs_of(r.get("headers"))
+                        .into_iter()
+                        .filter(|(k, _)| k != "accept" && k != "accept-encoding")
+                        .collect(),
+                    body,
+                    feed: r
+                        .get("feed")
+                        .map(|f| (string(get(f, "owner")), number(get(f, "index")) as u64)),
+                    reply: recorded_reply(reply, &READ_HEADERS),
+                });
+            }
+        }
+    }
+    out
+}
+
+fn check_call(id: &str, k: usize, got: &Called, want: &WantCall) {
+    let call = &got.call;
+    let at = format!("{id}: call {k}");
+    assert_eq!(call.form.as_str(), want.form, "{at}");
+    assert_eq!(call.method(), want.method, "{at}");
+    assert_eq!(call.path, want.path, "{at}");
+    assert_eq!(call.query, want.query, "{at}");
+    assert_eq!(call.headers, want.headers, "{at}");
+    match &want.body {
+        None => assert!(got.body.is_empty(), "{at}: a body where none"),
+        Some((n, Ok(bytes))) => {
+            assert_eq!(got.body.len(), *n, "{at}");
+            assert!(got.body == *bytes, "{at}: the body's bytes");
+        }
+        Some((n, Err(digest))) => {
+            assert_eq!(got.body.len(), *n, "{at}");
+            assert_eq!(sha(&got.body), *digest, "{at}");
+        }
+    }
+    if let Some((owner, index)) = &want.feed {
+        let feed = call
+            .feed
+            .as_ref()
+            .unwrap_or_else(|| panic!("{at}: no feed"));
+        assert_eq!(
+            (hex(&feed.owner), feed.index),
+            (owner.clone(), *index),
+            "{at}"
+        );
+    }
+}
+
+/// A recorded node replaying its replies in order.
+fn replay_node<'a>(wants: &'a [WantCall]) -> NodeFn<'a> {
+    let mut n = 0usize;
+    Box::new(move |call: &NodeCall, _body: &[u8]| {
+        let want = wants
+            .get(n)
+            .unwrap_or_else(|| panic!("an unrecorded call {} {}", call.method(), call.path));
+        n += 1;
+        Event::Reply(want.reply.clone())
+    })
+}
+
+fn shell_method(name: &str) -> Option<ShellMethod> {
+    ShellMethod::from_name(name)
+}
+
+/// Every `shell` case of `swarm.publish`, `swarm.feed`, `swarm.stamps` and
+/// `swarm.upload_status` (D12's, recorded from publish-service.js,
+/// feed-service.js, bee-js's stamps and getUploadStatus) through the
+/// machines: main's params as the case gives them, each node call against
+/// the reference's (form, method, path, query, headers, body, a probe's
+/// feed update), replayed with the node's recorded reply; the answer in its
+/// typed form, and the history rows `freedom://publish` keeps.
+#[test]
+fn every_shell_case_through_the_machines() {
+    let v = Vectors::load();
+    let swarm_index = Index::new(&v.swarm).unwrap();
+    let keys = keys_of(&v);
+    let mut played = 0usize;
+    let mut left_out = Vec::new();
+    for case in get(swarm_index.root(), "shell").children() {
+        let id = string(get(case, "id"));
+        let Some(method) = shell_method(&string(get(case, "method"))) else {
+            continue;
+        };
+        if let Some((_, why)) = SHELL_LEFT_OUT.iter().find(|(l, _)| *l == id) {
+            assert!(!why.is_empty());
+            left_out.push(id);
+            continue;
+        }
+        // A feed update's index lookup is feed_head (`index-probe`), which
+        // want_calls asks for. A picked file whose read fails once its
+        // upload started (`picked-read-text`): the reference's fetch fails
+        // before any request reaches the node; the core makes its upload
+        // call, main ends the part with the errno's name, and the core
+        // answers describePickedPathError's form, in the row too.
+        let deviation = case.get("deviation").map(string);
+        let picked_read = deviation.as_deref() == Some("picked-read-text");
+        match deviation.as_deref() {
+            None => assert!(case.get("core").is_none(), "{id}"),
+            Some("picked-read-text") => {}
+            Some("index-probe") => assert_eq!(
+                string(get(case, "core")),
+                "feed_head with swarm-only-root-chunk instead of the whole latest payload; the same index",
+                "{id}"
+            ),
+            Some(other) => panic!("{id}: deviation {other}"),
+        }
+        let steps: Vec<_> = get(case, "steps").children().collect();
+        assert_eq!(steps.len(), 1, "{id}");
+        let step = steps[0];
+        let params = get(step, "params").stringify(KeyOrder::Property);
+        let wants = want_calls(step);
+        let mut main = Main::new(&keys, replay_node(&wants));
+        main.world.now = number(get(get(case, "world"), "clock")) as u64;
+        if let Some(parts) = step.get("parts") {
+            for (k, part) in parts.children().enumerate() {
+                main.parts
+                    .insert(k as u32, common::b64(&string(get(part, "base64"))));
+            }
+        }
+        if let Some(abort) = step.get("part_abort") {
+            let part = number(get(abort, "part")) as u32;
+            let code = ErrorCode::new(&string(get(abort, "error_code"))).unwrap();
+            main.parts.entry(part).or_default();
+            main.abort_part = Some((part, Abort::Unreadable(code)));
+        }
+        let history = params.contains(r#""history""#);
+        if history {
+            main.db = Some(HistoryDb::open());
+        }
+        let (outcome, ran, _) = main.play(parse(method, &params));
+        let extra = usize::from(picked_read);
+        assert_eq!(
+            ran.calls.len(),
+            wants.len() + extra,
+            "{id}: {:?}",
+            ran.calls
+        );
+        for (k, (got, want)) in ran.calls.iter().zip(&wants).enumerate() {
+            check_call(&id, k, got, want);
+        }
+        if picked_read {
+            // The core's upload, whose body main's abort ended.
+            let upload = ran.calls.last().unwrap();
+            assert_eq!(upload.call.form, Form::BzzFile, "{id}");
+            assert_eq!(
+                upload.call.query,
+                [("name".to_owned(), "notes".to_owned())],
+                "{id}"
+            );
+            assert!(
+                ran.terminals
+                    .iter()
+                    .any(|(_, out)| *out == BodyOut::Abort(BodyAbort::BodyStreamError)),
+                "{id}: {:?}",
+                ran.terminals
+            );
+        }
+        let core = case.get("core").filter(|_| picked_read);
+        let answer = match core {
+            Some(core) => get(core, "answers").children().next().unwrap(),
+            None => get(step, "answer"),
+        };
+        match (
+            &outcome,
+            answer.get("result_typed"),
+            answer.get("error_typed"),
+        ) {
+            (ShellOutcome::Result(got), Some(want), None) => {
+                assert_eq!(*got, common::typed(want), "{id}");
+            }
+            (ShellOutcome::Error(err), None, Some(want)) => {
+                assert_eq!(err.to_value(), common::typed(want), "{id}");
+            }
+            (other, ..) => panic!("{id}: {other:?}, the reference's {}", answer.raw()),
+        }
+        let rows = match core {
+            Some(core) => get(core, "history"),
+            None => get(get(case, "after"), "history"),
+        };
+        match &main.db {
+            Some(db) => {
+                let want = fc_json::parse(rows.raw()).unwrap();
+                let got = fc_json::JsValue::Array(db.entries());
+                assert_eq!(got.stringify(), want.stringify(), "{id}: the history");
+            }
+            None => assert_eq!(rows.children().count(), 0, "{id}"),
+        }
+        played += 1;
+    }
+    left_out.sort();
+    let mut named: Vec<String> = SHELL_LEFT_OUT
+        .iter()
+        .map(|(l, _)| (*l).to_owned())
+        .collect();
+    named.sort();
+    assert_eq!(left_out, named, "every left-out case is in the vectors");
+    assert_eq!(played, 41, "cases played");
+}

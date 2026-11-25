@@ -37,11 +37,14 @@ const Module = require('node:module');
 const { createRequire } = Module;
 
 const SILENT = { info() {}, warn() {}, error() {}, debug() {}, log() {}, verbose() {} };
-const ELECTRON = (dir) => ({
-  ipcMain: { handle() {}, on() {}, removeHandler() {} },
+// A world with `ipc` (a Map) keeps each IPC handler the modules register,
+// by channel, so a case can call it as the chrome would; one with `pick`
+// answers the native file dialog with that path.
+const ELECTRON = (dir, world = {}) => ({
+  ipcMain: { handle(channel, fn) { world.ipc?.set(channel, fn); }, on() {}, removeHandler() {} },
   app: { getPath: () => dir, isPackaged: false },
-  dialog: {},
-  BrowserWindow: { getAllWindows: () => [], fromId: () => null },
+  dialog: { showOpenDialog: async () => (world.pick ? { canceled: false, filePaths: [world.pick] } : { canceled: true, filePaths: [] }) },
+  BrowserWindow: { getAllWindows: () => [], fromId: () => null, getFocusedWindow: () => null },
   session: { defaultSession: {} },
   webContents: { fromId: () => null, getAllWebContents: () => [] },
   nativeTheme: {},
@@ -145,7 +148,8 @@ function loadReference(checkout, world) {
         radicle: null,
       };
     },
-    accounts: { list: async () => [] },
+    // The user's accounts (`accounts.list`): none, or the world's.
+    accounts: { list: async () => structuredClone(world.accounts ?? []) },
     sign: { soc: signSoc },
     touch: inert,
   };
@@ -192,12 +196,18 @@ function loadReference(checkout, world) {
       handleBzzRequest: async (request) => {
         if (!/^bzz:\/\/[^/]+\/freedom-manifest\.json$/.test(request.url)) throw new Error(`no bzz: ${request.url} in the harness`);
         events.push({ manifest_fetch: request.url });
+        // A world's scripted fetch: a status and body, or a throw.
+        if (world.manifestFetch) {
+          const fetched = world.manifestFetch(request.url);
+          if (fetched.throws) throw new Error(fetched.throws);
+          return new Response(fetched.body, { status: fetched.status });
+        }
         if (world.manifest === undefined) return new Response('Not Found', { status: 404 });
         return new Response(JSON.stringify(world.manifest), { status: 200, headers: { 'content-type': 'application/json' } });
       },
     },
   };
-  const electron = ELECTRON(world.dir);
+  const electron = ELECTRON(world.dir, world);
   const originalLoad = Module._load;
   Module._load = function load(request, parent, isMain) {
     if (parent?.filename?.startsWith(src)) {
@@ -205,6 +215,8 @@ function loadReference(checkout, world) {
       if (request === 'electron-log') return SILENT;
       // Subscription ids: deterministic, from the world's counter.
       if (request === 'crypto' && world.crypto && parent.filename.endsWith(`${path.sep}subscription-registry.js`)) return world.crypto;
+      // Consent tokens: deterministic, from the world's own counter.
+      if (request === 'crypto' && world.tokenCrypto && parent.filename.endsWith(`${path.sep}permission-manifests.js`)) return world.tokenCrypto;
       if (request.startsWith('.')) {
         const resolved = Module._resolveFilename(request, parent, isMain);
         const rel = path.relative(checkout, resolved).split(path.sep).join('/');
