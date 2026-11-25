@@ -29,3 +29,9 @@ url = "2"
 # vectors/swarm.json's bodies (base64) and digests (SHA-256), as fc-swarm's
 # vector tests read them.
 base64 = "0.22"
+# publish-history.sqlite's vectors replayed through SQLite itself: the
+# schema's rows, the statements' rows and their order, as freedom-cored
+# will run them (design 0015, "Crates"). The version and features
+# freedom-cored links; a test-only dependency, so the library still builds
+# for iOS and Android without a C compiler.
+rusqlite = { version = "0.41.1", default-features = false, features = ["bundled"] }

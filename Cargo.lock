@@ -707,6 +707,7 @@ version = "0.28.0"
 dependencies = [
  "base64",
  "fc-json",
+ "rusqlite",
  "sha2",
  "thiserror",
  "url",
