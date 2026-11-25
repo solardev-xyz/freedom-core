@@ -149,6 +149,10 @@ required-features = ["testhooks"]
 name = "swarm"
 required-features = ["testhooks"]
 
+[[test]]
+name = "swarm_mining"
+required-features = ["testhooks"]
+
 [dependencies]
 # Response bodies from main's shell.* executors travel as base64.
 base64 = "0.22.1"
