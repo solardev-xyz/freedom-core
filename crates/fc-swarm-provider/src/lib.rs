@@ -91,8 +91,14 @@
 //!   `/addresses` schema; a PSS message under `selectMessageBatch`'s batch
 //!   (a full mutable batch allowed) to the page's compressed recipient; a
 //!   GSOC message signed with the signer mined from its topic; and a
-//!   subscription's `{ subscribe: { kind, key } }` for main to open, after
-//!   question 4's subscribe check (deviation `subscribe-proxy`).
+//!   subscription, after question 4's subscribe check (deviation
+//!   `subscribe-proxy`), which main opens inside the request (design
+//!   0015's D16): the core asks main to open it once its guard passes,
+//!   asks the live facts again once it is open, and answers the page `{
+//!   subscriptionId, kind, key }` with main's id, or has main close it and
+//!   answers `NO_ADDRESS` if the name or the document moved. A request
+//!   that ends while main opens or holds its subscription closes it, and a
+//!   close is answered within its bound or the connection ends.
 //! - **The mining lane** ([`mining`]): its cache, the new-topic budget,
 //!   joins, fair turns, the queue's bounds (deviation `busy`), batches of
 //!   256 candidates, the job's 15 s and the stuck-batch watchdog, sans-I/O
