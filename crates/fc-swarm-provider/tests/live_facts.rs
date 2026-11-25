@@ -27,8 +27,8 @@ use fc_json::index::Index;
 use fc_json::{JsString, JsValue};
 use fc_swarm_provider::machine::node::BodyOut;
 use fc_swarm_provider::machine::{
-    Approval, Ask, AskId, Body, Call, Effect, Event, Live, Mined, Need, NodeCall, OpenFailed,
-    Outcome, Protocol, ReadyCheck, Request, SignKey, Signed, StoreWrite, Subscription,
+    Approval, Ask, AskId, Body, CLOSE_BOUND_MS, Call, Effect, Event, Live, Mined, Need, NodeCall,
+    OpenFailed, Outcome, Protocol, ReadyCheck, Request, SignKey, Signed, StoreWrite, Subscription,
     SubscriptionKind,
 };
 use fc_swarm_provider::stores::feeds::{FeedChange, Source};
@@ -246,7 +246,7 @@ impl Main {
             | Need::Upload
             | Need::Lock(_)
             | Need::Subscribe(_) => Asked::Effectful,
-            Need::Unsubscribe(_) => Asked::Close,
+            Need::Unsubscribe { .. } => Asked::Close,
             Need::Write(StoreWrite::Feeds(_)) => Asked::Feeds,
             _ => Asked::Other,
         };
@@ -307,8 +307,12 @@ impl Main {
                     vec![Event::Opened(Ok(JsString::from(SUBSCRIPTION_ID)))]
                 }
             },
-            Need::Unsubscribe(id) => {
+            Need::Unsubscribe {
+                id,
+                answer_within_ms,
+            } => {
                 assert_eq!(id, SUBSCRIPTION_ID, "main closes what it opened");
+                assert_eq!(answer_within_ms, CLOSE_BOUND_MS, "a close's bound");
                 self.closed += 1;
                 vec![Event::Closed]
             }
@@ -1443,7 +1447,10 @@ fn a_subscription_the_name_lost_is_closed() {
     };
     assert_eq!(
         close.need,
-        Need::Unsubscribe(JsString::from(SUBSCRIPTION_ID))
+        Need::Unsubscribe {
+            id: JsString::from(SUBSCRIPTION_ID),
+            answer_within_ms: CLOSE_BOUND_MS,
+        }
     );
     request.answer(&mut main.world, close.id, Event::Closed);
     assert_eq!(answered(request.outcome().unwrap()), "no_address");
@@ -1514,6 +1521,10 @@ fn a_failed_open_answers_as_subscribe_error() {
             ),
         ),
         (
+            failed(Some("proxy-or-tor"), "Node not available: proxy-or-tor"),
+            unavailable("Node not available: proxy-or-tor", "proxy-or-tor"),
+        ),
+        (
             failed(None, "socket hang up"),
             (-32603, "socket hang up".to_owned(), None),
         ),
@@ -1558,7 +1569,10 @@ fn to_the_close(main: &mut Main) -> (Request, Ask) {
     assert!(effects.is_empty());
     assert_eq!(
         close.need,
-        Need::Unsubscribe(JsString::from(SUBSCRIPTION_ID))
+        Need::Unsubscribe {
+            id: JsString::from(SUBSCRIPTION_ID),
+            answer_within_ms: CLOSE_BOUND_MS,
+        }
     );
     (request, close)
 }
@@ -1575,7 +1589,7 @@ fn a_cancel_closes_what_main_opened() {
             .filter_map(|e| match e {
                 Effect::Ask(
                     ask @ Ask {
-                        need: Need::Unsubscribe(id),
+                        need: Need::Unsubscribe { id, .. },
                         ..
                     },
                 ) => {
@@ -1695,7 +1709,7 @@ fn the_open_and_the_close_are_read_strictly() {
     let effects = request.take_effects();
     assert!(
         effects.iter().any(|e| matches!(e, Effect::Ask(Ask {
-            need: Need::Unsubscribe(id),
+            need: Need::Unsubscribe { id, .. },
             ..
         }) if id == SUBSCRIPTION_ID)),
         "{effects:?}"
@@ -1708,4 +1722,127 @@ fn the_open_and_the_close_are_read_strictly() {
         request.outcome(),
         Some(&Outcome::Protocol(Protocol::WrongKind))
     );
+}
+
+fn gsoc_subscribe() -> Call {
+    call(
+        "swarm_subscribe",
+        Value::object([("kind", Value::str("gsoc")), ("topic", Value::str("chat"))]),
+        None,
+    )
+}
+
+/// Question 4 at the open: the subscribe check passes, a GSOC key is mined,
+/// then main's check just before it opens finds a proxy or Tor on and
+/// refuses; the page gets the first check's 4900 shape.
+#[test]
+fn a_proxy_at_the_open_answers_question_4s_refusal() {
+    let mut main = Main::new();
+    main.open_fails = Some(OpenFailed {
+        reason: Some(JsString::from("proxy-or-tor")),
+        message: JsString::from("Node not available: proxy-or-tor"),
+    });
+    let outcome = main.honest(&gsoc_subscribe());
+    let Outcome::Error(failure) = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(failure.code, 4900);
+    assert_eq!(failure.message.as_str(), "Node not available: proxy-or-tor");
+    assert_eq!(
+        failure.data,
+        Some(Value::object([("reason", Value::str("proxy-or-tor"))]))
+    );
+    assert_eq!(
+        main.log,
+        [
+            Asked::Other,
+            Asked::Effectful,
+            Asked::Live,
+            Asked::Effectful
+        ],
+        "the subscribe check passed, the key mined, the guard, the refused open"
+    );
+    assert_eq!((main.opened, main.closed), (0, 0));
+}
+
+/// A close the request's end sends (a cancel, the deadline, `busy`, a
+/// protocol error) carries its bound and is never called back. Held
+/// unanswered, it is the request's one open ask; the outcome is already
+/// given, and nothing else waits on it.
+#[test]
+fn a_held_close_carries_its_bound_and_holds_nothing_else() {
+    for end in ["cancel", "deadline", "busy", "protocol"] {
+        let mut main = Main::new();
+        let (mut request, live) = main.run_to(&subscribe(None), |need, lives| {
+            *need == Need::Live && lives == 1
+        });
+        match end {
+            // The request's deadline is a cancel to the machine.
+            "cancel" | "deadline" => request.cancel(),
+            "busy" => request.busy(),
+            _ => request.answer(&mut main.world, live.id, Event::Turn),
+        }
+        let want = match end {
+            "cancel" | "deadline" => "cancelled",
+            "busy" => "busy",
+            _ => "protocol: an answer of another kind than its ask",
+        };
+        assert_eq!(answered(request.outcome().unwrap()), want, "{end}");
+        let effects = request.take_effects();
+        let closes: Vec<&Ask> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Ask(ask) => Some(ask),
+                _ => None,
+            })
+            .collect();
+        let [close] = closes[..] else {
+            panic!("{end}: {effects:?}")
+        };
+        assert_eq!(
+            close.need,
+            Need::Unsubscribe {
+                id: JsString::from(SUBSCRIPTION_ID),
+                answer_within_ms: CLOSE_BOUND_MS,
+            },
+            "{end}"
+        );
+        assert!(!effects.contains(&Effect::Cancel(close.id)), "{end}");
+        // The live facts' late answer, where the ask was cancelled.
+        if end != "protocol" {
+            request.answer(
+                &mut main.world,
+                live.id,
+                Event::Live(facts(true, true, false)),
+            );
+        }
+        // Main holds the close: it alone stays open, and nothing waits on
+        // it.
+        let held = request.open_asks();
+        assert_eq!(held, 1 + usize::from(end == "protocol"), "{end}");
+        request.cancel();
+        request.busy();
+        assert!(
+            request.take_effects().is_empty(),
+            "{end}: nothing more asked"
+        );
+        assert_eq!(answered(request.outcome().unwrap()), want, "{end}");
+        request.answer(&mut main.world, close.id, Event::Closed);
+        assert_eq!(request.open_asks(), held - 1, "{end}: closed on its answer");
+        assert!(request.take_effects().is_empty(), "{end}");
+    }
+    // The normal close after a moved name carries the bound too, and the
+    // page's NO_ADDRESS waits for it, as the reference's does.
+    let mut main = Main::new();
+    let (mut request, close) = to_the_close(&mut main);
+    assert!(matches!(
+        close.need,
+        Need::Unsubscribe {
+            answer_within_ms: CLOSE_BOUND_MS,
+            ..
+        }
+    ));
+    assert_eq!(request.outcome(), None);
+    request.answer(&mut main.world, close.id, Event::Closed);
+    assert_eq!(answered(request.outcome().unwrap()), "no_address");
 }

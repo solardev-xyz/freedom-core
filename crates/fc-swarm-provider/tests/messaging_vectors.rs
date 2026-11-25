@@ -266,7 +266,7 @@ impl Thread {
                     self.opened.push(subscription);
                     vec![Event::Opened(Ok(self.subscription_id.clone()))]
                 }
-                Need::Unsubscribe(id) => {
+                Need::Unsubscribe { id, .. } => {
                     assert_eq!(ask.charge, 0);
                     self.closed.push(id);
                     vec![Event::Closed]

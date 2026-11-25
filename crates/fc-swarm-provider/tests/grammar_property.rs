@@ -1679,7 +1679,7 @@ impl Main<'_> {
                     self.take(request);
                 }
             }
-            Need::Unsubscribe(_) => {
+            Need::Unsubscribe { .. } => {
                 if request.outcome().is_none() {
                     request.answer(&mut self.world, id, Event::Closed);
                     self.take(request);
