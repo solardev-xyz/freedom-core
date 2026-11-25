@@ -102,7 +102,9 @@ type Mail = (In, Option<Credit>);
 
 /// The event loop's side of the naming thread. The writer's and the
 /// gate's wake-ups hold only weak references, so dropping this ends the
-/// thread.
+/// thread, once the swarm thread, which holds a copy for its name checks
+/// (design 0015's D1), has ended too.
+#[derive(Clone)]
 pub struct Handle {
     tx: Arc<Sender<Mail>>,
 }

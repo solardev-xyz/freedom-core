@@ -245,6 +245,15 @@ const _: () = assert!(SWARM_BODIES * fc_protocol::stream::WINDOW == 512 * 1024);
 pub const fn stream_slot_fits(size: usize) -> bool {
     size + std::mem::size_of::<usize>() <= STREAM_SLOT
 }
+/// The swarm thread's answers to `swarm.request` waiting for the writer:
+/// one message cap, as the chain thread's (design 0015, "The swarm
+/// thread's memory": what an answer holds is within its request's charges
+/// until the writer has written it).
+pub const MAX_QUEUED_SWARM_BYTES: usize = MAX_MESSAGE;
+/// The swarm thread's control frames waiting for the writer, apart from
+/// its large answers: its requests to main, its cancels and its small
+/// answers (0001's reserved control capacity).
+pub const MAX_QUEUED_SWARM_CONTROL_BYTES: usize = 4 * 1024 * 1024;
 /// The dweb thread's frames handed to the writer and not yet written: a
 /// few frames' worth. Its bodies wait in its own sender instead, within
 /// 0009's 8 MiB writer allowance, where its control frames (credit,
@@ -405,7 +414,6 @@ impl Hold {
     /// or drops it unwritten at its end. The Swarm thread's memory charge
     /// for a read goes this way, as its reply is written (design 0015,
     /// "The swarm thread's memory").
-    #[allow(dead_code)] // the Swarm thread's (SWM-4 PR 5)
     pub fn guard(mut self, guard: impl Send + 'static) -> Self {
         self.guard = Some(Box::new(guard));
         self
@@ -1051,7 +1059,7 @@ impl StreamRoutes {
     }
 
     /// `key`'s stream can take no frame any more: its route goes.
-    #[allow(dead_code)] // the Swarm thread's (SWM-4 PR 5)
+    #[allow(dead_code)] // the Swarm thread's streams' (SWM-4 PR 6)
     pub fn forget(&self, key: StreamKey) {
         if let Ok(mut routes) = self.routes.lock() {
             routes.remove(&key);

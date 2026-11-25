@@ -809,6 +809,7 @@ dependencies = [
  "fc-service",
  "fc-store",
  "fc-swarm",
+ "fc-swarm-provider",
  "fc-sys",
  "fc-vault",
  "fc-wallet-state",

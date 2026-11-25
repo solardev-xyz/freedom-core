@@ -73,7 +73,6 @@ pub enum Owner {
     Eip1193,
     /// The Swarm thread's `shell.swarm_*` asks (design 0015), whose parts
     /// and node bodies stream to it ([`StreamRoutes`]).
-    #[allow(dead_code)] // the Swarm thread's (SWM-4 PR 5)
     Swarm,
 }
 
@@ -375,7 +374,6 @@ impl Requests {
     /// bound and routes to its owner to drop, as any cancelled request's;
     /// [`Requests::overdue`] names it once the bound has passed without it.
     /// False when main has answered it already: nothing to watch.
-    #[allow(dead_code)] // the Swarm thread's (SWM-4 PR 5)
     pub fn cancelled(&self, id: u64, at: Instant) -> bool {
         let watched = self.state.lock().is_ok_and(|mut state| {
             if !state.owners.contains_key(&id) {

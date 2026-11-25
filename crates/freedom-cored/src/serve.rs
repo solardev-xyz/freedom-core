@@ -63,6 +63,7 @@ use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
 use crate::dweb::thread as dweb;
+use crate::swarm::thread as swarm;
 use crate::eip1193::Connects;
 use crate::exit::Exit;
 use crate::keystore::client::DesktopKeyStore;
@@ -316,6 +317,8 @@ const CAPABILITIES: &[&str] = &[
     // Design 0009: verified fetches, whose bodies stream.
     "dweb.verify",
     "dweb.forget",
+    // Design 0015: a page's `window.swarm` request, on the swarm thread.
+    "swarm.request",
 ];
 
 /// The features in `core.hello`'s capabilities, after the methods (design
@@ -559,6 +562,7 @@ pub fn run(options: &Options) -> Exit {
             out: dweb_out,
             events: events_tx,
         }),
+        swarm: None,
         #[cfg(feature = "testhooks")]
         test,
     };
@@ -695,8 +699,8 @@ pub fn run(options: &Options) -> Exit {
                         break Exit::Internal;
                     }
                 }
-                // Only the Swarm thread registers routes, and none runs
-                // yet (SWM-4 PR 5).
+                // The swarm thread registers no route before its streams
+                // (SWM-4 PR 6).
                 Owner::Naming | Owner::Chain | Owner::KeyStore | Owner::Eip1193 | Owner::Swarm => {
                     break Exit::Internal;
                 }
@@ -727,6 +731,17 @@ pub fn run(options: &Options) -> Exit {
                 };
                 if let Flow::Exit(exit) = core.dispatch(outs) {
                     break exit;
+                }
+            }
+            // The swarm thread's own checks (design 0015's D1), by their
+            // tag's bit.
+            Ok(Event::NameChecked { tag, verdict }) if tag & crate::swarm::engine::NAME_TAG != 0 => {
+                let sent = core
+                    .swarm
+                    .as_ref()
+                    .is_some_and(|thread| thread.send(swarm::In::Name { tag, verdict }, None));
+                if !sent {
+                    break Exit::Internal;
                 }
             }
             Ok(Event::NameChecked { tag, verdict }) => {
@@ -767,6 +782,8 @@ pub fn run(options: &Options) -> Exit {
     // hashing pool.
     drop(core.dweb.take());
     core.dweb_start = None;
+    // The swarm thread stops too, handing the writer what it made.
+    drop(core.swarm.take());
     // Wipe the vault and revoke pre-commit work. Work past its commit point
     // finishes and replies before exit (bounded). Then let the writer flush
     // what's queued, but never wait on a peer that stopped reading: exiting
@@ -985,6 +1002,8 @@ struct Core {
     dweb: Option<dweb::Handle>,
     /// What starts it; taken when it starts.
     dweb_start: Option<DwebStart>,
+    /// The swarm thread, once the hello has settled (design 0015).
+    swarm: Option<swarm::Handle>,
     /// The `test.*` methods' thread, when the test hooks enable it (debug
     /// builds only).
     #[cfg(feature = "testhooks")]
@@ -1223,7 +1242,11 @@ fn loggable(method: &str) -> &'static str {
         return row.name;
     }
     #[cfg(feature = "testhooks")]
-    if let Some(name) = testmethods::METHODS.iter().find(|m| **m == method) {
+    if let Some(name) = testmethods::METHODS
+        .iter()
+        .chain(swarm::TEST_METHODS)
+        .find(|m| **m == method)
+    {
         return name;
     }
     "<unknown>"
@@ -1253,7 +1276,10 @@ fn admitted(method: &str, caller: CallerKind, test_methods: bool) -> Result<(), 
         }
         Admission::Unknown => {
             #[cfg(feature = "testhooks")]
-            if test_methods && testmethods::handles(method) && caller != CallerKind::Page {
+            if test_methods
+                && (testmethods::handles(method) || swarm::TEST_METHODS.contains(&method))
+                && caller != CallerKind::Page
+            {
                 return Ok(());
             }
             let _ = test_methods;
@@ -1497,14 +1523,18 @@ impl Core {
                 );
                 Flow::Exit(Exit::Protocol)
             }
-            // A cancel names a vault request, a naming one, a chain one or a
-            // dweb one; each ignores IDs it doesn't hold.
+            // A cancel names a vault request, a naming one, a chain one, a
+            // dweb one or a swarm one; each ignores IDs it doesn't hold.
             Message::Cancel { id } => {
                 if !self.chain.send(chain::In::Cancel { id }, None)
                     || self
                         .dweb
                         .as_ref()
                         .is_some_and(|thread| !thread.send(dweb::In::Cancel { id }, None))
+                    || self
+                        .swarm
+                        .as_ref()
+                        .is_some_and(|thread| !thread.send(swarm::In::Cancel { id }, None))
                     || !self
                         .naming
                         .send(naming::In::Cancel { id }, self.credit.take())
@@ -1639,8 +1669,18 @@ impl Core {
             }
             // Answered above.
             (Owner::Eip1193, _) => true,
-            // No Swarm thread runs yet, so no request is its (SWM-4 PR 5).
-            (Owner::Swarm, _) => false,
+            // The swarm thread reads its answer where it lies, as the dweb
+            // thread does (design 0015).
+            (Owner::Swarm, outcome) => self.swarm.as_ref().is_some_and(|thread| {
+                thread.send(
+                    swarm::In::Response {
+                        id,
+                        message,
+                        outcome,
+                    },
+                    self.credit.take(),
+                )
+            }),
             // The dweb thread reads its piece's reply where it lies, as the
             // chain thread does.
             (Owner::Dweb, outcome) => self.dweb.as_ref().is_some_and(|thread| {
@@ -1748,6 +1788,46 @@ impl Core {
                         },
                         self.credit.take(),
                     )
+                });
+                if sent {
+                    Flow::Continue
+                } else {
+                    Flow::Exit(Exit::Internal)
+                }
+            }
+            // Admitted only after the hello, which started the thread: a
+            // page's, with its `PageContext` (design 0015).
+            method if swarm::handles(method) => {
+                let params = match params.map(|p| RawValue::from_string(p.to_owned())) {
+                    Some(Ok(params)) => Some(params),
+                    Some(Err(_)) => return Flow::Exit(Exit::Internal),
+                    None => None,
+                };
+                let sent = self.swarm.as_ref().is_some_and(|thread| {
+                    thread.send(
+                        swarm::In::Request {
+                            id,
+                            params,
+                            page: context.page.clone(),
+                        },
+                        self.credit.take(),
+                    )
+                });
+                if sent {
+                    Flow::Continue
+                } else {
+                    Flow::Exit(Exit::Internal)
+                }
+            }
+            #[cfg(feature = "testhooks")]
+            method if swarm::TEST_METHODS.contains(&method) && self.test.is_some() => {
+                let params = match params.map(|p| RawValue::from_string(p.to_owned())) {
+                    Some(Ok(params)) => Some(params),
+                    Some(Err(_)) => return Flow::Exit(Exit::Internal),
+                    None => None,
+                };
+                let sent = self.swarm.as_ref().is_some_and(|thread| {
+                    thread.send(swarm::In::World { id, params }, self.credit.take())
                 });
                 if sent {
                     Flow::Continue
@@ -2004,8 +2084,30 @@ impl Core {
         let Some(start) = self.dweb_start.take() else {
             return Flow::Exit(Exit::Internal);
         };
+        let swarm_start = {
+            let (grants, grants_moved) = self.vault.swarm_grants();
+            swarm::Spawn {
+                out: start.out.clone(),
+                events: start.events.clone(),
+                requests: Arc::clone(&self.requests),
+                link: Arc::clone(&self.link),
+                naming: self.naming.clone(),
+                grants,
+                grants_moved,
+            }
+        };
         match dweb::spawn(start.out, start.events, Arc::clone(&self.requests)) {
             Ok(handle) => self.dweb = Some(handle),
+            Err(_) => {
+                log::error("cannot start a thread", serde_json::json!({}));
+                return Flow::Exit(Exit::Internal);
+            }
+        }
+        // The swarm thread, beside it, once the grants are configured: it
+        // reads the Swarm grants through their shared handle (design 0015,
+        // D2).
+        match swarm::spawn(swarm_start) {
+            Ok(handle) => self.swarm = Some(handle),
             Err(_) => {
                 log::error("cannot start a thread", serde_json::json!({}));
                 return Flow::Exit(Exit::Internal);
@@ -2566,6 +2668,7 @@ mod tests {
                     || naming::handles(name)
                     || chain::handles(name)
                     || dweb::handles(name)
+                    || swarm::handles(name)
                     || name == "eip1193.request",
                 "{name}"
             );
