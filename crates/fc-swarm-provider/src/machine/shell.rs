@@ -162,8 +162,10 @@ pub enum AskBound {
     /// progress (main's `swarm.body`, its credit) until the core sends the
     /// body's terminal, then `total` for the reply from that terminal on.
     BodyThenReply { idle: u64, total: u64 },
-    /// Not an ask of main (a store write, the upload's turn, the hashing
-    /// pool): no bound of its own.
+    /// Not an ask of main (a store write, the upload's turn, the vault, a
+    /// topic's turn): no bound of its own. The request's deadline, where it
+    /// has one, still ends it; an upload's turn waits only on uploads that
+    /// are bound themselves.
     None,
 }
 
