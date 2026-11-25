@@ -408,12 +408,14 @@ fn refused_before_the_key_and_burnt_while_locked() {
             None,
         );
     }
+    // The chrome reaches no SOC (design 0015, SWM-4): the method table
+    // refuses it, locked or not.
     let soc = json!({ "key": { "kind": "publisher", "origin_index": 0 },
         "identifier": format!("0x{}", "ab".repeat(32)), "payload": "0x01" });
     refused(
         &call_as(&mut core, &mut id, &chrome(), "swarm.sign_soc", soc.clone()),
-        "not_authorized",
-        Some("no_token"),
+        "forbidden",
+        None,
     );
     refused(
         &call_as(&mut core, &mut id, &shell(), "swarm.sign_soc", soc),
@@ -447,10 +449,11 @@ fn refused_before_the_key_and_burnt_while_locked() {
 }
 
 /// The chrome signs nothing without a wallet-kind token, and mints none
-/// (APS-3): each method and a SOC are refused without one, with main's
-/// wallet-send token (another caller's), with a page's token, with a
-/// standing rule and with a Safe approval. Main's own signature, under
-/// `shell`, signs without one, as before.
+/// (APS-3): each method is refused without one, with main's wallet-send
+/// token (another caller's), with a page's token, with a standing rule and
+/// with a Safe approval. A SOC it can't ask for at all (design 0015,
+/// SWM-4: `forbidden`). Main's own signature, under `shell`, signs without
+/// one, as before.
 #[test]
 fn the_chrome_needs_a_wallet_kind_token() {
     let root = tempfile::tempdir().unwrap();
@@ -554,8 +557,8 @@ fn the_chrome_needs_a_wallet_kind_token() {
         "identifier": format!("0x{}", "ab".repeat(32)), "payload": "0x01" });
     refused(
         &call_as(&mut core, &mut id, &chrome(), "swarm.sign_soc", soc.clone()),
-        "not_authorized",
-        Some("no_token"),
+        "forbidden",
+        None,
     );
     let own = call_as(&mut core, &mut id, &shell(), "swarm.sign_soc", soc);
     assert!(result(&own)["signature"].is_string());
