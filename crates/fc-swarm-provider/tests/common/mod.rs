@@ -960,6 +960,8 @@ pub fn run(world: &mut TestWorld, node: &Node, call: &Call) -> Ran {
                 }
             }
             Effect::Credit { .. } => {}
+            // An upload's body: no read streams one out.
+            Effect::Body { .. } | Effect::BodyEnd(_) => {}
         }
     }
     ran.outcome = request.outcome().unwrap().clone();
