@@ -145,9 +145,13 @@ pub enum Event {
     /// here can go, then the requests that waited for them.
     Room,
     /// A stream's entry of frames (design 0009, Streams in the core), read
-    /// after the hello, for the dweb thread: outside the frame credits,
-    /// under the reader's stream cap.
+    /// after the hello, for its stream's owner ([`transport::StreamRoutes`],
+    /// the dweb thread by default): outside the frame credits, under the
+    /// reader's stream cap.
     Stream(transport::StreamMark),
+    /// One of the core's requests to main was cancelled and is watched
+    /// (design 0015, D13): the loop's timer takes its answer's bound in.
+    Watch,
     /// The chain thread served `chain.fee_reference`'s reply to main's
     /// request `id` (its payload): the chain's fee evidence for the
     /// approvals (design 0012, "The fee check").
@@ -411,6 +415,12 @@ pub fn run(options: &Options) -> Exit {
     // reader's set, and the gate naming and chain send them through.
     let pending = Arc::new(Pending::default());
     let requests = Requests::new(requests::MAX_OUTSTANDING, Arc::clone(&pending));
+    // A watched cancel's bound joins the loop's timers at once, however
+    // long the loop would have waited.
+    let watch = events_tx.clone();
+    requests.on_cancel(move || {
+        let _ = watch.send(Event::Watch);
+    });
     let writer = match transport::spawn_writer(events_tx.clone(), Arc::clone(&link)) {
         Ok(writer) => writer,
         Err(_) => return Exit::Internal,
@@ -564,6 +574,7 @@ pub fn run(options: &Options) -> Exit {
                 core.vault.next_wakeup(),
                 core.outbox.deadline(),
                 core.connects.next_wakeup(),
+                core.requests.next_overdue(),
             ]
             .into_iter()
             .flatten()
@@ -671,18 +682,27 @@ pub fn run(options: &Options) -> Exit {
                     break exit;
                 }
             }
-            // On to the dweb thread at once, in the order read, so a piece's
-            // data follows its head there.
-            Ok(Event::Stream(mark)) => {
-                let Some(thread) = core.dweb.as_ref() else {
-                    // The reader takes stream frames only after the hello,
-                    // which starts the thread.
-                    break Exit::Internal;
-                };
-                if !thread.send(dweb::In::Stream(mark), None) {
+            // On to the stream's owner at once, in the order read, so a
+            // piece's data follows its head there (design 0015, D4).
+            Ok(Event::Stream(mark)) => match core.requests.routes().owner(mark.key()) {
+                Owner::Dweb => {
+                    let Some(thread) = core.dweb.as_ref() else {
+                        // The reader takes stream frames only after the
+                        // hello, which starts the thread.
+                        break Exit::Internal;
+                    };
+                    if !thread.send(dweb::In::Stream(mark), None) {
+                        break Exit::Internal;
+                    }
+                }
+                // Only the Swarm thread registers routes, and none runs
+                // yet (SWM-4 PR 5).
+                Owner::Naming | Owner::Chain | Owner::KeyStore | Owner::Eip1193 | Owner::Swarm => {
                     break Exit::Internal;
                 }
-            }
+            },
+            // The timer is reckoned again at the top of the loop.
+            Ok(Event::Watch) => {}
             Ok(Event::FeeReference { id, payload }) => {
                 core.vault.fee_answered(id, &payload);
             }
@@ -726,6 +746,16 @@ pub fn run(options: &Options) -> Exit {
         }
         if let Flow::Exit(exit) = core.outbox.check(Instant::now()) {
             break exit;
+        }
+        // A request the core cancelled and watches, unanswered past its
+        // bound: main broke 0001's one answer per request (design 0015,
+        // D13).
+        if core.requests.overdue(Instant::now()).is_some() {
+            log::error(
+                "protocol error",
+                serde_json::json!({ "category": "cancel_unanswered" }),
+            );
+            break Exit::Protocol;
         }
     };
     // No more requests to main, whatever ended the loop; a key-store call
@@ -1609,6 +1639,8 @@ impl Core {
             }
             // Answered above.
             (Owner::Eip1193, _) => true,
+            // No Swarm thread runs yet, so no request is its (SWM-4 PR 5).
+            (Owner::Swarm, _) => false,
             // The dweb thread reads its piece's reply where it lies, as the
             // chain thread does.
             (Owner::Dweb, outcome) => self.dweb.as_ref().is_some_and(|thread| {
