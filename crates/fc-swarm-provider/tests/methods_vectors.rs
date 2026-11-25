@@ -1765,3 +1765,211 @@ fn index_runs() {
     }
     assert_eq!(runs, 15);
 }
+
+/// What a node's join of a tree serves (Ant's joiner, as 0009 reads it):
+/// each logical leaf's first bytes of the chunk at its address, whatever
+/// that chunk's own span.
+fn join(chunks: &BTreeMap<String, Vec<u8>>, root: &str, n: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut stack = vec![(root.to_owned(), n)];
+    while let Some((address, length)) = stack.pop() {
+        let wire = &chunks[&address];
+        if tree::is_leaf(length) {
+            out.extend_from_slice(&wire[8..8 + length as usize]);
+            continue;
+        }
+        let chunk = Chunk {
+            span: wire[..8].try_into().unwrap(),
+            payload: &wire[8..],
+        };
+        let node = tree::intermediate(&chunk, length).unwrap();
+        let children: Vec<_> = (0..node.len()).map(|i| node.child(i).unwrap()).collect();
+        for (child, len) in children.into_iter().rev() {
+            if len > 0 {
+                stack.push((hex(&child), len));
+            }
+        }
+    }
+    out
+}
+
+/// Every leaf of `data` as a node stores it, under its address.
+fn content_leaves(data: &[u8], chunks: &mut BTreeMap<String, Vec<u8>>) {
+    for leaf in data.chunks(4096) {
+        let mut wire = (leaf.len() as u64).to_le_bytes().to_vec();
+        wire.extend_from_slice(leaf);
+        let span: [u8; 8] = wire[..8].try_into().unwrap();
+        chunks.insert(hex(&verify::address_of(&span, leaf).unwrap()), wire);
+    }
+}
+
+/// readData's walk over the grammar's other honest scenarios: 0009's
+/// trees at every redundancy level (vectors/dweb-verify.json), one chunk
+/// at two positions, a logical leaf whose own span is large, the deep
+/// trees and an over-full intermediate. The node serves each chunk the
+/// scenario or dweb-verify.json holds, and `/bytes` as a node's join; the
+/// core's calls must each be admitted by the row, every intermediate the
+/// scenario fetches must be among them, and the walk must read the join,
+/// or, for the tree whose intermediate sits at 0009's eighth level, end
+/// `chunk_type_mismatch`.
+#[test]
+fn read_data_walks() {
+    let grammar_text = text_of("swarm-grammar.json");
+    let grammar_index = Index::new(&grammar_text).unwrap();
+    let grammar = grammar_index.root();
+    let dweb_text = text_of("dweb-verify.json");
+    let dweb_index = Index::new(&dweb_text).unwrap();
+    let dweb = get(dweb_index.root(), "swarm");
+    let dweb_chunks: BTreeMap<String, Vec<u8>> = get(dweb, "chunks")
+        .members()
+        .map(|(k, v)| (string(k), b64(&string(v))))
+        .collect();
+    let files: BTreeMap<String, V<'_, '_>> = get(dweb, "files")
+        .children()
+        .map(|f| (string(get(f, "id")), f))
+        .collect();
+
+    let mut walks = 0;
+    for scenario in get(grammar, "honest").children() {
+        if !get(scenario, "row").is_str("readData") {
+            continue;
+        }
+        let id = string(get(scenario, "id"));
+        let from = string(get(scenario, "from"));
+        if from.starts_with("methods/") {
+            continue;
+        }
+        let mut chunks = BTreeMap::new();
+        for call in get(scenario, "calls").children() {
+            let Some(reply) = call.get("reply") else {
+                continue;
+            };
+            if let Some(body) = reply.get("body") {
+                let address = string(get(call, "path"))
+                    .trim_start_matches("/chunks/")
+                    .to_owned();
+                chunks.insert(address, b64(&string(get(body, "base64"))));
+            }
+        }
+        if let Some(file) = from.strip_prefix("dweb-verify.json swarm.files/") {
+            let file = files[file];
+            chunks.extend(dweb_chunks.clone());
+            content_leaves(
+                &content(
+                    &string(get(file, "seed")),
+                    number(get(file, "size")) as usize,
+                ),
+                &mut chunks,
+            );
+        } else {
+            // The generator's seeds (swarm-grammar-file.js) for the
+            // leaves no call of the scenario carries.
+            let seeds: &[(&str, usize)] = match id.as_str() {
+                "readData-two-positions" => &[("swarm-grammar/two-positions", 524_288)],
+                "readData-logical-leaf-refetched" => &[("swarm-grammar/leaf-head", 4096)],
+                "readData-one-chunk-at-depths-6-and-7" => &[("swarm-grammar/deep-a", 524_288)],
+                "readData-leaf-at-depth-8-fetched-again" => &[("swarm-grammar/deep-b", 524_288)],
+                "readData-over-full-intermediate" => &[("swarm-grammar/over-full", 8192)],
+                other => panic!("{other}: a scenario this test doesn't know"),
+            };
+            for (seed, n) in seeds {
+                content_leaves(&content(seed, *n), &mut chunks);
+            }
+        }
+        let params = typed(get(scenario, "params"));
+        let reference = params
+            .get("reference")
+            .as_js_string()
+            .unwrap()
+            .as_str()
+            .to_owned();
+        let root_wire = &chunks[&reference];
+        let n = fc_swarm_provider::chunks::data_size(&root_wire[..8].try_into().unwrap());
+        let unverifiable = id == "readData-one-chunk-at-depths-6-and-7";
+        let joined = (!unverifiable).then(|| join(&chunks, &reference, n));
+        if let Some(file) = from.strip_prefix("dweb-verify.json swarm.files/") {
+            let file = files[file];
+            let data = content(
+                &string(get(file, "seed")),
+                number(get(file, "size")) as usize,
+            );
+            assert_eq!(
+                joined.as_ref() == Some(&data),
+                get(file, "joined_equals_content").kind() == Kind::True,
+                "{id}: the join"
+            );
+        }
+        let node = Node {
+            rules: Vec::new(),
+            blobs: joined
+                .iter()
+                .map(|data| (reference.clone(), data.clone()))
+                .collect(),
+            chunks,
+            feeds: BTreeMap::new(),
+            stopped: false,
+        };
+        let key = js(get(scenario, "key"));
+        let mut world = TestWorld {
+            now: 1_767_225_600_123,
+            grants: BTreeSet::from([key.clone()]),
+            feeds: FeedStore::empty(),
+            budgets: ReadBudgets::new(),
+        };
+        let call = Call {
+            method: Value::str("swarm_readData"),
+            params: params.clone(),
+            key: key.clone(),
+            approval: None,
+        };
+        let ran = run(&mut world, &node, &call);
+        let view = StepView {
+            params: &params,
+            key: &key,
+            feeds: &world.feeds,
+        };
+        check_row(&id, grammar, "readData", &ran, &view);
+        // Every intermediate the scenario fetches, the walk fetches.
+        for want in get(scenario, "calls").children() {
+            let Some(tree) = want.get("tree") else {
+                continue;
+            };
+            if number(get(tree, "length")) <= 4096.0 {
+                continue;
+            }
+            let path = string(get(want, "path"));
+            assert!(
+                ran.calls.iter().any(|l| l.call.path == path
+                    && l.call
+                        .tree
+                        .is_some_and(|t| t.length as f64 == number(get(tree, "length"))
+                            && f64::from(t.depth) == number(get(tree, "depth")))),
+                "{id}: {path} at {}",
+                tree.raw()
+            );
+        }
+        match joined {
+            Some(data) => assert_eq!(
+                ran.outcome,
+                Outcome::Result(Value::object([
+                    (
+                        "data",
+                        Value::String(fc_swarm_provider::value::encode_base64(&data).into())
+                    ),
+                    ("encoding", Value::str("base64")),
+                ])),
+                "{id}"
+            ),
+            None => assert_eq!(
+                ran.outcome,
+                Outcome::Error(Failure::invalid_params(
+                    "Downloaded bytes do not validate as the requested content-addressed chunk",
+                    "chunk_type_mismatch"
+                )),
+                "{id}"
+            ),
+        }
+        walks += 1;
+    }
+    assert_eq!(walks, 21);
+}
