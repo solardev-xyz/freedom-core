@@ -149,6 +149,16 @@ required-features = ["testhooks"]
 name = "swarm"
 required-features = ["testhooks"]
 
+[[test]]
+name = "swarm_streams"
+required-features = ["testhooks"]
+
+# SWM-4 PR 7: the stores, the vault's asks and SW-1's hold through the
+# core, its stores moved.
+[[test]]
+name = "swarm_writes"
+required-features = ["testhooks"]
+
 [dependencies]
 # Response bodies from main's shell.* executors travel as base64.
 base64 = "0.22.1"

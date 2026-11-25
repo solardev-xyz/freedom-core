@@ -36,6 +36,8 @@ use fc_swarm_provider::stores::manifests::Capability;
 use fc_swarm_provider::value::{Bytes, BytesKind, Source, Value};
 use sha2::{Digest, Sha256};
 
+pub mod write_node;
+
 /// What the core answers where a case marks a deviation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Want {

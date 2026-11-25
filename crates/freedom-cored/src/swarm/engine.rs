@@ -74,10 +74,8 @@
 //!   machine cancels the ask (its request's cancel or deadline): the
 //!   changes the hold defers apply then, in order, before the machine takes
 //!   the signature, and their callers are answered. A late signature is
-//!   dropped. The sign ask carries D15's inputs: the page's key, its
-//!   custody as main last reported it (the latest live facts, else its
-//!   `PageContext`), how main approved the request, and the site's feed
-//!   grant in the keeper's store.
+//!   dropped. The sign ask carries D15's inputs: the page's key and the
+//!   site's feed grant in the keeper's store.
 //! - **What this step leaves for later:** the mining lane (PR 8: until it
 //!   comes every GSOC search is answered [`Mined::Off`], mining off) and
 //!   main's own methods (PR 9).
@@ -100,10 +98,9 @@ use fc_swarm_provider::machine::keeper::{ChangeAnswer, ChangeError, HoldId, Keep
 use fc_swarm_provider::machine::node::{ERROR_BODY, b64};
 use fc_swarm_provider::machine::shell::Deadline;
 use fc_swarm_provider::machine::{
-    Approval, AskId, Body, BodyOut, Call, Capability, Effect, Event, Failed, Failure, Job,
-    KNOWN_METHODS, Live, Mined, Need, NotBuilt, Outcome, Protocol, REQUEST_CHARGE,
-    RUNNING_REQUESTS, Reads, Request, STREAMING_UPLOADS, SignKey, SignSoc, StoreWrite, TagOwners,
-    WAITING_REQUESTS, World,
+    AskId, Body, BodyOut, Call, Capability, Effect, Event, Failed, Failure, Job, KNOWN_METHODS,
+    Live, Mined, Need, NotBuilt, Outcome, Protocol, REQUEST_CHARGE, RUNNING_REQUESTS, Reads,
+    Request, STREAMING_UPLOADS, SignKey, SignSoc, StoreWrite, TagOwners, WAITING_REQUESTS, World,
 };
 use fc_swarm_provider::stores::feeds::{FeedChange, FeedStore};
 use fc_swarm_provider::stores::history::Statement;
@@ -290,12 +287,6 @@ pub struct SignAsk {
     pub soc: SignSoc,
     /// `PageContext.origin`: the site's key.
     pub key: String,
-    /// The page's custody as main last reported it: the request's latest
-    /// live facts, else its `PageContext.agent`.
-    pub agent: Option<bool>,
-    /// How main approved the request (a method that signs always carries
-    /// one; none reads as the user's).
-    pub approval: Approval,
     /// The site holds its feed grant in the keeper's store as the
     /// signature is asked (`hasFeedGrant`).
     pub feed_grant: bool,
@@ -517,11 +508,6 @@ enum Phase {
 struct Slot {
     phase: Phase,
     page: PageContext,
-    /// How main approved it.
-    approval: Option<Approval>,
-    /// Its page's custody as main last reported it (D15's input): its
-    /// latest live facts, else its `PageContext`.
-    agent: Option<bool>,
     /// The `PageContext` as JSON, for `approval.recheck`.
     page_json: String,
     /// The page's name binding (D1), when its transport key binds its key,
@@ -835,15 +821,11 @@ impl Engine {
             (binding, document)
         });
         let page_json = serde_json::to_string(&page).unwrap_or_else(|_| "{}".to_owned());
-        let approval = params.approval;
-        let agent = page.agent;
         self.slots.insert(
             id,
             Slot {
                 phase: Phase::Waiting(params),
                 page,
-                approval,
-                agent,
                 page_json,
                 binding,
                 deadline: now.saturating_add(total),
@@ -1387,19 +1369,11 @@ impl Engine {
     ) -> Result<(), Fault> {
         let Some(Slot {
             phase: Phase::Running(request),
-            agent,
             ..
         }) = self.slots.get_mut(&id)
         else {
             return Ok(());
         };
-        // The custody main reports for a document whose name still binds
-        // it: D15's input for a signature that follows.
-        if let Event::Live(live) = &event
-            && live.name
-        {
-            *agent = Some(live.agent);
-        }
         let mut world = StepWorld::new(&mut self.shared, io.wall_ms());
         request.answer(&mut world, ask, event);
         Ok(())
@@ -1608,8 +1582,6 @@ impl Engine {
                 let ask = SignAsk {
                     soc: soc.clone(),
                     key: slot.page.origin.clone(),
-                    agent: slot.agent,
-                    approval: slot.approval.unwrap_or(Approval::User),
                     feed_grant: self.shared.keeper.store().has_feed_grant(&key),
                 };
                 self.next_vault += 1;

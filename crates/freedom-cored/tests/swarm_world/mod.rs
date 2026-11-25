@@ -6,9 +6,17 @@
 //! readiness and its session.
 //!
 //! One core plays every case (D11): `test.swarm_world` sets the swarm
-//! thread's world between them (its read budgets and tags' owners afresh,
-//! its `Date.now()`, the grants), and answers what the thread holds, so
-//! each step ends with no charge held and no request left.
+//! thread's world between them (its read budgets, tags' owners and stores
+//! afresh, its `Date.now()`, the grants, `swarm-feeds.json`), and answers
+//! what the thread holds, so each step ends with no charge held and no
+//! request left. The Swarm stores have moved (`swarm_stores`, D3) unless a
+//! test says otherwise; the vault is the core's own, imported with the
+//! test mnemonic where a test signs ([`Main::import_vault`]).
+//!
+//! **Main streams** a part from the step's `parts` within the core's
+//! credit as it comes, and reads a call's `swarm.body` as the core sends
+//! it, crediting each frame as the node would take it, then answers the
+//! call with the node's reply to the whole body.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, dead_code)]
 
@@ -31,7 +39,15 @@ use crate::common::{
 #[path = "../../../fc-swarm-provider/tests/common/mod.rs"]
 pub mod logic;
 
+use logic::write_node::{WorldChange, WriteNode};
 use logic::{Logged, Node, TestWorld};
+
+/// The test mnemonic, whose keys sign the vectors' SOCs (keys.json's
+/// `abandon-12`).
+pub const ABANDON: &str =
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+/// The vault's password.
+pub const PASSWORD: &str = "testpass1";
 
 /// A name-keyed document's name: a DNS name served over IPNS.
 pub const NAME: &str = "docs.example.org";
@@ -137,21 +153,63 @@ pub struct Main {
     pub backlog: VecDeque<Value>,
     /// The credit the core gave each of its requests' streams main sends.
     pub credit: BTreeMap<u64, u64>,
+    /// Main's `swarm.body` requests the core streams, by ID.
+    pub bodies: BTreeMap<u64, BodyIn>,
+    /// Bodies whose end came, for main to answer their calls.
+    pub ended: VecDeque<BodyIn>,
+    /// Parts main streams, by the core's request ID: the bytes and how
+    /// many went.
+    pub parts_out: BTreeMap<u64, (Vec<u8>, usize)>,
+    /// Calls main hasn't answered yet (a streamed body's), by ID.
+    pub open_calls: BTreeMap<u64, NodeCall>,
 }
 
-/// A core whose Swarm grants have moved, with the test methods.
+/// A body the core streams for one of its calls.
+#[derive(Debug, Default)]
+pub struct BodyIn {
+    /// The core's call it is the body of.
+    pub call: u64,
+    /// The length its head gave.
+    pub head: Option<u64>,
+    pub bytes: Vec<u8>,
+}
+
+/// A core whose Swarm grants and stores have moved, with the test methods.
 pub fn main() -> Main {
     main_with(&["swarm"], &[])
 }
 
-/// A core whose hello moves `grant_moved`, with the test methods and
-/// `env`'s hooks.
+/// A core whose hello moves `grant_moved` and the Swarm stores, with the
+/// test methods and `env`'s hooks.
 pub fn main_with(grant_moved: &[&'static str], env: &[(&str, &str)]) -> Main {
+    main_stores(grant_moved, &["swarm_stores"], env)
+}
+
+/// A core whose hello moves `grant_moved` and `store_moved`, with the test
+/// methods and `env`'s hooks.
+pub fn main_stores(
+    grant_moved: &[&'static str],
+    store_moved: &[&'static str],
+    env: &[(&str, &str)],
+) -> Main {
     let (dir, data, locks) = dirs();
+    main_in(dir, data, locks, grant_moved, store_moved, env)
+}
+
+/// [`main_stores`] in directories a test made (a restart reuses them).
+pub fn main_in(
+    dir: tempfile::TempDir,
+    data: std::path::PathBuf,
+    locks: std::path::PathBuf,
+    grant_moved: &[&'static str],
+    store_moved: &[&'static str],
+    env: &[(&str, &str)],
+) -> Main {
     let mut envs = vec![("FREEDOM_CORED_TEST_METHODS", "1")];
     envs.extend_from_slice(env);
     let mut core = spawn_env("serve", &data, &locks, &[], &envs);
     core.grant_moved = grant_moved.to_vec();
+    core.store_moved = store_moved.to_vec();
     // Fragments, as main offers them: a read's answer can pass a frame.
     let hello = core.hello_fragments();
     assert!(hello["result"].is_object(), "{hello}");
@@ -164,6 +222,10 @@ pub fn main_with(grant_moved: &[&'static str], env: &[(&str, &str)]) -> Main {
         _dir: dir,
         backlog: VecDeque::new(),
         credit: BTreeMap::new(),
+        bodies: BTreeMap::new(),
+        ended: VecDeque::new(),
+        parts_out: BTreeMap::new(),
+        open_calls: BTreeMap::new(),
     }
 }
 
@@ -184,6 +246,12 @@ pub struct Played {
     pub rechecks: usize,
     /// The thread's cancels of its own requests.
     pub cancels: usize,
+    /// Each streamed body, by its call's index in `calls`.
+    pub bodies: BTreeMap<usize, Vec<u8>>,
+    /// The parts the core asked for, in order.
+    pub parts: Vec<u32>,
+    /// `POST /soc` calls the node took.
+    pub soc_posts: usize,
 }
 
 impl Played {
@@ -210,6 +278,11 @@ pub struct Script {
     pub key: JsString,
     /// Main's naming node, for a name-keyed document.
     pub naming: Option<Naming>,
+    /// The step's parts, which main streams.
+    pub parts: BTreeMap<u32, Vec<u8>>,
+    /// The feed and SOC writes' node, when the case plays one: it answers
+    /// every call in `node`'s place.
+    pub write_node: Option<WriteNode>,
 }
 
 impl Main {
@@ -239,42 +312,182 @@ impl Main {
     /// The next whole message: one read while main waited for credit
     /// first, then the next off the pipe, a fragmented one reassembled
     /// (main's bulk credit returned once read), the core's credit for a
-    /// stream main sends noted on the way.
+    /// stream main sends noted on the way, a body the core streams read and
+    /// credited, events skipped.
     pub fn recv(&mut self) -> Value {
         if let Some(message) = self.backlog.pop_front() {
             return message;
         }
         loop {
-            match self.core.recv_wire() {
-                Wire::Message(message) => return message,
-                Wire::Begin { bytes, .. } => {
-                    let mut payload = Vec::with_capacity(bytes);
-                    loop {
-                        match self.core.recv_wire() {
-                            Wire::Fragment(part) => payload.extend_from_slice(&part),
-                            Wire::Last(part) => {
-                                payload.extend_from_slice(&part);
-                                break;
-                            }
-                            other => panic!("inside a fragmented message: {other:?}"),
-                        }
-                    }
-                    assert_eq!(payload.len(), bytes);
-                    self.core.send_credit();
-                    return serde_json::from_slice(&payload).unwrap();
-                }
-                Wire::Stream {
-                    kind: KIND_STREAM_CREDIT,
-                    id,
-                    rest,
-                } => {
-                    let n = u32::from_be_bytes(rest[..4].try_into().unwrap());
-                    *self.credit.entry(id).or_default() += u64::from(n);
-                }
-                Wire::Credit => {}
-                other => panic!("an unexpected frame: {other:?}"),
+            let wire = self.core.recv_wire();
+            if let Some(message) = self.take(wire) {
+                return message;
             }
         }
+    }
+
+    /// The next message, or `None` once something main handles itself came
+    /// (credit, a body's frame), so a caller streaming a part can go on.
+    pub fn next_message(&mut self) -> Option<Value> {
+        if let Some(message) = self.backlog.pop_front() {
+            return Some(message);
+        }
+        let wire = self.core.recv_wire();
+        self.take(wire)
+    }
+
+    /// One item off the pipe: a message for the caller, or `None` for what
+    /// main handles itself.
+    fn take(&mut self, wire: Wire) -> Option<Value> {
+        match wire {
+            Wire::Message(message) => {
+                // The vault's and the grants' events: main's own.
+                if message["type"] == "event" {
+                    return None;
+                }
+                // A body's head (`{ bytes }`), or its one answer in its
+                // place.
+                if message["type"] == "response"
+                    && let Some(id) = message["id"].as_u64()
+                    && let Some(body) = self.bodies.get_mut(&id)
+                {
+                    match message["result"]["bytes"].as_u64() {
+                        Some(bytes) => body.head = Some(bytes),
+                        None => {
+                            self.bodies.remove(&id);
+                        }
+                    }
+                    return None;
+                }
+                Some(message)
+            }
+            Wire::Begin { bytes, .. } => {
+                let mut payload = Vec::with_capacity(bytes);
+                loop {
+                    match self.core.recv_wire() {
+                        Wire::Fragment(part) => payload.extend_from_slice(&part),
+                        Wire::Last(part) => {
+                            payload.extend_from_slice(&part);
+                            break;
+                        }
+                        other => panic!("inside a fragmented message: {other:?}"),
+                    }
+                }
+                assert_eq!(payload.len(), bytes);
+                self.core.send_credit();
+                Some(serde_json::from_slice(&payload).unwrap())
+            }
+            Wire::Stream {
+                kind: KIND_STREAM_CREDIT,
+                id,
+                rest,
+            } => {
+                let n = u32::from_be_bytes(rest[..4].try_into().unwrap());
+                *self.credit.entry(id).or_default() += u64::from(n);
+                None
+            }
+            Wire::Stream { kind, id, rest } if self.bodies.contains_key(&id) => {
+                match kind {
+                    // The node takes each frame as it comes: main credits it.
+                    KIND_DATA => {
+                        let body = self.bodies.get_mut(&id).unwrap();
+                        assert!(body.head.is_some(), "a body's data before its head");
+                        body.bytes.extend_from_slice(&rest);
+                        let len = u32::try_from(rest.len()).unwrap();
+                        self.core.send_raw(&stream_frame(
+                            KIND_STREAM_CREDIT,
+                            id,
+                            &len.to_be_bytes(),
+                        ));
+                    }
+                    KIND_END => {
+                        let body = self.bodies.remove(&id).unwrap();
+                        self.ended.push_back(body);
+                    }
+                    KIND_ABORT => {
+                        self.bodies.remove(&id);
+                    }
+                    other => panic!("a body frame of kind {other}"),
+                }
+                None
+            }
+            Wire::Credit => None,
+            other => panic!("an unexpected frame: {other:?}"),
+        }
+    }
+
+    /// Each part's next bytes, as far as the core's credit allows, and its
+    /// end once all went.
+    pub fn pump_parts(&mut self) {
+        let ids: Vec<u64> = self.parts_out.keys().copied().collect();
+        for id in ids {
+            loop {
+                let credit = self.credit.get(&id).copied().unwrap_or(0);
+                let (data, sent) = self.parts_out.get_mut(&id).unwrap();
+                if *sent == data.len() {
+                    self.core.send_raw(&stream_frame(KIND_END, id, b""));
+                    self.parts_out.remove(&id);
+                    break;
+                }
+                let room = (WINDOW + credit).saturating_sub(*sent as u64) as usize;
+                if room == 0 {
+                    break;
+                }
+                let n = room.min(64 * 1024).min(data.len() - *sent);
+                let frame = stream_frame(KIND_DATA, id, &data[*sent..*sent + n]);
+                *sent += n;
+                self.core.send_raw(&frame);
+            }
+        }
+    }
+
+    /// `vault.import` of the test mnemonic: the vault unlocked with the
+    /// vectors' keys.
+    pub fn import_vault(&mut self) {
+        use base64::engine::general_purpose::STANDARD;
+        let id = self.id();
+        let imported = self.core.call(
+            id,
+            "vault.import",
+            json!({ "password_b64": STANDARD.encode(PASSWORD), "mnemonic_b64": STANDARD.encode(ABANDON) }),
+        );
+        assert!(imported["result"].is_object(), "{imported}");
+    }
+
+    /// The vault locked, or unlocked with its password.
+    pub fn set_vault(&mut self, unlocked: bool) {
+        use base64::engine::general_purpose::STANDARD;
+        let id = self.id();
+        let reply = if unlocked {
+            self.core.call_shell(
+                id,
+                "vault.unlock",
+                json!({ "password_b64": STANDARD.encode(PASSWORD) }),
+            )
+        } else {
+            self.core.call_shell(id, "vault.lock", json!({}))
+        };
+        assert!(reply["result"].is_object(), "{reply}");
+    }
+
+    /// `test.swarm_feed_change { change }` (D11): its answer, `{ value }`
+    /// or `{ error }`, once made (not for one a hold defers: see
+    /// [`Main::send_feed_change`]).
+    pub fn feed_change(&mut self, change: Value) -> Value {
+        let id = self.send_feed_change(change);
+        let response = self.core.response(id);
+        assert!(response["result"].is_object(), "{response}");
+        response["result"].clone()
+    }
+
+    /// `test.swarm_feed_change`, sent: its ID.
+    pub fn send_feed_change(&mut self, change: Value) -> u64 {
+        let id = self.id();
+        self.core.send(&json!({
+            "type": "request", "id": id, "method": "test.swarm_feed_change", "params": change,
+            "context": { "caller": "shell" },
+        }));
+        id
     }
 
     /// Main streams `events` (data, then a terminal) as the body of the
@@ -317,27 +530,16 @@ impl Main {
     fn wait_credit(&mut self, call: u64) -> bool {
         let before = self.credit.get(&call).copied().unwrap_or(0);
         loop {
-            match self.core.recv_wire() {
-                Wire::Stream {
-                    kind: KIND_STREAM_CREDIT,
-                    id,
-                    rest,
-                } => {
-                    let n = u32::from_be_bytes(rest[..4].try_into().unwrap());
-                    *self.credit.entry(id).or_default() += u64::from(n);
-                    if id == call && self.credit[&call] > before {
-                        return false;
-                    }
+            let wire = self.core.recv_wire();
+            if let Some(message) = self.take(wire) {
+                let cancelled = message["type"] == "cancel" && message["id"] == call;
+                self.backlog.push_back(message);
+                if cancelled {
+                    return true;
                 }
-                Wire::Message(message) => {
-                    let cancelled = message["type"] == "cancel" && message["id"] == call;
-                    self.backlog.push_back(message);
-                    if cancelled {
-                        return true;
-                    }
-                }
-                Wire::Credit => {}
-                other => panic!("while main waits for credit: {other:?}"),
+            }
+            if self.credit.get(&call).copied().unwrap_or(0) > before {
+                return false;
             }
         }
     }
@@ -438,14 +640,35 @@ impl Main {
             closed: Vec::new(),
             rechecks: 0,
             cancels: 0,
+            bodies: BTreeMap::new(),
+            parts: Vec::new(),
+            soc_posts: 0,
         };
         let mut probe = None;
         let mut pushes = BTreeSet::new();
         let held = loop {
-            let message = self.recv();
+            self.pump_parts();
+            while let Some(body) = self.ended.pop_front() {
+                self.body_ended(script, body, &mut played, &mut pushes);
+            }
+            let Some(message) = self.next_message() else {
+                continue;
+            };
             match message["type"].as_str().unwrap() {
                 "request" => self.serve(script, request, &message, &mut played, &mut pushes),
-                "cancel" => played.cancels += 1,
+                "cancel" => {
+                    played.cancels += 1;
+                    // A call main hasn't answered, or a part it streams:
+                    // ended `cancelled`.
+                    let id = message["id"].as_u64().unwrap();
+                    if self.open_calls.remove(&id).is_some() {
+                        self.bodies.retain(|_, body| body.call != id);
+                        self.refuse(id, json!({ "code": "cancelled", "message": "Cancelled" }));
+                    }
+                    if self.parts_out.remove(&id).is_some() {
+                        self.abort(id, "cancelled");
+                    }
+                }
                 "response" => {
                     let id = message["id"].as_u64().unwrap();
                     if id == request {
@@ -483,7 +706,99 @@ impl Main {
         assert_eq!(held["memory"], 0, "no charge held after the step");
         assert_eq!(held["requests"], 0, "no request left after the step");
         assert_eq!(held["streams"], 0, "no stream left after the step");
+        assert!(self.open_calls.is_empty(), "every call answered");
+        assert!(self.parts_out.is_empty() && self.bodies.is_empty());
+        played.soc_posts = played
+            .calls
+            .iter()
+            .filter(|c| c.call.form == Form::SocUp)
+            .count();
         played
+    }
+
+    /// A streamed body whose end came: main answers its call with the
+    /// node's reply to the whole body, unless the call was cancelled.
+    fn body_ended(
+        &mut self,
+        script: &mut Script,
+        body: BodyIn,
+        played: &mut Played,
+        pushes: &mut BTreeSet<u64>,
+    ) {
+        let Some(call) = self.open_calls.remove(&body.call) else {
+            return;
+        };
+        if let Some(Body::Stream { bytes }) = call.body {
+            assert_eq!(body.bytes.len() as u64, bytes, "the body is its length");
+            assert_eq!(body.head, Some(bytes), "the body's head");
+        }
+        let spec = self.node_reply(script, &call, &body.bytes, pushes);
+        let (abort_page, events) = logic::forward(&spec, &call);
+        if abort_page {
+            panic!("a page that gives up at a streamed upload");
+        }
+        let reply = match &events[0] {
+            Event::Reply(reply) if reply.ok() => Some(reply.body.clone()),
+            _ => None,
+        };
+        assert_eq!(events.len(), 1, "an upload's one answer");
+        played.bodies.insert(played.calls.len(), body.bytes);
+        played.calls.push(Logged {
+            call,
+            charge: 0,
+            body: reply,
+        });
+        self.answer(body.call, reply_json(&events[0]));
+    }
+
+    /// The node's reply to `call` with its request body: the feed writes'
+    /// node where the case plays one, else the reads' and uploads'; a rule
+    /// that changes the world as its request arrives changes the script's
+    /// and sends the grants to the core first.
+    fn node_reply(
+        &mut self,
+        script: &mut Script,
+        call: &NodeCall,
+        body: &[u8],
+        pushes: &mut BTreeSet<u64>,
+    ) -> logic::ReplySpec {
+        let mut changes: Vec<(String, String)> = Vec::new();
+        let spec = match script.write_node.as_mut() {
+            Some(node) => {
+                let (spec, change) = node.reply(call, body);
+                match change {
+                    None => {}
+                    Some(WorldChange::Custody) => changes.push(("custody".into(), "true".into())),
+                    Some(WorldChange::RuleOff(c)) => changes.push(("rule_off".into(), c)),
+                    Some(WorldChange::NameMoved) => changes.push(("name".into(), "moved".into())),
+                }
+                spec
+            }
+            None => {
+                if let Some(rule) = script.node.matching(call.method(), &call.path) {
+                    changes.extend(rule.world.clone());
+                }
+                if call.method() == "POST" {
+                    script.node.upload(call.method(), &call.path, body)
+                } else {
+                    script.node.reply(call.method(), &call.path)
+                }
+            }
+        };
+        if !changes.is_empty() {
+            for (what, value) in changes {
+                let key = script.key.clone();
+                script.world.apply(&key, &what, &value);
+            }
+            let world = self.id();
+            self.core.send(&json!({
+                "type": "request", "id": world, "method": "test.swarm_world",
+                "params": { "grants": grants_json(&script.world) },
+                "context": { "caller": "shell" },
+            }));
+            pushes.insert(world);
+        }
+        spec
     }
 
     /// Main's answer to one of the thread's requests, from the script.
@@ -533,8 +848,6 @@ impl Main {
             "shell.swarm_api" => {
                 assert_eq!(params["for"], request);
                 let call = node_call(params);
-                // A node rule's change to the world as its request arrives:
-                // the grants go to the core before main's answer.
                 if script.node.stopped {
                     self.answer(id, json!({ "failed": "stopped" }));
                     played.calls.push(Logged {
@@ -544,32 +857,32 @@ impl Main {
                     });
                     return;
                 }
-                if let Some(rule) = script.node.matching(call.method(), &call.path) {
-                    let changes = rule.world.clone();
-                    if !changes.is_empty() {
-                        for (what, value) in changes {
-                            let key = script.key.clone();
-                            script.world.apply(&key, &what, &value);
-                        }
-                        let world = self.id();
-                        self.core.send(&json!({
-                            "type": "request", "id": world, "method": "test.swarm_world",
-                            "params": { "grants": grants_json(&script.world) },
-                            "context": { "caller": "shell" },
-                        }));
-                        pushes.insert(world);
-                    }
+                // A streamed body: main asks for it, reads it as it comes,
+                // and answers the call at its end.
+                if let Some(Body::Stream { .. }) = call.body {
+                    let body = self.id();
+                    self.core.send(&json!({
+                        "type": "request", "id": body, "method": "swarm.body",
+                        "params": { "for": id }, "context": { "caller": "shell" },
+                    }));
+                    self.bodies.insert(
+                        body,
+                        BodyIn {
+                            call: id,
+                            ..BodyIn::default()
+                        },
+                    );
+                    self.open_calls.insert(id, call);
+                    return;
                 }
-                let spec = if call.method() == "POST" {
-                    let body = match &call.body {
-                        Some(Body::Base64(bytes)) => bytes.clone(),
-                        None => Vec::new(),
-                        other => panic!("a whole call's body: {other:?}"),
-                    };
-                    script.node.upload(call.method(), &call.path, &body)
-                } else {
-                    script.node.reply(call.method(), &call.path)
+                let body = match &call.body {
+                    Some(Body::Base64(bytes)) => bytes.clone(),
+                    None => Vec::new(),
+                    other => panic!("a whole call's body: {other:?}"),
                 };
+                // A node rule's change to the world as its request arrives:
+                // the grants go to the core before main's answer.
+                let spec = self.node_reply(script, &call, &body, pushes);
                 let (abort_page, events) = logic::forward(&spec, &call);
                 if abort_page {
                     // The page gives up as the request reaches the node.
@@ -603,6 +916,18 @@ impl Main {
                         self.answer(id, reply_json(whole));
                     }
                 }
+            }
+            "shell.swarm_part" => {
+                assert_eq!(params["for"], request);
+                let part = u32::try_from(params["part"].as_u64().unwrap()).unwrap();
+                played.parts.push(part);
+                let data = script
+                    .parts
+                    .get(&part)
+                    .unwrap_or_else(|| panic!("part {part} isn't the step's"))
+                    .clone();
+                self.answer(id, json!({ "bytes": data.len() }));
+                self.parts_out.insert(id, (data, 0));
             }
             "approval.recheck" => {
                 assert_eq!(params["request"], request);

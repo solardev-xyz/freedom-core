@@ -504,6 +504,7 @@ enum Found {
 
 /// [`hand_over_legacy`], with `hooks` failing the copy's write steps, and
 /// step 4's sync as its `flush`.
+#[cfg(test)]
 fn hand_over(user_data_dir: &Path, grant_root: &Path, hooks: &dyn Hooks) -> Handover {
     hand_over_of(&RECEIPTS, user_data_dir, grant_root, hooks)
 }

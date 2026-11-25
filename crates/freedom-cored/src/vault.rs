@@ -1391,23 +1391,27 @@ impl Vault {
 
     /// A page's SOC's signature and its key's owner. It signs only once
     /// 0012's page-SOC decision, run again over the Swarm grants as they
-    /// stand with the custody, approval and feed grant the swarm thread
-    /// sends, covers it, though the machine already checked (D15); a
-    /// refusal, a locked vault or a failure is the text the machine reads.
-    /// The key is derived for the one digest and its address, and wiped.
+    /// stand, covers it, though the machine already checked (D15): the
+    /// decision's floor, which every page SOC needs whatever approved it,
+    /// the site connected and holding its feed grant (which the swarm
+    /// thread reads from its feed store as it asks). The rule and custody
+    /// that an `auto` request also needs are the upload's guard's, in the
+    /// reference's order (design 0015, "SW-1 in the core":
+    /// `write-feed-rule-custody-before-write` and
+    /// `write-feed-rule-off-before-write` sign after they changed, and
+    /// refuse at the upload). A refusal, a locked vault or a failure is the
+    /// text the machine reads. The key is derived for the one digest and
+    /// its address, and wiped.
     pub fn swarm_sign(
         &self,
         sign: &crate::swarm::engine::SignAsk,
     ) -> Result<fc_swarm_provider::machine::Signed, fc_json::JsString> {
         use fc_approval::standing::{SocApproval, SocAsk, SocRequest};
-        use fc_swarm_provider::machine::{Approval, Signed, SocKind};
+        use fc_swarm_provider::machine::{Signed, SocKind};
         let decision = SocAsk {
             key: &sign.key,
-            agent: sign.agent,
-            approval: match sign.approval {
-                Approval::User => SocApproval::User,
-                Approval::Auto => SocApproval::Auto,
-            },
+            agent: None,
+            approval: SocApproval::User,
             request: match sign.soc.kind {
                 SocKind::Feed => SocRequest::Feed,
                 SocKind::Raw => SocRequest::Raw,
