@@ -598,7 +598,7 @@ The core never parses a node's reply into a generic JSON value: a dense array of
 - **Skipped values** cost nothing kept: the reader counts their nesting, at most 64 deep, past which the call fails `error`, and keeps no element of them.
 - **A repeated key** keeps the last value, as `JSON.parse` does, overwriting in place.
 - **A reply bee-js's schema refuses** (zod 4, `GetAllPostageBatchesResponse` and the tag and address schemas) reaches the page as the `ZodError`'s message, through `nodeWriteError` as -32603 (`publish-data-stamps-malformed`). That text is `JSON.stringify(issues, null, 2)`, about 200 bytes for each field of the wrong type, so 4,096 empty batches would give some 8 MiB. The core writes the same text, held to the reply form's own cap (1 MiB for `/stamps`, 64 KiB for the others), and past it the call fails `too_large` (deviation `reply-bounds`). The charges above include it.
-- **A reply that isn't JSON** fails `error` with -32603 `Swarm node reply is not valid JSON`, where the reference shows V8's `SyntaxError` text (deviation `reply-syntax`).
+- **A JSON reply that doesn't parse,** where the reference shows V8's `SyntaxError` text (bee-js's reads: `/stamps`, `/stamps/<b>`, `/tags/<uid>`, `/addresses`, and the results of the uploads bee-js makes), fails `error` with -32603 `Swarm node reply is not valid JSON` (deviation `reply-syntax`). Where the reference gives its own text, the core keeps it: a page's upload result that isn't JSON is `page-upload.js`'s `The node answered the upload with no reference` (`publish-data-node-not-json`).
 - **Error bodies,** at most 8 KiB, are the one reply whose whole value matters: the page's text is `JSON.stringify` of its parse, and `isChunkNotFoundError` reads its `message`. A transcoder writes that text as it reads, holding only the text and each open object's keys and members until the object closes, so a repeated key keeps its first place and its last value, as `JSON.parse` gives them. The text can be 5.25 times the body, because `JSON.stringify` writes a number in full below 10^21 (`1e20` becomes 21 digits; 8 KiB of `[1e20,…]` gives 36,037 bytes). Each open object's members are held with an index of their keys, each key twice, at most about 250 bytes a member with the allocators' slack, and an 8 KiB body has at most about 1,400 members. So the transcoding holds well under 512 KiB, the floor above, and SWM-4's memory gate measures it.
 - **The tests** (SWM-3 on the readers; SWM-4's memory gate): replies at each cap and one past it; a 1 MiB dense array of `0,` under an unknown key; 4,096 minimal batches; one batch whose label is the whole reply; nesting at 64 and 65; a key repeated through the whole reply; and error bodies that are dense arrays, deep objects, repeated keys and lone surrogates, against `JSON.stringify(JSON.parse(text))`. Each reader's kept bytes are measured against its charge, and SWM-4 runs eight such `/stamps` replies at once with resident memory within the charges.
 
@@ -659,7 +659,7 @@ Against the reference pin, which has #1057. F-1's and F-5's first deviations (`f
 | `busy` | none | 4900, `reason: "busy"`: the core's queue, its memory at a request's deadline, main's Swarm I/O pool, or the mining queue |
 | `reply-bounds` | bee-js reads any reply whole | each form's cap, reply headers and the reason phrase bounded; past a cap, `too_large` |
 | `error-body-bound` | bee-js reads a whole error body for its text | the text from the first 8 KiB |
-| `reply-syntax` | V8's `SyntaxError` text for a JSON reply that doesn't parse | -32603 `Swarm node reply is not valid JSON` |
+| `reply-syntax` | V8's `SyntaxError` text for a JSON reply bee-js reads that doesn't parse | -32603 `Swarm node reply is not valid JSON` |
 | `batch-depth` | a batch's sizes from a fractional `depth` or `bucketDepth` (`2 ** depth`, V8's `pow`) | the batch refused: -32603 `Swarm node reply has a non-integer batch depth` |
 | `session-transport` | Node's `fetch` for every HTTP call (F-6) | the node's transport |
 | `transport-error-text` | undici's message for each failure | one text per failure class |
@@ -718,7 +718,7 @@ Once decided:
 - **bee-js's schema refusal reaches the page:** the `/stamps` reader also keeps each field's type, and the refusal's text is held to the form's cap (`reply-bounds`). `/stamps`' charge is 7.7 MiB.
 - **The error transcoder can write 5.25 times its body,** not four times, and holds each open object's members. The floor for an error body is 512 KiB, not 32 KiB, for every call.
 - **`page-upload.js` is a fourth error-text site,** and error bodies share the 64-level nesting bound.
-- **A reply that isn't JSON** gets one fixed text (`reply-syntax`).
+- **A JSON reply that doesn't parse,** where the reference shows V8's `SyntaxError` text, gets one fixed text (`reply-syntax`); `page-upload.js`'s own text for a page's upload stays.
 - **The reader keeps `exists` and `propagating`,** which the batch choice reads.
 - **A non-integer batch depth** is refused (`batch-depth`): zod admits one, and computing `2 ** depth` for it as V8 does would need V8's own `pow`. No node sends one.
 - **Every whole call reserves at least 512 KiB,** the error floor, so the 64 KiB JSON forms' charges are 0.5 MiB.
