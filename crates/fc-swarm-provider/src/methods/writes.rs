@@ -380,6 +380,19 @@ pub(crate) fn bytes_up(batch: &BatchId, bytes: u64) -> NodeCall {
 /// The reply to one of bee-js's uploads (`feed_manifest`, `bytes_up`):
 /// `UploadResultBody.parse(response.data).reference`.
 pub(crate) fn bee_upload(event: Event) -> Result<Vec<u8>, Fail> {
+    bee_upload_tagged(event, false)
+}
+
+/// The reply to `bytes_up` (bee-js's `bytes.upload`): the reference as for
+/// [`bee_upload`], then the `swarm-tag` header, when it has a value, read
+/// by `makeTagUid` (`z.coerce.number().min(0)`), whose refusal fails the
+/// write with zod's text, as in the reference. The core keeps no tag for a
+/// feed entry.
+pub(crate) fn bytes_uploaded(event: Event) -> Result<Vec<u8>, Fail> {
+    bee_upload_tagged(event, true)
+}
+
+fn bee_upload_tagged(event: Event, tagged: bool) -> Result<Vec<u8>, Fail> {
     let reply = match event {
         Event::Reply(reply) => reply,
         Event::Failed(failed) => return Err(Fail::transport(failed)),
@@ -391,16 +404,34 @@ pub(crate) fn bee_upload(event: Event) -> Result<Vec<u8>, Fail> {
             Err(failed) => Fail::transport(failed),
         });
     }
-    match upload_reference(strip_bom(&reply.body))? {
-        Ok(reference) => reference_bytes(&reference).map_err(Fail::text),
-        Err(issue) => {
-            let mut issues = Issues::new();
-            issues
-                .push(issue, JSON_REPLY_CAP)
-                .map_err(|_| Fail::transport(Failed::TooLarge))?;
-            Err(Fail::text(issues.message()))
+    let reference = match upload_reference(strip_bom(&reply.body))? {
+        Ok(reference) => reference_bytes(&reference).map_err(Fail::text)?,
+        Err(issue) => return Err(Fail::text(zod_message(issue)?)),
+    };
+    if tagged {
+        // `response.headers['swarm-tag'] ? makeTagUid(…) : undefined`.
+        let tag = reply.header("swarm-tag").map(|v| v.text());
+        if let Some(tag) = tag.filter(|t| !t.is_empty()) {
+            let uid = crate::js::string_to_number(&tag);
+            if !uid.is_finite() {
+                let issue = Issue::new(Expected::Number, Received::of_number(uid), &[]);
+                return Err(Fail::text(zod_message(issue)?));
+            }
+            if uid < 0.0 {
+                return Err(Fail::text(crate::zod::too_small_number(0.0)));
+            }
         }
     }
+    Ok(reference)
+}
+
+/// One issue's `ZodError` message.
+fn zod_message(issue: Issue) -> Result<String, Fail> {
+    let mut issues = Issues::new();
+    issues
+        .push(issue, JSON_REPLY_CAP)
+        .map_err(|_| Fail::transport(Failed::TooLarge))?;
+    Ok(issues.message())
 }
 
 /// zod's read of `{ reference: string }`: the last `reference`'s string, or

@@ -37,9 +37,9 @@ use super::body::{BodyWriter, Fault, Piece};
 use super::feed_index::{Next, NextIndex, wrapping_index};
 use super::permitted;
 use super::writes::{
-    Ending, Fail, add_row, admit, batch, bee_upload, bytes_up, closing, feed_not_granted, guard,
-    holds_key, inserted, owner, row, s, signature, signer_key, soc_up, soc_uploaded, stamps_call,
-    still_here, unavailable, written,
+    Ending, Fail, add_row, admit, batch, bytes_up, bytes_uploaded, closing, feed_not_granted,
+    guard, holds_key, inserted, owner, row, s, signature, signer_key, soc_up, soc_uploaded,
+    stamps_call, still_here, unavailable, written,
 };
 use crate::chunks::single_owner;
 use crate::machine::node::BodyAbort;
@@ -658,7 +658,7 @@ impl FeedWrite {
                 reply @ (Event::Reply(_) | Event::Failed(_)) => {
                     let whole = body.ended();
                     body.abort(cx, BodyAbort::Cancelled);
-                    let reference = match bee_upload(reply) {
+                    let reference = match bytes_uploaded(reply) {
                         Ok(reference) => reference,
                         Err(failure) => return self.end(cx, Err(failure)),
                     };
