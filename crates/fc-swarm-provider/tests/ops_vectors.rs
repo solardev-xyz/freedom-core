@@ -2526,3 +2526,52 @@ fn a_decision_answers_its_checks_before_the_store_is_read() {
     assert!(!world.manifests.is_loaded());
     assert_eq!(world.disk.dir, before, "nothing written");
 }
+
+/// The references past 1 MiB, through main's op: the store's refusal,
+/// -32603 `Swarm identity references are too large` for a page (deviation
+/// `identity-references-bound`).
+#[test]
+fn references_past_the_bound_are_refused_through_the_op() {
+    let keys = vault_keys();
+    let vault = Vault {
+        keys: &keys,
+        unlocked: true,
+    };
+    let site = "k".repeat(100_000);
+    let identities: Vec<String> = (0..12)
+        .map(|i| {
+            format!(
+                r#""ethereum-wallet:{i}":{{"id":"ethereum-wallet:{i}","mode":"ethereum-wallet","walletIndex":0}}"#
+            )
+        })
+        .collect();
+    let feeds: Vec<String> = (0..12)
+        .map(|i| format!(r#""f{i}":{{"identityId":"ethereum-wallet:{i}"}}"#))
+        .collect();
+    let text = format!(
+        r#"{{"version":2,"nextPublisherKeyIndex":0,"origins":{{"{site}":{{"activeIdentityId":"ethereum-wallet:0","identities":{{{}}},"feeds":{{{}}}}}}}}}"#,
+        identities.join(","),
+        feeds.join(",")
+    );
+    let mut world = feeds_world(&text, "{}", None);
+    let call = params(
+        "getEthereumWalletIdentityReferences",
+        &[("wallet_index", JsValue::Number(0.0))],
+    );
+    let got = world.play(ops::IDENTITIES, &call, Caller::Shell, vault, no_fetch);
+    assert_eq!(
+        outcome_answer(got).unwrap_err(),
+        Thrown {
+            name: fc_swarm_provider::stores::ErrorName::Error,
+            message: feeds::REFERENCES_TOO_LARGE.to_owned(),
+            code: None,
+        }
+    );
+    // Another wallet's references are none, and answered.
+    let other = params(
+        "getEthereumWalletIdentityReferences",
+        &[("wallet_index", JsValue::Number(1.0))],
+    );
+    let got = world.play(ops::IDENTITIES, &other, Caller::Shell, vault, no_fetch);
+    assert_eq!(got, Outcome::Result(Value::Array(Vec::new())));
+}
