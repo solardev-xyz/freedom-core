@@ -674,10 +674,11 @@ fn spread(samples: &[Duration]) -> (f64, f64, f64) {
     (at(0.5), at(0.99), at(1.0))
 }
 
-/// `vault.lock` every 20 ms for 2 s while the lane mines 64 long searches
-/// (some 3,600 batches, one after another, on its own core): answered
-/// within 0009's gate, 50 ms at p99. The lane's batch time is measured
-/// over the whole run.
+/// `vault.lock` every 20 ms while the lane mines 64 long searches (some
+/// 3,600 batches, one after another, on its own core), for 2 s or until
+/// the last search ends (1.2 s at SWM-2's macOS batch time), with at least
+/// 25 locks sent while it mines: answered within 0009's gate, 50 ms at
+/// p99. The lane's batch time is measured over the whole run.
 #[test]
 fn vault_lock_is_answered_while_the_lane_mines() {
     let sites: Vec<String> = (0..4).map(|n| format!("https://v{n}.example")).collect();
@@ -692,7 +693,7 @@ fn vault_lock_is_answered_while_the_lane_mines() {
     let window = Instant::now();
     let mut locks = Vec::new();
     let mut next = window;
-    while window.elapsed() < Duration::from_secs(2) {
+    while window.elapsed() < Duration::from_secs(2) && lane.mined.len() < LONG.len() {
         if Instant::now() >= next {
             let id = lane.ask("vault.lock", json!({}), "chrome");
             locks.push((id, Instant::now()));
@@ -701,7 +702,12 @@ fn vault_lock_is_answered_while_the_lane_mines() {
         lane.step(Duration::from_millis(1));
     }
     let mined_in_window = lane.mined.len();
-    assert!(mined_in_window < LONG.len(), "the lane mined throughout");
+    let window = window.elapsed();
+    assert!(
+        locks.len() >= 25,
+        "{} locks while the lane mined",
+        locks.len()
+    );
     lane.until(Duration::from_secs(10), "the last locks", |lane| {
         locks.iter().all(|(id, _)| lane.responses.contains_key(id))
     });
@@ -721,7 +727,7 @@ fn vault_lock_is_answered_while_the_lane_mines() {
     let mining = lane.mined_at.values().max().copied().unwrap() - lane.ready_at[&ids[0]];
     let batches: u32 = LONG.iter().map(|(_, index)| index / 256 + 1).sum();
     eprintln!(
-        "[mining] vault.lock while mining ({mined_in_window} of 64 searches done in the window): \
+        "[mining] vault.lock while mining for {window:?} ({mined_in_window} of 64 searches done): \
          n {} p50 {p50:.1} ms p99 {p99:.1} ms max {max:.1} ms; {batches} batches in {mining:?}, \
          {:.3} ms a batch",
         samples.len(),
