@@ -20,6 +20,7 @@ const { splitTree } = require('./swarm-node');
 const { testKeys } = require('./swarm-world');
 const cases = require('./swarm-cases');
 const sections = require('./swarm-sections');
+const { buildShell } = require('./swarm-shell');
 const grammar = require('./swarm-grammar');
 const { buildGrammar } = require('./swarm-grammar-file');
 
@@ -198,7 +199,9 @@ async function buildMethods(env) {
     if (record.session) input.session = record.session;
     const entry = { id: spec.id, ...(spec.deviation ? { deviation: spec.deviation.id } : {}), ...input, steps: record.steps };
     if (spec.deviation) {
-      entry.core = spec.deviation.core;
+      // A core answer the generator makes from the reference (own-keys'
+      // createFeed: the reference's own path for a new feed of that name).
+      entry.core = typeof spec.deviation.core === 'function' ? await spec.deviation.core(env, spec, record) : spec.deviation.core;
       if (spec.deviation.also) entry.also = spec.deviation.also;
       if (spec.deviation.before) entry.core_before = spec.deviation.before;
     }
@@ -285,6 +288,7 @@ async function buildSwarm(checkout, meta, keysJson, dwebVerify) {
     gsoc: await timed('gsoc', () => gsoc),
     errors: await timed('errors', () => sections.buildErrors(env, methods)),
     stores: await timed('stores', () => sections.buildStores(env)),
+    shell: await timed('shell', () => buildShell(env)),
   };
   // The /bytes path of a large feed entry, as `bodies` writes it: the upload's
   // body (the data), ChunkSplitter's root of it, and the SOC that wraps it.
@@ -300,7 +304,7 @@ async function buildSwarm(checkout, meta, keysJson, dwebVerify) {
   }
   swarm.deviations = deviationsOf(swarm);
   const ordered = { meta: swarm.meta, formats: SWARM_FORMATS, deviations: swarm.deviations };
-  for (const key of ['methods', 'bodies', 'trees', 'stamps', 'feeds', 'gsoc', 'errors', 'stores']) ordered[key] = swarm[key];
+  for (const key of ['methods', 'bodies', 'trees', 'stamps', 'feeds', 'gsoc', 'errors', 'stores', 'shell']) ordered[key] = swarm[key];
   const grammarFile = await timed('grammar', () => buildGrammar(env, methods, env.nodeBodies, dwebVerify,
     { ...meta, packages: env.packages, design: '0015, SWM-1' }));
   // Every package file the run loaded, now that it has loaded them all.
@@ -313,15 +317,19 @@ const NO_CASE = {
   busy: 'no case: the reference has no queue, memory budget, Swarm I/O pool or mining queue to fill; SWM-4\'s and SWM-5\'s tests make it',
   'session-transport': 'no case: which network stack carries a call doesn\'t change what a page sees from a loopback node; SWM-5 checks the proxy and Tor',
   'store-writes': 'no case: the files\' bytes are the same; the durable write (0001, 0013) is the core\'s',
+  'history-retry': 'no case: it needs a history write that throws mid-request, which the reference\'s SQLite store never does here; '
+    + 'fc-swarm-provider\'s publish tests fail the write',
+  'identity-references-bound': 'no case: the bound is 1 MiB held, past any store Freedom writes; fc-swarm-provider\'s ops tests build stores that reach it',
+  'tag-owners-bound': 'no case: it takes 4,097 uploads whose page never polls the tag; fc-swarm-provider\'s tests make them',
 };
 const DEVIATION_IDS = ['feed-entry-bound', 'tar-paths', 'feed-wrap-root', 'reference-check', 'read-data-verified', 'read-pieces',
   'index-probe', 'index-allocation', 'stamps-one-read', 'deadlines', 'busy', 'reply-bounds', 'reply-syntax', 'batch-depth', 'error-body-bound', 'session-transport',
-  'transport-error-text', 'subscribe-proxy', 'history-bound', 'history-blobs', 'store-shapes', 'store-refusal', 'own-keys', 'legacy-dates',
-  'store-writes'];
+  'transport-error-text', 'subscribe-proxy', 'history-bound', 'history-blobs', 'store-shapes', 'store-refusal', 'own-keys', 'history-retry',
+  'legacy-dates', 'identity-references-bound', 'collation', 'owner-read-order', 'detach-timing', 'tag-owners-bound', 'store-writes'];
 
 function deviationsOf(swarm) {
   const where = Object.fromEntries(DEVIATION_IDS.map((id) => [id, []]));
-  for (const section of ['methods', 'bodies', 'feeds', 'errors', 'stores']) {
+  for (const section of ['methods', 'bodies', 'feeds', 'errors', 'stores', 'shell']) {
     for (const entry of swarm[section]) {
       for (const id of [entry.deviation, ...(entry.also || [])]) if (id) where[id].push(`${section}/${entry.id}`);
     }
@@ -382,7 +390,8 @@ const SWARM_FORMATS = {
     + 'and authorization), readiness (after_requests node requests in), vault_timer_reset, route_to_setup, page_event (connect) and delivered (a '
     + 'subscription\'s message), manifest_fetch. `after`: swarm-feeds.json\'s text, its backups, the publish history (getEntries()), and for a '
     + 'manifest case swarm-manifest-grants.json\'s text. A case marked deviation '
-    + 'records the reference\'s outcome, and `core` the design\'s.',
+    + 'records the reference\'s outcome, and `core` the design\'s (own-keys\' create-feed case: the core\'s { result, requests, after }, the '
+    + 'reference\'s own new-feed path for that name).',
   session: 'subscribe-proxy\'s world (design 0015, question 4): proxy and tor (on or off), node_kind, node_url (the node main\'s service '
     + 'registry names; a remote one\'s calls reach the fake node), node_loopback (main\'s own isLoopbackGatewayUrl over it, as bzz:\'s transport '
     + 'classifies the Ant node) and subscribe_check, main\'s answer to the core\'s subscribe check (shell.swarm_ready), the core\'s input: '
@@ -424,6 +433,28 @@ const SWARM_FORMATS = {
     + 'is the reference\'s refusal; for store-shapes, the feed store as the core holds it (`core_before`, each feed map rebuilt as '
     + 'sanitizeV2OriginEntry does) or a manifest file that doesn\'t parse, beside the same .bak copy; for legacy-dates, the legacy file with each '
     + 'timestamp the core doesn\'t take removed.',
+  shell: 'main\'s own methods (design 0015, Methods main calls; SWM-4\'s D5, D7 and D12), each case recorded from the reference\'s own code over '
+    + 'the fake node and the stores: { id, method, row (a node method\'s grammar row; swarm.feed:read has none yet, SWM-8\'s), deviation, world, '
+    + 'concurrent, steps, core, after }. world: node (as `node` above), clock, vault, and for a store op feeds and manifests (the files\' text or '
+    + 'null), grants, accounts (accounts.list\'s wallets), history (publish-history.sqlite\'s rows, each cell as stored, a BLOB as { blob: hex }). '
+    + 'A step: caller (shell or chrome); params in the wire form, a node method\'s as main\'s JSON (swarm.publish { kind, parts: [{ path?, bytes, '
+    + 'base64 | part }], name?, content_type?, index_document?, encrypt?, batch?, pin, deferred, history? }, swarm.feed { op, key, topic, reference?, '
+    + 'min_index?, batch? }, swarm.stamps { id? }, swarm.upload_status { tag_uid }), a store op\'s as `op` (a string) and each member typed '
+    + '(`typed` above); parts, part k\'s bytes main streams for a { part: k }; part_abort { part, error_code }, main ending a part its read failed on '
+    + '(the errno\'s name); clock and vault, the world\'s change before the step; reference { call, args (typed; a path or signer the run makes is named '
+    + 'in <…>), result | result_typed | error }, the reference\'s own call and its outcome (a batch as `stamps.mapped` writes it); handler { channel, '
+    + 'answer | answer_typed }, the IPC handler main keeps around the core\'s answer (freedom://publish\'s history wrap, `{ success }`); answer, '
+    + 'the core\'s, always typed (D5): { result_typed } or { error_typed }: a node method\'s error is the error its service throws as main\'s callers '
+    + 'read it { message, code?, status?, capacity? }, a store op\'s { name, message, code? }; swarm.publish answers normalizeUploadResult\'s '
+    + '{ reference, tag_uid, batch, bytes }, swarm.stamps mapPostageBatch\'s fields then the raw batch\'s exists and propagating (booleans) and '
+    + 'batchTTL (a finite number); requests, every node request (as in `methods`, with its row\'s verdict) and reply { status, status_text, '
+    + 'headers, body { bytes, base64 } up to 8 KiB else { bytes, sha256 } }; fetch { url, answer }, D6\'s shell.swarm_manifest for a check and main\'s '
+    + 'answer ({ status, body_base64 } with at most 8 KiB + 1 bytes, or { failed: true }); files { feeds, manifests } as the step answered. A '
+    + 'manifest check\'s token is crypto.randomBytes(24) in base64url, the nth SHA-256(`swarm vectors token <n>`)\'s first 24 bytes. concurrent: '
+    + 'the steps run at once, as it says. after: the files, the grants and, for swarm.publish and swarm.history, the history (getEntries(), or '
+    + 'the rows). A case marked deviation records the reference\'s outcome; `core` holds the core\'s: answers (each step\'s answer, in order), '
+    + 'files (each step\'s files as it answers), or for index-probe the methods\' text (the lookup\'s request is marked, and the core asks '
+    + 'feed_head with the reply\'s swarm-feed-index headers).',
 };
 
 module.exports = { buildSwarm, environment, loadPackages, BEE_JS, CORE_SDK };

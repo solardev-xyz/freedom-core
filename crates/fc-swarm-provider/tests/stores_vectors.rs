@@ -248,8 +248,8 @@ fn every_stores_case() {
         .map(|(d, id)| (d.as_str(), id.as_str()))
         .collect();
     assert_eq!(marked_str, want);
-    // The deviation index lists exactly these for each: the stores mark no
-    // case of another section's deviations, and no section marks these.
+    // The deviation index lists exactly these among each one's stores
+    // cases: the stores mark no case of another section's deviations.
     let mut by_deviation: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for (deviation, id) in &marked {
         by_deviation
@@ -258,11 +258,14 @@ fn every_stores_case() {
             .push(format!("stores/{id}"));
     }
     for (deviation, ids) in &by_deviation {
+        // Another section's cases of these (own-keys' createFeed case,
+        // the `shell` section's) are its own tests'.
         let listed: Vec<&str> = field(field(&deviations, deviation), "cases")
             .as_array()
             .unwrap()
             .iter()
             .map(str_of)
+            .filter(|c| c.starts_with("stores/"))
             .collect();
         assert_eq!(listed, *ids, "{deviation}");
     }
