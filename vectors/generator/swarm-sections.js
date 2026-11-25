@@ -477,7 +477,13 @@ const RAW_BATCHES = [
   ['missing-label', (({ label, ...rest }) => rest)(C.batch())],
   ['amount-number', C.batch({ amount: 5 })],
   ['extra-fields', C.batch({ extra: true, owner: '0x00' })],
+  // zod's number admits a fractional depth, which bee-js raises 2 to; the
+  // core refuses the batch instead (batch-depth).
+  ['depth-fraction', C.batch({ depth: 22.5 })],
+  ['bucket-depth-fraction', C.batch({ bucketDepth: 16.5 })],
 ];
+const BATCH_DEPTH = { error: { name: 'Error', message: 'Swarm node reply has a non-integer batch depth' } };
+const MAPPED_DEVIATIONS = { 'depth-fraction': BATCH_DEPTH, 'bucket-depth-fraction': BATCH_DEPTH };
 
 const SELECT_SETS = [
   ['usable', C.STAMPS.usable], ['two', C.STAMPS.two], ['none', C.STAMPS.none], ['small', C.STAMPS.small],
@@ -510,7 +516,7 @@ async function buildStamps(env) {
         return { classified, error: errorRecord(err) };
       }
     });
-    mapped.push({ id, raw, ...record });
+    mapped.push({ id, raw, ...record, ...(MAPPED_DEVIATIONS[id] ? { deviation: 'batch-depth', core: MAPPED_DEVIATIONS[id] } : {}) });
   }
   const select = [];
   for (const [setId, stamps] of SELECT_SETS) {
@@ -523,7 +529,10 @@ async function buildStamps(env) {
           return { error: errorRecord(err), stamps_reads: node.requests.length };
         }
       });
-      select.push({ id: `${setId}/${callId}`, stamps, size, options, ...record });
+      // The core reads /stamps once per write (stamps-one-read): where the
+      // reference reads it twice, the core gives the same answer from one.
+      const once = record.stamps_reads > 1 ? { deviation: 'stamps-one-read', core: { stamps_reads: 1 } } : {};
+      select.push({ id: `${setId}/${callId}`, stamps, size, options, ...record, ...once });
     }
   }
   return { mapped, select };
@@ -582,7 +591,10 @@ async function buildErrors(env, methods) {
   ];
   for (const [site, method, fixedPath, call] of sites) {
     for (const [bodyId, body] of ERROR_BODIES) {
-      for (const [status, statusText] of site === 'bee-js-json' ? ERROR_STATUSES : [ERROR_STATUSES[0]]) {
+      // fetchNode's own text needs a status readFeedPayload doesn't read as
+      // an empty feed (it reads a 404 or a 500 so): a 503 too.
+      const statuses = site === 'bee-js-json' ? ERROR_STATUSES : site === 'fetch-node' ? [ERROR_STATUSES[0], ERROR_STATUSES[3]] : [ERROR_STATUSES[0]];
+      for (const [status, statusText] of statuses) {
         const match = fixedPath ? { method, path: fixedPath } : { method, prefix: method === 'GET' ? '/feeds/' : '/soc/' };
         const reply = { status, statusText, ...body };
         const record = await withReference(env, { node: { rules: [{ match, reply }] } }, async (ref, node, world) => {

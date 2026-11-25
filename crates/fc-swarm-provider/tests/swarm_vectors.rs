@@ -288,11 +288,14 @@ fn stamps_mapped() {
     let cases: Vec<_> = get(get(index.root(), "stamps"), "mapped")
         .children()
         .collect();
-    assert_eq!(cases.len(), 21);
+    assert_eq!(cases.len(), 23);
     for case in cases {
         let id = string(get(case, "id"));
+        // batch-depth: a fractional depth the reference maps, which the
+        // core refuses; its classification is still the reference's.
+        let refused = case.get("deviation").map(string);
         assert!(
-            case.get("deviation").is_none(),
+            refused.is_none() || refused.as_deref() == Some("batch-depth"),
             "{id}: a deviation to handle"
         );
         let reply = format!("{{\"stamps\":[{}]}}", get(case, "raw").raw());
@@ -322,6 +325,11 @@ fn stamps_mapped() {
         );
         assert_eq!(keys(classified).len(), 5, "{id}");
 
+        if refused.is_some() {
+            let err = stamps.get_all().unwrap_err();
+            check_error(&id, get(get(case, "core"), "error"), &Got::js(&err));
+            continue;
+        }
         match (case.get("mapped"), case.get("error")) {
             (Some(want), None) => {
                 let all = stamps.get_all().unwrap();
@@ -369,12 +377,18 @@ fn stamps_select() {
     assert_eq!(cases.len(), 44);
     for case in cases {
         let id = string(get(case, "id"));
-        // No select case marks a deviation; one that did would need its
-        // `core` here.
-        assert!(
-            case.get("deviation").is_none(),
-            "{id}: a deviation to handle"
-        );
+        // Where the reference reads /stamps twice it is marked
+        // stamps-one-read, with the core's one read as `core`; the batch or
+        // error is the same, and is checked below.
+        if get(case, "stamps_reads").number() > 1.0 {
+            assert!(get(case, "deviation").is_str("stamps-one-read"), "{id}");
+            assert_eq!(get(get(case, "core"), "stamps_reads").number(), 1.0, "{id}");
+        } else {
+            assert!(
+                case.get("deviation").is_none(),
+                "{id}: a deviation to handle"
+            );
+        }
         let stamps = read_stamps(get(case, "stamps").raw().as_bytes()).unwrap();
         let size = get(case, "size").number();
         let opts = options(get(case, "options"));
@@ -456,7 +470,7 @@ fn errors_are_all_played() {
             panic!("{}: an errors kind no test plays", string(get(case, "id")));
         }
     }
-    assert_eq!((http, mapping), (180, 2));
+    assert_eq!((http, mapping), (198, 2));
 }
 
 #[test]
@@ -467,7 +481,7 @@ fn errors_http() {
         .children()
         .filter(|c| get(*c, "kind").is_str("http_error"))
         .collect();
-    assert_eq!(cases.len(), 180);
+    assert_eq!(cases.len(), 198);
     for case in cases {
         let id = string(get(case, "id"));
         let site = site(&string(get(case, "site")));
@@ -528,6 +542,9 @@ enum Rest {
     /// The batch was chosen and the upload went (checked); the method
     /// answered its result.
     Selected,
+    /// A JSON success reply that doesn't parse (deviation `reply-syntax`):
+    /// the core's fixed text, the case's `core`.
+    Syntax,
     /// Decided by what only the method machines do (a later part).
     Machines(&'static str),
 }
@@ -544,6 +561,7 @@ const VERIFIED_WALK: &str =
 const TRANSPORT: &str = "transport-error-text: a transport failure's text is the machines'";
 
 const REST: &[(&str, Rest)] = &[
+    ("write-soc-node-not-json", Rest::Syntax),
     ("publish-data-stamps-propagating", Rest::Selected),
     ("publish-data-stamps-longest-ttl", Rest::Selected),
     (
@@ -715,6 +733,7 @@ const REST: &[(&str, Rest)] = &[
 /// The reason phrases the fake node sends (Node's `http.STATUS_CODES`).
 fn reason_phrase(status: u16) -> &'static str {
     match status {
+        200 => "OK",
         307 => "Temporary Redirect",
         400 => "Bad Request",
         402 => "Payment Required",
@@ -904,8 +923,34 @@ fn play_stamps(id: &str, case: Value<'_, '_>, step: Value<'_, '_>) -> Played {
         check_page(id, error.unwrap(), &page);
         return Played::DecidedByStamps;
     }
-    let stamps = match read_stamps(&stamps_reply(get(case, "node"))) {
+    // A rule for GET /stamps answers before the stored batches.
+    let ruled = get(case, "node")
+        .get("rules")
+        .into_iter()
+        .flat_map(|r| r.children())
+        .any(|rule| {
+            get(rule, "match")
+                .get("path")
+                .is_some_and(|p| p.is_str("/stamps"))
+        });
+    let reply = if ruled {
+        node_reply(case, **first).2
+    } else {
+        stamps_reply(get(case, "node"))
+    };
+    let stamps = match read_stamps(&reply) {
         Ok(stamps) => stamps,
+        Err(ReplyError::Syntax(_)) => {
+            // reply-syntax: the page read V8's SyntaxError text; the core's
+            // answer is the case's `core`.
+            assert_eq!(deviation.as_deref(), Some("reply-syntax"), "{id}");
+            check_page(
+                id,
+                get(get(case, "core"), "error"),
+                &errors::reply_not_json(),
+            );
+            return Played::DecidedByStamps;
+        }
         Err(ReplyError::TooLarge) => {
             // reply-bounds: the reference read it whole and went on; the
             // core's answer is the case's `core`.
@@ -1006,6 +1051,14 @@ fn errors_mapping() {
                 Rest::Machines(why) => {
                     assert!(!why.is_empty(), "{id}");
                     machines += 1;
+                }
+                Rest::Syntax => {
+                    assert!(get(case, "deviation").is_str("reply-syntax"), "{id}");
+                    check_page(
+                        &id,
+                        get(get(case, "core"), "error"),
+                        &errors::reply_not_json(),
+                    );
                 }
                 Rest::Mismatch(read) => {
                     let page = errors::map_chunk_read_error(&errors::chunk_type_mismatch(read));
