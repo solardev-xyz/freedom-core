@@ -1189,8 +1189,17 @@ fn check_calls(id: &str, scenario: V<'_, '_>, thread: &Thread<'_>, earlier: bool
 
 /// The values the row binds, beyond the scenario's exact calls: the topic
 /// and one owner throughout a feed row, each feed `chunk` at the address
-/// main builds from its `feed`, and the SOC's `<id>`.
-fn check_binds(id: &str, row: &str, key: &JsString, params: &Value, thread: &Thread<'_>) {
+/// main builds from its `feed`, a feed write's `<id>` at the index its
+/// last `feed` asked (or the next one), a raw SOC's `<id>` the page's,
+/// and a large entry's SOC wrapping `bytes_up`'s reference.
+fn check_binds(
+    id: &str,
+    row: &str,
+    key: &JsString,
+    params: &Value,
+    outcome: &Outcome,
+    thread: &Thread<'_>,
+) {
     let feed_row = matches!(row, "createFeed" | "updateFeed" | "writeFeedEntry");
     let name = params
         .get(if row == "updateFeed" { "feedId" } else { "name" })
@@ -1198,7 +1207,9 @@ fn check_binds(id: &str, row: &str, key: &JsString, params: &Value, thread: &Thr
         .map(|n| n.as_str().to_owned());
     let topic = name.map(|n| fc_swarm::feed::topic(&format!("{}/{n}", key.as_str())));
     let mut owner: Option<String> = None;
-    let mut index_asked: Option<u64> = None;
+    // The indexes whose update a probe found.
+    let mut probed: Vec<u64> = Vec::new();
+    let mut uploaded: Option<String> = None;
     for logged in &thread.calls {
         let call = &logged.call;
         let segments: Vec<&str> = call.path.split('/').collect();
@@ -1218,14 +1229,52 @@ fn check_binds(id: &str, row: &str, key: &JsString, params: &Value, thread: &Thr
                 let feed = call.feed.unwrap_or_else(|| panic!("{id}: a feed chunk"));
                 let address = verify::feed_update_address(&feed.owner, &topic.unwrap(), feed.index);
                 assert_eq!(call.path, format!("/chunks/{}", hex(&address)), "{id}");
-                index_asked = Some(feed.index);
+                if logged.body.is_some() {
+                    // An update that exists.
+                    probed.push(feed.index);
+                }
+            }
+            Form::BytesUp => {
+                let reply = logged.body.as_ref().map(|b| String::from_utf8_lossy(b).into_owned());
+                uploaded = reply.and_then(|r| {
+                    let parsed = fc_json::parse(&r).ok()?;
+                    Some(parsed.get("reference")?.as_str()?.to_owned())
+                });
             }
             Form::SocUp => {
+                let body = match &call.body {
+                    Some(Body::Base64(bytes)) => bytes.clone(),
+                    other => panic!("{id}: a SOC body {other:?}"),
+                };
                 if row == "writeSingleOwnerChunk" {
                     let identifier = params.get("identifier").as_js_string().unwrap();
                     assert_eq!(segments[3], identifier.as_str().to_lowercase(), "{id}: <id>");
-                } else {
-                    let _ = index_asked;
+                    continue;
+                }
+                // The identifier is keccak256(<t> ‖ the write's index): the
+                // explicit one, or the lookup's, which a write that went
+                // through answers; and past every probe that found its
+                // update.
+                let index = match (params.get("index"), outcome) {
+                    (Value::Number(n), _) => Some(*n as u64),
+                    (_, Outcome::Result(result)) => match result.get("index") {
+                        Value::Number(n) => Some(*n as u64),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(index) = index {
+                    assert_eq!(
+                        segments[3],
+                        hex(&verify::feed_update_id(&topic.unwrap(), index)),
+                        "{id}: <id>"
+                    );
+                    assert!(probed.iter().all(|p| *p < index), "{id}: {probed:?}");
+                }
+                if body.len() > 8 + 4096 || uploaded.is_some() {
+                    let span: [u8; 8] = body[..8].try_into().unwrap();
+                    let address = verify::address_of(&span, &body[8..]).unwrap();
+                    assert_eq!(Some(hex(&address)), uploaded, "{id}: the root bytes_up named");
                 }
             }
             _ => {}
@@ -1330,12 +1379,6 @@ fn count(step: V<'_, '_>, name: &str) -> usize {
     step.get("events")
         .map(|e| e.children().filter(|e| e.get(name).is_some()).count())
         .unwrap_or(0)
-}
-
-/// The step's answer on a fresh outcome: the case's `core` where a
-/// deviation changes it, else the step's.
-fn check(sid: &str, want: Want, last: bool, case: V<'_, '_>, step: V<'_, '_>, outcome: &Outcome) {
-    check_outcome(sid, want, last, case, step, outcome);
 }
 
 // ---------------------------------------------------------------------------
@@ -1449,7 +1492,7 @@ fn feed_and_soc_writes() {
             played += 1;
 
             let last = k + 1 == steps.len();
-            check(&sid, want, last, case, *step, &outcome);
+            check_outcome(&sid, want, last, case, *step, &outcome);
 
             let name = handoff.name.clone().unwrap();
             let row = row_of(&name);
@@ -1460,7 +1503,7 @@ fn feed_and_soc_writes() {
                 cancels_after_outcome: thread.cancels_after_outcome,
             };
             check_row_shape(&sid, grammar, row, &shape);
-            check_binds(&sid, row, &handoff.key, &handoff.params, &thread);
+            check_binds(&sid, row, &handoff.key, &handoff.params, &outcome, &thread);
             // The core's own error ends the request where the reference
             // went on.
             let earlier = want == Want::Exact && last && get(case, "core").get("error").is_some();
@@ -1884,15 +1927,12 @@ fn shared_identity() -> Outcome {
     Outcome::Error(fc_swarm_provider::methods::soc_write::shared_identity())
 }
 
-fn keys_for_gate() -> (String,) {
-    (text_of("keys.json"),)
-}
 
 /// The change wins: paused after the first SW-1 check (at the vault's
 /// owner), the change lands; the re-check refuses: no signature, no upload.
 #[test]
 fn gate_the_change_wins() {
-    let (text,) = keys_for_gate();
+    let text = text_of("keys.json");
     let index = Index::new(&text).unwrap();
     let keys = keys(&index);
     let cases: [(FeedChange, Outcome); 3] = [
@@ -1927,7 +1967,7 @@ fn gate_the_change_wins() {
 /// next raw SOC is refused.
 #[test]
 fn gate_the_change_waits() {
-    let (text,) = keys_for_gate();
+    let text = text_of("keys.json");
     let index = Index::new(&text).unwrap();
     let keys = keys(&index);
     for change in [take_index(), switch_to_shared(), revoke()] {
@@ -1995,7 +2035,7 @@ fn gate_the_change_waits() {
 /// nothing is uploaded.
 #[test]
 fn gate_cancel_during_the_hold() {
-    let (text,) = keys_for_gate();
+    let text = text_of("keys.json");
     let index = Index::new(&text).unwrap();
     let keys = keys(&index);
     for _deadline in [false, true] {
@@ -2025,7 +2065,7 @@ fn gate_cancel_during_the_hold() {
 /// the hold and the SOC as they were.
 #[test]
 fn gate_a_write_failure_during_the_hold() {
-    let (text,) = keys_for_gate();
+    let text = text_of("keys.json");
     let index = Index::new(&text).unwrap();
     let keys = keys(&index);
     // The deferred change's own write fails.
@@ -2074,7 +2114,7 @@ fn gate_a_write_failure_during_the_hold() {
 /// during the hold takes a fresh index and isn't deferred.
 #[test]
 fn gate_allocation_during_the_hold() {
-    let (text,) = keys_for_gate();
+    let text = text_of("keys.json");
     let index = Index::new(&text).unwrap();
     let keys = keys(&index);
     let mut thread = gate_thread(&keys);
@@ -2109,7 +2149,7 @@ fn gate_allocation_during_the_hold() {
 /// and #89's identity first.
 #[test]
 fn sw1_cases() {
-    let (text,) = keys_for_gate();
+    let text = text_of("keys.json");
     let index = Index::new(&text).unwrap();
     let keys = keys(&index);
     let store = |a_identity: &str, a_active: &str, b_identity: &str| {
@@ -2168,7 +2208,7 @@ fn sw1_cases() {
 /// by the store (`store-refusal`) changes nothing a request then reads.
 #[test]
 fn a_refused_change_changes_nothing_a_request_reads() {
-    let (text,) = keys_for_gate();
+    let text = text_of("keys.json");
     let index = Index::new(&text).unwrap();
     let keys = keys(&index);
     let mut thread = gate_thread(&keys);
