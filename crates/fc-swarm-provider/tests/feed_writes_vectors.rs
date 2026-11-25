@@ -71,23 +71,13 @@ const FIVE: [&str; 5] = [
 
 /// Cases of the five methods this test doesn't play, each with why. The
 /// test fails on any case of the five it neither plays nor names here.
-const LEFT_OUT: &[(&str, &str)] = &[
-    (
-        "write-feed-explicit-index-timeout",
-        "the page gives up as the explicit index's chunk read reaches the node (`abortPage`); the \
-         case is marked `deadlines`, which the core answers `cancelled` with nothing more asked, \
-         but its history row then ends with `cancelled` where the reference's has `Request \
-         aborted`, which this loop doesn't model yet. `the_page_giving_up_is_a_cancel` plays it \
-         as the core's",
-    ),
-    (
-        "write-soc-no-page",
-        "`executeSwarmMethod` called with no page (`page: false`) reaches `pageSocSigner`'s refusal \
+const LEFT_OUT: &[(&str, &str)] = &[(
+    "write-soc-no-page",
+    "`executeSwarmMethod` called with no page (`page: false`) reaches `pageSocSigner`'s refusal \
          after the history row; the core's `swarm.request` is always a page's (0011), so no raw \
          SOC reaches it without one, and main's own SOCs (`swarm.feed`) sign only feed updates \
          under the Bee wallet key",
-    ),
-];
+)];
 
 /// The deviations a case of the five marks, and what the core answers.
 fn core_answer(deviation: &str, core: V<'_, '_>) -> Want {
@@ -1377,7 +1367,11 @@ fn expected_history(case: V<'_, '_>, want: Want) -> JsValue {
             .get("error")
             .map(|e| string(get(e, "message"))),
         Want::Transport => Some(fc_swarm_provider::machine::node::ERROR_TEXT.to_owned()),
-        _ => None,
+        // The page's timer (`deadlines`): a request that ends without its
+        // machine ends its row failed with `cancelled` (design 0015, the
+        // amendment "SWM-3's publish").
+        Want::Cancelled => Some("cancelled".to_owned()),
+        Want::Reference => None,
     };
     let Some(message) = core_error else {
         return rows;
@@ -1517,6 +1511,14 @@ fn feed_and_soc_writes() {
 
             let last = k + 1 == steps.len();
             check_outcome(&sid, want, last, case, *step, &outcome);
+            if want == Want::Cancelled && last {
+                assert!(
+                    thread.cancels_after_outcome > 0,
+                    "{sid}: its open call cancelled"
+                );
+                assert!(thread.vault.signed.is_empty(), "{sid}: nothing signed");
+                assert_eq!(thread.node.soc_posts, 0, "{sid}: nothing uploaded");
+            }
 
             let name = handoff.name.clone().unwrap();
             let row = row_of(&name);
@@ -1530,7 +1532,9 @@ fn feed_and_soc_writes() {
             check_binds(&sid, row, &handoff.key, &handoff.params, &outcome, &thread);
             // The core's own error ends the request where the reference
             // went on.
-            let earlier = want == Want::Exact && last && get(case, "core").get("error").is_some();
+            let earlier = last
+                && (want == Want::Cancelled
+                    || (want == Want::Exact && get(case, "core").get("error").is_some()));
             match scenarios.get(&sid) {
                 // The core refuses before any node call (`core_before`):
                 // the scenario's calls are the reference's.
@@ -1635,47 +1639,10 @@ fn feed_and_soc_writes() {
     }
     assert_eq!(
         (played, main_answered),
-        (181, 11),
+        (182, 11),
         "steps played and main's own"
     );
-    assert_eq!(scenarios_used.len(), 99);
-}
-
-/// `write-feed-explicit-index-timeout` as the core answers it: the page
-/// gives up as the existence check reaches the node, so the request ends
-/// `cancelled`, nothing more is asked, and the history row is left
-/// `uploading` (the row's end is the thread's, at the cancel: SWM-4).
-#[test]
-fn the_page_giving_up_is_a_cancel() {
-    let v = vectors();
-    let index = Index::new(&v.text).unwrap();
-    let keys_index = Index::new(&v.keys).unwrap();
-    let keys = keys(&keys_index);
-    let case = get(index.root(), "methods")
-        .children()
-        .find(|c| get(*c, "id").is_str("write-feed-explicit-index-timeout"))
-        .unwrap();
-    let step = get(case, "steps").children().next().unwrap();
-    let origin = js(get(case, "origin"));
-    let mut thread = Thread::new(WriteWorld::of(case), &keys, WriteNode::of(case, &keys));
-    thread.readiness = publish_readiness(case);
-    let mut probe = TestWorld::new(thread.world.now);
-    let handoff = handoff(step, &origin, &mut probe).unwrap();
-    main_writes(&mut thread, case, step, &handoff.key);
-    thread.start(&Call {
-        method: handoff.method,
-        params: handoff.params,
-        key: handoff.key,
-        approval: approval_of(step),
-    });
-    assert_eq!(thread.run(), Outcome::Cancelled);
-    assert_eq!(
-        thread.calls.len(),
-        2,
-        "the stamps, then the existence check"
-    );
-    assert!(thread.vault.signed.is_empty());
-    assert_eq!(thread.node.soc_posts, 0);
+    assert_eq!(scenarios_used.len(), 100);
 }
 
 // ---------------------------------------------------------------------------
@@ -2356,4 +2323,139 @@ fn a_feed_write_waits_for_its_topics_turn() {
         forms(&thread),
         [Form::Stamps, Form::FeedHead, Form::Chunk, Form::SocUp]
     );
+}
+
+/// A feed store at its bound (design 0015, Budgets: `store_full`): the
+/// feed's record would pass it, so the write fails -32603 `Swarm feed store
+/// is full`, its row with the same text, and the store stays as it was.
+#[test]
+fn a_full_feed_store_refuses_the_record() {
+    use fc_swarm_provider::stores::feeds::MAX_FILE_BYTES;
+    let text = text_of("keys.json");
+    let index = Index::new(&text).unwrap();
+    let keys = keys(&index);
+    let store_of = |filler: usize| {
+        let text = format!(
+            r#"{{"version":2,"nextPublisherKeyIndex":0,"origins":{{"https://app.example":{{"activeIdentityId":"bee-wallet","identities":{{"bee-wallet":{{"id":"bee-wallet","mode":"bee-wallet","publisherKeyIndex":null,"walletIndex":null,"label":"Bee wallet identity","createdAt":1,"lastUsedAt":null}}}},"feedGranted":true,"grantedAt":1,"feeds":{{"big":{{"topic":"{}"}}}}}}}}}}"#,
+            "x".repeat(filler)
+        );
+        FeedStore::load(Some(text.as_bytes()), 0, |_| false).store
+    };
+    // Ten bytes under the bound.
+    let probe = store_of(1000).text().unwrap().len();
+    let store = store_of(1000 + MAX_FILE_BYTES - 10 - probe);
+    assert_eq!(store.text().unwrap().len(), MAX_FILE_BYTES - 10);
+    let key = JsString::from("https://app.example");
+    let mut thread = Thread::new(site_world(&key, store.clone()), &keys, WriteNode::new());
+    thread.node.stamps = Some(STAMPS.to_owned());
+    thread.start(&Call {
+        method: Value::str("swarm_createFeed"),
+        params: Value::object([("name", Value::str("blog"))]),
+        key,
+        approval: Some(Approval::User),
+    });
+    let full = Failure::internal("Swarm feed store is full");
+    assert_eq!(thread.run(), Outcome::Error(full));
+    assert_eq!(*thread.world.keeper.store(), store, "the store unchanged");
+    let rows = thread.history();
+    let row = &rows.as_array().unwrap()[0];
+    assert_eq!(row.get("status").and_then(JsValue::as_str), Some("failed"));
+    assert_eq!(
+        row.get("errorMessage").and_then(JsValue::as_str),
+        Some("Swarm feed store is full")
+    );
+}
+
+/// A usable batch, as the cases' nodes answer `/stamps`.
+const STAMPS: &str = r#"{"stamps":[{"batchID":"a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1","utilization":0,"usable":true,"label":"freedom","depth":22,"amount":"100000000000","bucketDepth":16,"blockNumber":1000,"immutableFlag":true,"exists":true,"batchTTL":864000}]}"#;
+
+/// `bytes_up`'s `swarm-tag`, read as bee-js 13.2.0's `bytes.upload` reads
+/// it (`makeTagUid`: `z.coerce.number().min(0)`): a header that isn't a
+/// non-negative number fails the write with zod's text, the texts below
+/// being what the reference's install throws for each; a missing or empty
+/// one is no tag, and the write goes on.
+#[test]
+fn a_large_entrys_tag_reads_as_bee_js() {
+    let text = text_of("keys.json");
+    let index = Index::new(&text).unwrap();
+    let keys = keys(&index);
+    let nan = "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"received\": \"NaN\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected number, received NaN\"\n  }\n]";
+    let infinity = "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"received\": \"Infinity\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected number, received Infinity\"\n  }\n]";
+    let small = "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": 0,\n    \"inclusive\": true,\n    \"path\": [],\n    \"message\": \"Too small: expected number to be >=0\"\n  }\n]";
+    let data = content("tag/5000", 5000);
+    let root = hex(&fc_swarm::chunker::root_of(&data).unwrap().address());
+    let cases: [(Option<&str>, Option<&str>); 9] = [
+        (Some("abc"), Some(nan)),
+        (Some("1, 2"), Some(nan)),
+        (Some("Infinity"), Some(infinity)),
+        (Some("-1"), Some(small)),
+        (None, None),
+        (Some(""), None),
+        (Some("0x10"), None),
+        (Some(" 7 "), None),
+        (Some("-0"), None),
+    ];
+    for (tag, want) in cases {
+        let (key, mut store) = feed_site();
+        let record = fc_json::parse(&format!(
+            r#"{{"topic":"t","owner":"o","manifestReference":"{}","identityId":"bee-wallet"}}"#,
+            "cd".repeat(32)
+        ))
+        .unwrap();
+        store
+            .set_feed(&key, &JsString::from("blog"), &record, 1)
+            .unwrap();
+        let mut node = WriteNode::new();
+        node.stamps = Some(STAMPS.to_owned());
+        let mut reply = ReplySpec::ok(
+            format!(r#"{{"reference":"{root}"}}"#).into_bytes(),
+            "application/json; charset=utf-8",
+        );
+        reply.status = 201;
+        reply.status_text = "Created".to_owned();
+        if let Some(tag) = tag {
+            reply.headers.push(("swarm-tag".to_owned(), tag.to_owned()));
+        }
+        node.rules.push(WriteRule {
+            method: Some("POST".to_owned()),
+            path: Some("/bytes".to_owned()),
+            prefix: None,
+            reply,
+            world: None,
+        });
+        let mut thread = Thread::new(site_world(&key, store), &keys, node);
+        thread.start(&Call {
+            method: Value::str("swarm_writeFeedEntry"),
+            params: Value::object([
+                ("name", Value::str("blog")),
+                (
+                    "data",
+                    Value::Bytes(fc_swarm_provider::value::Bytes {
+                        len: data.len() as u64,
+                        kind: fc_swarm_provider::value::BytesKind::Uint8Array,
+                        source: fc_swarm_provider::value::Source::Inline(data.clone()),
+                        data: true,
+                    }),
+                ),
+            ]),
+            key,
+            approval: Some(Approval::User),
+        });
+        let outcome = thread.run();
+        match want {
+            Some(text) => {
+                assert_eq!(outcome, Outcome::Error(Failure::internal(text)), "{tag:?}");
+                assert!(thread.vault.signed.is_empty(), "{tag:?}: nothing signed");
+                assert_eq!(thread.node.soc_posts, 0, "{tag:?}");
+            }
+            None => {
+                assert_eq!(
+                    outcome,
+                    Outcome::Result(Value::object([("index", Value::int(0))])),
+                    "{tag:?}"
+                );
+                assert_eq!(thread.node.soc_posts, 1, "{tag:?}");
+            }
+        }
+    }
 }
