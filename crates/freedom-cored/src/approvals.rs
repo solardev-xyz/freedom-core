@@ -410,9 +410,10 @@ fn hash_needs_page() -> ErrorBody {
 
 /// `swarm.sign_soc` without an `authorization` (design 0012, Q8): main's
 /// own SOC, under `shell`, signs on main's word as before. A page's needs
-/// its Swarm grant, presented as `{ swarm, soc }` (APR-4c), and the
-/// chrome's a wallet-kind token, which no kind binds for a SOC: both are
-/// refused before a key is touched.
+/// its Swarm grant, presented as `{ swarm, soc }` (APR-4c), and is refused
+/// before a key is touched. The chrome never gets here: from SWM-4 the
+/// method table refuses its call (design 0015); its arm refuses all the
+/// same.
 pub fn soc_without_authorization(context: &Context) -> Result<(), ErrorBody> {
     match context.caller {
         CallerKind::Shell => Ok(()),
@@ -1438,8 +1439,8 @@ impl Approvals {
             _ => return Err(invalid("soc: expected feed or raw")),
         };
         // A grant answers only a page, as a standing rule does on `sign.*`:
-        // main's own SOC takes none, and the chrome's needs a wallet-kind
-        // token, which no kind binds for a SOC.
+        // main's own SOC takes none. The chrome reaches no SOC (design
+        // 0015, SWM-4: the method table refuses it).
         let Some(page) = page_context(context)? else {
             return Err(not_authorized(
                 "no_rule",

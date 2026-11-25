@@ -230,11 +230,13 @@ pub const METHODS: &[Method] = &[
     row("keys.addresses", CS, false, NOW),
     row("keys.radicle_did", CS, false, NOW),
     // Design 0012: a page signs as `page`, with its `PageContext`, and an
-    // authorization is checked when one is present (APR-3).
+    // authorization is checked when one is present (APR-3). A SOC is a
+    // page's or main's own: the chrome lost it at SWM-4 (design 0015's
+    // amendment to 0002), and the row goes at SWM-9.
     row("sign.transaction", PCS, false, NOW),
     row("sign.message", PCS, false, NOW),
     row("sign.typed_data", PCS, false, NOW),
-    row("swarm.sign_soc", PCS, false, NOW),
+    row("swarm.sign_soc", PS, false, NOW),
     row("typed_data.hash", CS, false, NOW),
     row("naming.configure", CS, false, NOW),
     row("naming.availability", CS, false, NOW),
@@ -487,7 +489,8 @@ mod tests {
             ]
         );
         // Design 0012, API: who reaches each grant method, and
-        // `approval.issue`, which no page reaches from APR-7.
+        // `approval.issue`, which no page reaches from APR-7; and design
+        // 0015's `swarm.sign_soc`.
         for (name, page, chrome, shell) in [
             ("approval.issue", false, true, true),
             ("approval.check", true, false, false),
@@ -499,6 +502,8 @@ mod tests {
             ("approval.forget_account", false, false, true),
             ("approval.remember", true, false, false),
             ("eip1193.request", true, false, false),
+            // Design 0015 (SWM-4): the chrome signs no SOC.
+            ("swarm.sign_soc", true, false, true),
         ] {
             for (caller, allowed) in [
                 (CallerKind::Page, page),
