@@ -2267,3 +2267,123 @@ fn a_failed_write_after_the_end_is_retried_once() {
         }
     }
 }
+
+/// The request ends (a cancel, `busy`, a protocol error) while the
+/// machine's own last write of the row is in flight: nothing more is asked
+/// (no second first write); if that write fails, the failed update with
+/// its error follows once, unless the write was already the machine's
+/// retry; a second failure is dropped (`history-retry`).
+#[test]
+fn an_end_racing_the_last_write_keeps_its_retry() {
+    let stamps_500 = ReplySpec {
+        status: 500,
+        status_text: "Internal Server Error".to_owned(),
+        headers: Vec::new(),
+        body: br#"{"code":500,"message":"stamps failed"}"#.to_vec(),
+        ..ReplySpec::ok(Vec::new(), "")
+    };
+    for end in ["cancel", "busy", "protocol"] {
+        for (at, failures) in [("last write", 1), ("last write", 2), ("its retry", 1)] {
+            let what = format!("{end} at the {at}, {failures} failure(s)");
+            let node = Node {
+                rules: vec![rule("GET", "/stamps", stamps_500.clone())],
+                ..Node::new()
+            };
+            let mut world = site_world();
+            let db = HistoryDb::open(CLOCK);
+            let call = Call {
+                method: Value::str("swarm_publishChunk"),
+                params: Value::object([("data", bytes_value(b"x".to_vec()))]),
+                key: JsString::from(KEY),
+                approval: Some(Approval::User),
+            };
+            let mut request = Request::start(&call, &mut world).unwrap();
+            // Run up to the machine's last write: the failed update after
+            // /stamps' 500.
+            let mut queue: VecDeque<Effect> = request.take_effects().into();
+            let last = loop {
+                let Some(Effect::Ask(ask)) = queue.pop_front() else {
+                    panic!("{what}: no last write")
+                };
+                let event = match &ask.need {
+                    Need::Ready(_) => Event::Ready(Ok(())),
+                    Need::Write(StoreWrite::HistoryInsert(s)) => Event::Inserted(Ok(db.insert(s))),
+                    Need::Write(StoreWrite::History(s)) if s[0].sql == history::TRIM_SQL => {
+                        db.run(&s[0]);
+                        Event::Written(Ok(()))
+                    }
+                    Need::Write(StoreWrite::History(_)) => break ask,
+                    Need::Node(call) => forward(&node.reply("GET", "/stamps"), call).1.remove(0),
+                    other => panic!("{what}: {other:?}"),
+                };
+                request.answer(&mut world, ask.id, event);
+                queue.extend(request.take_effects());
+            };
+            let mut open = last.id;
+            if at == "its retry" {
+                // The last write failed before the end: the machine's retry
+                // is the write in flight.
+                request.answer(
+                    &mut world,
+                    open,
+                    Event::Written(Err(JsString::from("write failed 0"))),
+                );
+                let Some(Effect::Ask(retry)) = request.take_effects().pop() else {
+                    panic!("{what}: the machine's retry")
+                };
+                open = retry.id;
+            }
+            match end {
+                "cancel" => request.cancel(),
+                "busy" => request.busy(),
+                _ => request.answer(&mut world, AskId(999), Event::End),
+            }
+            assert!(
+                !request
+                    .take_effects()
+                    .iter()
+                    .any(|e| matches!(e, Effect::Ask(_))),
+                "{what}: no second first write"
+            );
+            request.answer(
+                &mut world,
+                open,
+                Event::Written(Err(JsString::from("write failed 1"))),
+            );
+            let effects = request.take_effects();
+            if at == "its retry" {
+                assert!(effects.is_empty(), "{what}: no retry after the retry");
+                assert!(db.entries().contains("\"status\":\"uploading\""), "{what}");
+                continue;
+            }
+            let [Effect::Ask(retry)] = &effects[..] else {
+                panic!("{what}: one retry: {effects:?}")
+            };
+            let Need::Write(StoreWrite::History(statements)) = &retry.need else {
+                panic!("{what}")
+            };
+            assert_eq!(statements.len(), 1, "{what}: no trim for a known row");
+            if failures == 1 {
+                db.run(&statements[0]);
+                request.answer(&mut world, retry.id, Event::Written(Ok(())));
+            } else {
+                request.answer(
+                    &mut world,
+                    retry.id,
+                    Event::Written(Err(JsString::from("write failed 2"))),
+                );
+            }
+            assert!(request.take_effects().is_empty(), "{what}: nothing more");
+            let rows = db.entries();
+            if failures == 1 {
+                assert!(rows.contains("\"status\":\"failed\""), "{what}: {rows}");
+                assert!(
+                    rows.contains("\"errorMessage\":\"write failed 1\""),
+                    "{what}: {rows}"
+                );
+            } else {
+                assert!(rows.contains("\"status\":\"uploading\""), "{what}: {rows}");
+            }
+        }
+    }
+}
