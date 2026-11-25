@@ -1,19 +1,23 @@
-//! `swarm.request` through the core (design 0015, SWM-4 PR 5): the real
-//! binary, one core playing every case (D11), and the test as main
+//! `swarm.request` through the core (design 0015, SWM-4 PRs 5 and 6): the
+//! real binary, one core playing every case (D11), and the test as main
 //! answering the swarm thread's requests from the case
-//! ([`swarm_world`]).
+//! ([`swarm_world`]), streaming a node's body within the core's credit.
 //!
 //! **What is played:** every `methods` case of `vectors/swarm.json` whose
-//! steps are whole calls the swarm thread serves: `requestAccess`,
-//! `getCapabilities`, `readChunk`, `readSingleOwnerChunk`,
+//! steps the swarm thread serves without the stores: `requestAccess`,
+//! `getCapabilities`, `readChunk`, `readSingleOwnerChunk`, `readData`
+//! (0009's walk, its leaves streamed and checked on the thread's hashing
+//! pool), `readFeedEntry` (an index's SOC and its streamed join, the latest
+//! entry streamed; a feed by name from the case's feed store),
 //! `getUploadStatus`, `getMessagingIdentity`, `subscribe` (D16's open and
 //! close inside the request, a GSOC topic's signer mined on the lane),
 //! `sendPss` and `sendGsoc` (its signer mined on the lane, PR 8), and the
 //! method dispatch's own cases. A `getUploadStatus` case's `publishFiles`
-//! steps aren't played (the stores and parts come with PRs 6 and 7): the
-//! tag each gave the site is set in the thread's world instead, as the
-//! reference's upload recorded it. Not played, and counted: cases with
-//! other methods (PRs 6 to 9).
+//! steps aren't played (the stores come with PR 7): the tag each gave the
+//! site is set in the thread's world instead, as the reference's upload
+//! recorded it. Not played, and counted: cases with other methods (PRs 7
+//! to 9). The streams' own cases (windows and credit, parts and
+//! `swarm.body`, the idle bound) are in `tests/swarm_streams.rs`.
 //!
 //! **What is checked,** each step: the answer, read back from its typed
 //! form, against the reference's (the case's `core` where a deviation
@@ -35,11 +39,13 @@ use swarm_world::logic::{self, Want};
 use swarm_world::{Main, Name, Naming, Script, grants_json, named_page, page, wire_typed};
 
 /// The methods whose cases this step plays.
-const PLAYED: [&str; 9] = [
+const PLAYED: [&str; 11] = [
     "swarm_requestAccess",
     "swarm_getCapabilities",
     "swarm_readChunk",
     "swarm_readSingleOwnerChunk",
+    "swarm_readData",
+    "swarm_readFeedEntry",
     "swarm_getUploadStatus",
     "swarm_getMessagingIdentity",
     "swarm_subscribe",
@@ -60,12 +66,16 @@ const LEFT_OUT: &[(&str, &str)] = &[
     ),
 ];
 
-fn row_of(method: &str) -> &'static str {
+/// The row a step's request plays, as swarm-grammar.json names it.
+fn row_of(method: &str, params: fc_json::index::Value<'_, '_>) -> &'static str {
     match method {
         "swarm_requestAccess" => "requestAccess",
         "swarm_getCapabilities" => "getCapabilities",
         "swarm_readChunk" => "readChunk",
         "swarm_readSingleOwnerChunk" => "readSingleOwnerChunk",
+        "swarm_readData" => "readData",
+        "swarm_readFeedEntry" if indexed(params) => "readFeedEntry_index",
+        "swarm_readFeedEntry" => "readFeedEntry_latest",
         "swarm_getUploadStatus" => "getUploadStatus",
         "swarm_getMessagingIdentity" => "getMessagingIdentity",
         "swarm_subscribe" => "subscribe",
@@ -73,6 +83,44 @@ fn row_of(method: &str) -> &'static str {
         "swarm_sendGsoc" => "sendGsoc",
         other => panic!("{other}"),
     }
+}
+
+/// The reads' deviations whose answer is the reference's: the verified
+/// walk and the pieces give it (as fc-swarm-provider's `methods_vectors`
+/// reads them).
+fn read_answer(deviation: &str, core: fc_json::index::Value<'_, '_>) -> Option<Want> {
+    if !matches!(deviation, "read-data-verified" | "read-pieces") {
+        return None;
+    }
+    let text = logic::string(core);
+    let same = [
+        "the same result",
+        "the first read through the verified walk; the same results",
+        "chunk_not_found when a leaf is missing",
+        "the walk reads a ranged /bytes; its 500 is -32603",
+        "the walk refuses the short stream",
+        "reserved per data frame from main",
+    ];
+    assert!(
+        same.iter().any(|s| text.starts_with(s)),
+        "{deviation}: {text}"
+    );
+    Some(Want::Reference)
+}
+
+/// Whether a `readFeedEntry`'s typed params give an `index` that isn't
+/// nullish.
+fn indexed(params: fc_json::index::Value<'_, '_>) -> bool {
+    let Some(members) = params.get("object") else {
+        return false;
+    };
+    members.children().any(|pair| {
+        let mut it = pair.children();
+        let (Some(key), Some(value)) = (it.next(), it.next()) else {
+            return false;
+        };
+        key.is_str("index") && value.get("null").is_none() && value.get("undefined").is_none()
+    })
 }
 
 /// How main approved a send: a standing rule read custody and showed no
@@ -93,7 +141,7 @@ fn approval_of(method: &str, step: fc_json::index::Value<'_, '_>) -> Option<&'st
 }
 
 #[test]
-fn whole_calls_play_every_case() {
+fn every_served_case_plays() {
     let text = logic::text_of("swarm.json");
     let index = Index::new(&text).unwrap();
     let grammar_text = logic::text_of("swarm-grammar.json");
@@ -154,6 +202,7 @@ fn whole_calls_play_every_case() {
         let deviation = case.get("deviation").map(logic::string);
         let want = match &deviation {
             Some(d) => logic::shared_answer(d, logic::get(case, "core"))
+                .or_else(|| read_answer(d, logic::get(case, "core")))
                 .unwrap_or_else(|| panic!("{id}: a deviation this step doesn't answer: {d}")),
             None => Want::Reference,
         };
@@ -174,11 +223,15 @@ fn whole_calls_play_every_case() {
             key: origin.clone(),
             naming: None,
         };
-        main.world(json!({
+        let mut world = json!({
             "reset": true,
             "clock": script.world.now,
             "grants": grants_json(&script.world),
-        }));
+        });
+        if let Some(feeds) = case.get("feeds").filter(|f| f.kind() == Kind::String) {
+            world["feeds"] = json!(logic::string(feeds));
+        }
+        main.world(world);
         for (k, step) in steps.iter().enumerate() {
             let sid = if steps.len() > 1 {
                 format!("{id}/{k}")
@@ -265,15 +318,16 @@ fn whole_calls_play_every_case() {
             } else {
                 assert_eq!(ran.closed.len(), ran.opened.len(), "{sid}: closed");
             }
-            let row = row_of(&name);
+            let row = row_of(&name, logic::get(*step, "params"));
             let shape = ran.ran();
             logic::check_row_shape(&sid, grammar, row, &shape);
             match scenarios.get(&sid) {
                 Some(scenario) => {
                     assert!(logic::get(*scenario, "row").is_str(row), "{sid}");
                     let earlier = last && want == Want::Exact;
-                    if !earlier {
-                        logic::check_scenario(&sid, *scenario, &shape, false);
+                    let verified = deviation.as_deref() == Some("read-data-verified");
+                    if !earlier || verified {
+                        logic::check_scenario(&sid, *scenario, &shape, verified);
                     }
                     scenarios_used.insert(sid.clone());
                 }
@@ -296,7 +350,21 @@ fn whole_calls_play_every_case() {
             continue;
         };
         let row = logic::string(logic::get(*scenario, "row"));
-        if skipped.contains(case_id) || !PLAYED.iter().any(|m| row_of(m) == row) {
+        let played_row = [
+            "requestAccess",
+            "getCapabilities",
+            "readChunk",
+            "readSingleOwnerChunk",
+            "readData",
+            "readFeedEntry_index",
+            "readFeedEntry_latest",
+            "getUploadStatus",
+            "getMessagingIdentity",
+            "subscribe",
+            "sendPss",
+            "sendGsoc",
+        ];
+        if skipped.contains(case_id) || !played_row.contains(&row.as_str()) {
             continue;
         }
         assert!(
@@ -306,10 +374,10 @@ fn whole_calls_play_every_case() {
     }
     assert_eq!(
         (played, main_answered, seeded, later),
-        (193, 16, 7, 2),
+        (280, 16, 7, 3),
         "steps played, main's own, uploads seeded and later cases"
     );
-    assert_eq!(scenarios_used.len(), 89);
+    assert_eq!(scenarios_used.len(), 157);
 }
 
 /// A `readChunk` of the vectors' 11-byte chunk.
@@ -347,7 +415,7 @@ fn the_door_answers_before_any_machine_runs() {
     let mut main = swarm_world::main();
     connected(&mut main);
     // A store method before the stores move (D3); main's own unsubscribe
-    // (D5); a streamed read not yet served; params that aren't typed.
+    // (D5); params that aren't typed.
     for (request, code) in [
         (
             r#"{"method":{"string":"swarm_listFeeds"},"params":{"undefined":true}}"#,
@@ -356,10 +424,6 @@ fn the_door_answers_before_any_machine_runs() {
         (
             r#"{"method":{"string":"swarm_unsubscribe"},"params":{"undefined":true}}"#,
             "invalid_argument",
-        ),
-        (
-            r#"{"method":{"string":"swarm_readData"},"params":{"undefined":true}}"#,
-            "internal",
         ),
         (
             r#"{"method":"swarm_readChunk","params":{"undefined":true}}"#,
@@ -385,7 +449,7 @@ fn the_door_answers_before_any_machine_runs() {
 /// it wrote.
 fn settled(main: &mut Main) {
     for _ in 0..200 {
-        if main.world(json!({})) == json!({ "memory": 0, "requests": 0 }) {
+        if main.world(json!({})) == json!({ "memory": 0, "requests": 0, "streams": 0 }) {
             return;
         }
         std::thread::sleep(Duration::from_millis(5));

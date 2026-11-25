@@ -4,15 +4,19 @@
 //!
 //! - [`engine`]: the thread's logic, behind an `Io`: the door, admission,
 //!   deadlines, the memory pool, the asks of main and their bounds, the
-//!   live facts, a topic's turn and an upload's;
+//!   live facts, a topic's turn and an upload's, the streams both ways and
+//!   their idle bound, and the hashing pool's work;
 //! - [`memory`]: the thread's 64 MiB, reserved first in, first out;
 //! - [`lane`]: the mining lane, GSOC searches on a thread of their own;
 //! - [`wire`]: the messages, read strictly and written;
+//! - [`stream`]: the messages around the streams: a part's request and
+//!   head, `swarm.body`'s, and the abort codes each way;
 //! - [`thread`]: the thread itself, which the event loop starts once a
 //!   hello settles protocol 2.
 
 pub mod engine;
 pub mod lane;
 pub mod memory;
+pub mod stream;
 pub mod thread;
 pub mod wire;

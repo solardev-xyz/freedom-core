@@ -195,6 +195,16 @@ fn hex(bytes: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 // Main's answers.
 
+/// `text` read as `T` when it is a JSON object: serde's derived structs
+/// would also take an array of their members in order, which isn't one of
+/// main's forms.
+pub fn object<'a, T: Deserialize<'a>>(text: &'a str) -> Option<T> {
+    if !text.trim_start().starts_with('{') {
+        return None;
+    }
+    serde_json::from_str(text).ok()
+}
+
 /// `shell.swarm_ready`'s `{ ok: true }` or `{ ok: false, reason }`.
 pub fn ready_reply(text: &str) -> Option<Result<(), JsString>> {
     #[derive(Deserialize)]
@@ -203,7 +213,7 @@ pub fn ready_reply(text: &str) -> Option<Result<(), JsString>> {
         ok: bool,
         reason: Option<String>,
     }
-    let ready: Ready = serde_json::from_str(text).ok()?;
+    let ready: Ready = object(text)?;
     match (ready.ok, ready.reason) {
         (true, None) => Some(Ok(())),
         (false, Some(reason)) if !reason.is_empty() => Some(Err(JsString::from(reason))),
@@ -234,10 +244,10 @@ struct FailedReply {
 /// streamed reply's head `{ status, status_text, headers }`, or `{ failed
 /// }` before any reply. The machine holds each to its bounds.
 pub fn api_reply(text: &str, stream: bool) -> Option<Event> {
-    if let Ok(failed) = serde_json::from_str::<FailedReply>(text) {
+    if let Some(failed) = object::<FailedReply>(text) {
         return failed_class(&failed.failed).map(Event::Failed);
     }
-    let reply: ApiReply<'_> = serde_json::from_str(text).ok()?;
+    let reply: ApiReply<'_> = object(text)?;
     if !(100..=599).contains(&reply.status) {
         return None;
     }
@@ -279,9 +289,10 @@ fn failed_class(name: &str) -> Option<Failed> {
 pub fn subscribe_reply(text: &str) -> Option<Result<JsString, OpenFailed>> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
-    struct Open {
+    struct Open<'a> {
         id: Option<String>,
-        failed: Option<Why>,
+        #[serde(borrow)]
+        failed: Option<&'a serde_json::value::RawValue>,
     }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -289,8 +300,12 @@ pub fn subscribe_reply(text: &str) -> Option<Result<JsString, OpenFailed>> {
         reason: Option<String>,
         message: String,
     }
-    let open: Open = serde_json::from_str(text).ok()?;
-    match (open.id, open.failed) {
+    let open: Open<'_> = object(text)?;
+    let failed = match open.failed {
+        Some(why) => Some(object::<Why>(why.get())?),
+        None => None,
+    };
+    match (open.id, failed) {
         (Some(id), None) if !id.is_empty() => Some(Ok(JsString::from(id))),
         (None, Some(why)) => Some(Err(OpenFailed {
             reason: why.reason.map(JsString::from),
@@ -305,7 +320,7 @@ pub fn unsubscribe_reply(text: &str) -> bool {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Closed {}
-    serde_json::from_str::<Closed>(text).is_ok()
+    object::<Closed>(text).is_some()
 }
 
 /// How main refused one of the core's asks.
@@ -652,6 +667,8 @@ mod tests {
             r#"{"ok":false,"reason":""}"#,
             r#"{"ok":1}"#,
             r#"{"ok":true,"more":1}"#,
+            r#"[true]"#,
+            r#"[false,"node-stopped"]"#,
         ] {
             assert_eq!(ready_reply(bad), None, "{bad}");
         }
@@ -680,6 +697,8 @@ mod tests {
             r#"{"status":200,"status_text":"","headers":[["a"]],"body_base64":""}"#,
             r#"{"status":200,"status_text":"","headers":[],"body_base64":"","x":1}"#,
             r#"{"status":"200","status_text":"","headers":[],"body_base64":""}"#,
+            r#"[200,"",[],""]"#,
+            r#"["busy"]"#,
         ] {
             assert_eq!(api_reply(bad, false), None, "{bad}");
         }
@@ -699,11 +718,14 @@ mod tests {
             r#"{"id":""}"#,
             r#"{"id":"a","failed":{"message":"m"}}"#,
             r#"{"failed":{"reason":"x"}}"#,
+            r#"["sub-1"]"#,
+            r#"{"failed":["x","m"]}"#,
         ] {
             assert_eq!(subscribe_reply(bad), None, "{bad}");
         }
         assert!(unsubscribe_reply("{}"));
         assert!(!unsubscribe_reply(r#"{"closed":true}"#));
+        assert!(!unsubscribe_reply("[]"));
         assert_eq!(
             refusal(r#"{"code":"cancelled","message":"Cancelled"}"#),
             Some(Refusal::Cancelled)

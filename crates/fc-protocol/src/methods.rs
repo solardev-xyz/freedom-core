@@ -167,8 +167,8 @@ use Callers::{
     PageOrShell as PS, Shell as SHELL,
 };
 use Deadline::{
-    Head as HEAD, Immediate as NOW, Session as SESSION, Steps as STEPS, Swarm as SWARM,
-    Vault as VAULT,
+    Head as HEAD, Idle as IDLE, Immediate as NOW, Session as SESSION, Steps as STEPS,
+    Swarm as SWARM, Vault as VAULT,
 };
 
 /// Every method, in `core.hello`'s capability order, then the `chain.*`
@@ -336,6 +336,10 @@ pub const METHODS: &[Method] = &[
     // reaches it. Its answer is whole: the bodies that stream are its own
     // asks' (`shell.swarm_api`, `shell.swarm_part`) and `swarm.body`'s.
     row("swarm.request", PAGE, false, SWARM),
+    // Design 0015 (SWM-4, D5): main asks for the body of one of the swarm
+    // thread's `shell.swarm_api` calls whose body streams; the core answers
+    // `{ bytes }` and the body, with idle bounds only. Protocol 2 only.
+    row_v2("swarm.body", SHELL, false, IDLE),
     row("chain.configure", CS, false, NOW),
     row("chain.availability", CS, false, NOW),
     row("chain.request", CS, false, SESSION),

@@ -111,6 +111,7 @@
     { "name": "dweb.verify", "callers": ["shell"], "mutates": false, "deadline_ms": 360000, "protocol": 2 },
     { "name": "dweb.forget", "callers": ["shell"], "mutates": false, "deadline_ms": null, "protocol": 2 },
     { "name": "swarm.request", "callers": ["page"], "mutates": false, "deadline_ms": 300000 },
+    { "name": "swarm.body", "callers": ["shell"], "mutates": false, "deadline_ms": "idle", "protocol": 2 },
     { "name": "chain.configure", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "chain.availability", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "chain.request", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": 120000 },

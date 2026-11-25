@@ -69,7 +69,7 @@ use crate::keystore::client::DesktopKeyStore;
 use crate::requests::{self, Owner, Requests};
 use crate::secrets::Secrets;
 use crate::swarm::thread as swarm;
-use crate::transport::{self, Allowance, Credits, Link, Pending};
+use crate::transport::{self, Allowance, Credits, Link, Pending, Route, StreamKey};
 use crate::vault::{FileSnapshot, Finished, NodeRecovery, Out, Vault};
 use crate::worker::Worker;
 use crate::{chain, gate, hardening, journal, log, naming};
@@ -317,8 +317,10 @@ const CAPABILITIES: &[&str] = &[
     // Design 0009: verified fetches, whose bodies stream.
     "dweb.verify",
     "dweb.forget",
-    // Design 0015: a page's `window.swarm` request, on the swarm thread.
+    // Design 0015: a page's `window.swarm` request, on the swarm thread,
+    // and main's ask for the body of one of its calls.
     "swarm.request",
+    "swarm.body",
 ];
 
 /// The features in `core.hello`'s capabilities, after the methods (design
@@ -687,9 +689,20 @@ pub fn run(options: &Options) -> Exit {
                 }
             }
             // On to the stream's owner at once, in the order read, so a
-            // piece's data follows its head there (design 0015, D4).
-            Ok(Event::Stream(mark)) => match core.requests.routes().owner(mark.key()) {
-                Owner::Dweb => {
+            // piece's data follows its head there (design 0015, D4). Its
+            // route is read in one step: its owner, or closed.
+            Ok(Event::Stream(mark)) => match core.requests.routes().route(mark.key()) {
+                // A frame for a body whose route the swarm thread closed:
+                // main sent it after answering the body's call, or
+                // cancelling it (design 0015, D4).
+                Route::Closed => {
+                    log::error(
+                        "protocol error",
+                        serde_json::json!({ "category": "stream_closed" }),
+                    );
+                    break Exit::Protocol;
+                }
+                Route::Owner(Owner::Dweb) => {
                     let Some(thread) = core.dweb.as_ref() else {
                         // The reader takes stream frames only after the
                         // hello, which starts the thread.
@@ -699,9 +712,18 @@ pub fn run(options: &Options) -> Exit {
                         break Exit::Internal;
                     }
                 }
-                // The swarm thread registers no route before its streams
-                // (SWM-4 PR 6).
-                Owner::Naming | Owner::Chain | Owner::KeyStore | Owner::Eip1193 | Owner::Swarm => {
+                // Its parts, node bodies and `swarm.body` credit (design
+                // 0015, D4).
+                Route::Owner(Owner::Swarm) => {
+                    let Some(thread) = core.swarm.as_ref() else {
+                        break Exit::Internal;
+                    };
+                    if !thread.send(swarm::In::Stream(mark), None) {
+                        break Exit::Internal;
+                    }
+                }
+                // No other owner registers a route.
+                Route::Owner(Owner::Naming | Owner::Chain | Owner::KeyStore | Owner::Eip1193) => {
                     break Exit::Internal;
                 }
             },
@@ -1798,23 +1820,31 @@ impl Core {
                 }
             }
             // Admitted only after the hello, which started the thread: a
-            // page's, with its `PageContext` (design 0015).
+            // page's, with its `PageContext` (design 0015); or main's ask for
+            // a body, whose credit is the thread's from now on, routed
+            // before the thread can open the body (D4).
             method if swarm::handles(method) => {
                 let params = match params.map(|p| RawValue::from_string(p.to_owned())) {
                     Some(Ok(params)) => Some(params),
                     Some(Err(_)) => return Flow::Exit(Exit::Internal),
                     None => None,
                 };
-                let sent = self.swarm.as_ref().is_some_and(|thread| {
-                    thread.send(
-                        swarm::In::Request {
-                            id,
-                            params,
-                            page: context.page.clone(),
-                        },
-                        self.credit.take(),
-                    )
-                });
+                let message = if method == "swarm.body" {
+                    self.requests
+                        .routes()
+                        .register(StreamKey::Body(id), Owner::Swarm);
+                    swarm::In::Body { id, params }
+                } else {
+                    swarm::In::Request {
+                        id,
+                        params,
+                        page: context.page.clone(),
+                    }
+                };
+                let sent = self
+                    .swarm
+                    .as_ref()
+                    .is_some_and(|thread| thread.send(message, self.credit.take()));
                 if sent {
                     Flow::Continue
                 } else {

@@ -520,7 +520,7 @@ impl Sender {
     /// with [`SendError::Code`], and the stream stays as it was.
     pub fn abort(&mut self, id: u64, abort: &Abort) -> Result<(), SendError> {
         self.usable()?;
-        if !self.codes.allows(abort.code) {
+        if !self.codes.allows_abort(abort) {
             return Err(SendError::Code);
         }
         let json = abort.to_json().map_err(|_| SendError::TooLarge)?;
@@ -566,7 +566,7 @@ impl Sender {
     /// and nothing changes.
     pub fn settle(&mut self, id: u64, json: Vec<u8>, abort: &Abort) -> Result<Settled, SendError> {
         self.usable()?;
-        if !self.codes.allows(abort.code) {
+        if !self.codes.allows_abort(abort) {
             return Err(SendError::Code);
         }
         if json.len() > MAX_PAYLOAD {

@@ -1031,20 +1031,66 @@ impl Pending {
 ///   is credited late, past its end, until main has read the end, so its
 ///   route must outlast that: a late credit routed to the dweb thread is a
 ///   protocol error there if the ID is above every request it was given.
+/// - **A body's route closed** ([`StreamRoutes::close`]): the Swarm thread
+///   closes a `swarm.body`'s route once main has answered the call it is
+///   the body of, or cancelled it, after which main sends no credit for it
+///   (design 0015, D4). A credit for one of the last [`CLOSED_BODIES`]
+///   bodies closed is main breaking the protocol, which the event loop
+///   refuses ([`Route::Closed`]); an older one's falls to the dweb thread's
+///   default, as a stray credit for any other request's ID does.
+/// - **One lock** holds the routes and the closed bodies together: a close
+///   takes a route out and remembers it as closed in one step, and the
+///   event loop reads a stream's route, its owner or its close, in one
+///   ([`StreamRoutes::route`]), so no frame can find a body neither routed
+///   nor closed in between.
 #[derive(Default)]
 pub struct StreamRoutes {
-    routes: Mutex<BTreeMap<StreamKey, crate::requests::Owner>>,
+    table: Mutex<Routes>,
 }
 
+#[derive(Default)]
+struct Routes {
+    /// Each routed stream's owner.
+    owners: BTreeMap<StreamKey, crate::requests::Owner>,
+    /// The bodies whose routes were closed last, oldest first, each once.
+    closed: VecDeque<StreamKey>,
+}
+
+/// Where a stream's frames go ([`StreamRoutes::route`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    /// To this owner: the dweb thread unless a route says otherwise.
+    Owner(crate::requests::Owner),
+    /// Nowhere: the stream's route was closed, and a frame for it is main
+    /// breaking the protocol.
+    Closed,
+}
+
+/// How many closed bodies' routes [`StreamRoutes`] remembers: sixteen
+/// times the uploads that stream at once (design 0015, Budgets).
+pub const CLOSED_BODIES: usize = 16 * SWARM_BODIES;
+
 impl StreamRoutes {
-    /// The owner of `key`'s stream: the dweb thread unless a route says
-    /// otherwise.
-    pub fn owner(&self, key: StreamKey) -> crate::requests::Owner {
-        self.routes
+    fn table(&self) -> std::sync::MutexGuard<'_, Routes> {
+        self.table
             .lock()
-            .ok()
-            .and_then(|routes| routes.get(&key).copied())
-            .unwrap_or(crate::requests::Owner::Dweb)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Where `key`'s frames go, read in one step: closed, or its owner (the
+    /// dweb thread unless a route says otherwise).
+    pub fn route(&self, key: StreamKey) -> Route {
+        let table = self.table();
+        if table.closed.contains(&key) {
+            return Route::Closed;
+        }
+        Route::Owner(
+            table
+                .owners
+                .get(&key)
+                .copied()
+                .unwrap_or(crate::requests::Owner::Dweb),
+        )
     }
 
     /// Routes `key`'s stream to `owner`: before main can send a frame of
@@ -1053,23 +1099,39 @@ impl StreamRoutes {
         if owner == crate::requests::Owner::Dweb {
             return;
         }
-        if let Ok(mut routes) = self.routes.lock() {
-            routes.insert(key, owner);
-        }
+        self.table().owners.insert(key, owner);
     }
 
     /// `key`'s stream can take no frame any more: its route goes.
-    #[allow(dead_code)] // the Swarm thread's streams' (SWM-4 PR 6)
     pub fn forget(&self, key: StreamKey) {
-        if let Ok(mut routes) = self.routes.lock() {
-            routes.remove(&key);
+        self.table().owners.remove(&key);
+    }
+
+    /// `key`'s stream can take no frame any more, and one that comes is
+    /// main breaking the protocol: in one step its route goes and it is
+    /// remembered as closed, once, among the last [`CLOSED_BODIES`].
+    pub fn close(&self, key: StreamKey) {
+        let mut table = self.table();
+        table.owners.remove(&key);
+        if table.closed.contains(&key) {
+            return;
         }
+        if table.closed.len() >= CLOSED_BODIES {
+            table.closed.pop_front();
+        }
+        table.closed.push_back(key);
     }
 
     /// The routes held.
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.routes.lock().map_or(0, |routes| routes.len())
+        self.table().owners.len()
+    }
+
+    /// The closed bodies remembered.
+    #[cfg(test)]
+    pub fn closed_len(&self) -> usize {
+        self.table().closed.len()
     }
 }
 
@@ -2697,20 +2759,107 @@ mod tests {
     fn streams_go_to_the_dweb_thread_unless_routed() {
         use crate::requests::Owner;
         let routes = StreamRoutes::default();
+        let owner = |key| routes.route(key);
         for key in [StreamKey::Piece(5), StreamKey::Body(5), StreamKey::Piece(1)] {
-            assert_eq!(routes.owner(key), Owner::Dweb, "{key:?}");
+            assert_eq!(owner(key), Route::Owner(Owner::Dweb), "{key:?}");
         }
         routes.register(StreamKey::Piece(5), Owner::Swarm);
-        assert_eq!(routes.owner(StreamKey::Piece(5)), Owner::Swarm);
-        assert_eq!(routes.owner(StreamKey::Body(5)), Owner::Dweb);
+        assert_eq!(owner(StreamKey::Piece(5)), Route::Owner(Owner::Swarm));
+        assert_eq!(owner(StreamKey::Body(5)), Route::Owner(Owner::Dweb));
         routes.register(StreamKey::Body(9), Owner::Swarm);
-        assert_eq!(routes.owner(StreamKey::Body(9)), Owner::Swarm);
+        assert_eq!(owner(StreamKey::Body(9)), Route::Owner(Owner::Swarm));
         routes.register(StreamKey::Piece(6), Owner::Dweb);
         assert_eq!(routes.len(), 2);
         routes.forget(StreamKey::Piece(5));
-        assert_eq!(routes.owner(StreamKey::Piece(5)), Owner::Dweb);
-        assert_eq!(routes.owner(StreamKey::Body(9)), Owner::Swarm);
+        assert_eq!(owner(StreamKey::Piece(5)), Route::Owner(Owner::Dweb));
+        assert_eq!(owner(StreamKey::Body(9)), Route::Owner(Owner::Swarm));
         assert_eq!(routes.len(), 1);
+        assert_eq!(routes.closed_len(), 0);
+    }
+
+    /// Design 0015, D4: a body's route closed goes, and a frame for it is
+    /// refused while it is among the last closed, each remembered once: the
+    /// oldest is let go of past the bound, and closing one twice takes one
+    /// place (#500's review: close 0 once, 1 twice, then 2 to 63, and 0 is
+    /// still remembered).
+    #[test]
+    fn a_closed_bodys_route_is_remembered_once_within_its_bound() {
+        use crate::requests::Owner;
+        let routes = StreamRoutes::default();
+        routes.register(StreamKey::Body(0), Owner::Swarm);
+        routes.close(StreamKey::Body(0));
+        assert_eq!(routes.len(), 0);
+        assert_eq!(routes.route(StreamKey::Body(0)), Route::Closed);
+        assert_eq!(routes.route(StreamKey::Piece(0)), Route::Owner(Owner::Dweb));
+        routes.close(StreamKey::Body(1));
+        routes.close(StreamKey::Body(1));
+        for id in 2..CLOSED_BODIES as u64 {
+            routes.close(StreamKey::Body(id));
+        }
+        assert_eq!(routes.closed_len(), CLOSED_BODIES);
+        assert_eq!(routes.route(StreamKey::Body(0)), Route::Closed);
+        routes.close(StreamKey::Body(1000));
+        assert_eq!(routes.route(StreamKey::Body(0)), Route::Owner(Owner::Dweb));
+        assert_eq!(routes.route(StreamKey::Body(1)), Route::Closed);
+        assert_eq!(routes.route(StreamKey::Body(1000)), Route::Closed);
+        assert_eq!(routes.closed_len(), CLOSED_BODIES);
+    }
+
+    /// #500's review: a close and the event loop's reading of a route race.
+    /// The closer and the reader start together at a barrier; the reader
+    /// reads the body the closer is closing, over and over. A body routed
+    /// to the Swarm thread is its or closed at every read, never the dweb
+    /// thread's default in between (but for one evicted from the closed
+    /// set, which the reader then sees has fallen past the bound).
+    #[test]
+    fn closing_a_route_and_reading_it_never_part() {
+        use crate::requests::Owner;
+        use std::sync::Barrier;
+        use std::sync::atomic::Ordering::SeqCst;
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+        const BODIES: u64 = 20_000;
+        let routes = Arc::new(StreamRoutes::default());
+        for id in 1..=BODIES {
+            routes.register(StreamKey::Body(id), Owner::Swarm);
+        }
+        let closing = Arc::new(AtomicU64::new(1));
+        let done = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(Barrier::new(2));
+        let closer = {
+            let (routes, closing, done, barrier) = (
+                Arc::clone(&routes),
+                Arc::clone(&closing),
+                Arc::clone(&done),
+                Arc::clone(&barrier),
+            );
+            std::thread::spawn(move || {
+                barrier.wait();
+                for id in 1..=BODIES {
+                    closing.store(id, SeqCst);
+                    routes.close(StreamKey::Body(id));
+                }
+                done.store(true, SeqCst);
+            })
+        };
+        barrier.wait();
+        let mut reads = 0u64;
+        while !done.load(SeqCst) {
+            let id = closing.load(SeqCst);
+            match routes.route(StreamKey::Body(id)) {
+                Route::Owner(Owner::Swarm) | Route::Closed => {}
+                other => {
+                    let now = closing.load(SeqCst);
+                    assert!(
+                        now - id >= CLOSED_BODIES as u64,
+                        "body {id} read as {other:?} while {now} closes"
+                    );
+                }
+            }
+            reads += 1;
+        }
+        closer.join().unwrap();
+        assert!(reads > 0);
+        assert_eq!(routes.len(), 0);
     }
 
     /// Each mark carries its stream's key, which the event loop routes it

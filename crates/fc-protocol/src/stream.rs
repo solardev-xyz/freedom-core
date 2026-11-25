@@ -47,9 +47,11 @@
 //!   main streams may also end `too_large`, past its `max_bytes`, which is
 //!   why the core's inbound streams carry their codes one by one
 //!   ([`Inbound::request_with`]); and the core's `swarm.body` uploads end
-//!   only with `cancelled`, `internal` or `body_stream_error`. The sender
-//!   refuses any other, and the receiving side takes any other as a
-//!   protocol error.
+//!   only with `cancelled`, `internal` or `body_stream_error`. A part main
+//!   streams (`shell.swarm_part`) alone may name, beside its
+//!   `body_stream_error`, the error code its file failed with
+//!   ([`Abort::error_code`], [`Codes::SwarmPart`]). The sender refuses any
+//!   other, and the receiving side takes any other as a protocol error.
 //!
 //! Sans-I/O, like the rest of the crate: the caller feeds frames and events
 //! in and takes frames and deliveries out. `vectors/streams.json` holds the
@@ -323,6 +325,11 @@ pub enum Codes {
     /// `cancelled`, `internal`, or `body_stream_error` when a part it was
     /// copying failed.
     CoreUpload,
+    /// A `shell.swarm_part` part main streams to the core (design 0015,
+    /// Streams): a piece's three, and the only stream whose
+    /// `body_stream_error` may name the error code its file failed with
+    /// ([`Abort::error_code`], [`Codes::allows_abort`]).
+    SwarmPart,
 }
 
 impl Codes {
@@ -343,13 +350,24 @@ impl Codes {
                     | C::Busy
                     | C::Cancelled
             ),
-            Codes::Piece => matches!(code, C::Cancelled | C::Stalled | C::BodyStreamError),
+            Codes::Piece | Codes::SwarmPart => {
+                matches!(code, C::Cancelled | C::Stalled | C::BodyStreamError)
+            }
             Codes::SwarmPiece => matches!(
                 code,
                 C::Cancelled | C::Stalled | C::BodyStreamError | C::TooLarge
             ),
             Codes::CoreUpload => matches!(code, C::Cancelled | C::Internal | C::BodyStreamError),
         }
+    }
+
+    /// Whether a stream sent under these rules may end with `abort`: its
+    /// code ([`Codes::allows`]), and an error code name only on a part's
+    /// `body_stream_error` ([`Codes::SwarmPart`], design 0015).
+    pub fn allows_abort(self, abort: &Abort) -> bool {
+        self.allows(abort.code)
+            && (abort.error_code.is_none()
+                || (self == Codes::SwarmPart && abort.code == AbortCode::BodyStreamError))
     }
 }
 
@@ -375,12 +393,64 @@ impl<'de> Deserialize<'de> for AbortCode {
     }
 }
 
-/// An abort frame's JSON: a code and a message, and no other member.
+/// An abort frame's JSON: a code and a message, and, on a part main
+/// streams to the core only, the error code its file failed with (design
+/// 0015, Streams: [`Abort::error_code`]); no other member.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Abort {
     pub code: AbortCode,
     pub message: String,
+    /// Design 0015 (SWM-4): a `shell.swarm_part` stream's
+    /// `body_stream_error` may name the error code reading the part's file
+    /// failed with, an errno name (`^[A-Z][A-Z0-9_]{0,31}$`), which the
+    /// core puts in the history row's text. Present, it is a string of
+    /// that form and nothing else (not `null`); which streams take it is
+    /// [`Codes::allows_abort`]'s.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "error_name"
+    )]
+    pub error_code: Option<String>,
+}
+
+/// The most bytes of an abort's error code name.
+pub const MAX_ERROR_CODE: usize = 32;
+
+/// Whether `name` is an errno name as a part's abort carries it:
+/// `^[A-Z][A-Z0-9_]{0,31}$`.
+pub fn is_error_code(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.first().is_some_and(u8::is_ascii_uppercase)
+        && bytes.len() <= MAX_ERROR_CODE
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || *b == b'_')
+}
+
+/// A present `error_code`: a string of [`is_error_code`]'s form, never
+/// `null` or another type.
+fn error_name<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    struct Name;
+
+    impl Visitor<'_> for Name {
+        type Value = String;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("an error code name, as a string")
+        }
+
+        fn visit_str<E: de::Error>(self, name: &str) -> Result<String, E> {
+            if is_error_code(name) {
+                Ok(name.to_owned())
+            } else {
+                Err(E::custom("not an error code name"))
+            }
+        }
+    }
+
+    deserializer.deserialize_str(Name).map(Some)
 }
 
 impl Abort {
@@ -388,7 +458,18 @@ impl Abort {
         Abort {
             code,
             message: message.into(),
+            error_code: None,
         }
+    }
+
+    /// The same abort, naming the error code its part's file failed with
+    /// (design 0015): `None` when `name` isn't one ([`is_error_code`]).
+    pub fn with_error_code(mut self, name: &str) -> Option<Self> {
+        if !is_error_code(name) {
+            return None;
+        }
+        self.error_code = Some(name.to_owned());
+        Some(self)
     }
 
     /// The abort a cancel of an open stream writes.
@@ -396,7 +477,8 @@ impl Abort {
         Abort::new(AbortCode::Cancelled, "Cancelled")
     }
 
-    /// Its JSON, `{"code":…,"message":…}`, if it fits an abort frame.
+    /// Its JSON, `{"code":…,"message":…}` (with `"error_code"` when it
+    /// names one), if it fits an abort frame.
     pub fn to_json(&self) -> Result<Vec<u8>, StreamError> {
         let json = serde_json::to_vec(self).map_err(|_| StreamError::AbortPayload)?;
         check_length(KIND_ABORT, ID_LEN.saturating_add(json.len()))?;
@@ -404,7 +486,8 @@ impl Abort {
     }
 
     /// Parses an abort's JSON: an object with exactly `code`, one of the
-    /// abort codes, and `message`, a string, each once.
+    /// abort codes, and `message`, a string, each once, and at most an
+    /// `error_code` of [`is_error_code`]'s form beside them.
     pub fn from_json(json: &[u8]) -> Result<Self, StreamError> {
         let text = std::str::from_utf8(json).map_err(|_| StreamError::AbortPayload)?;
         // serde's derived structs would also take an array.
@@ -800,14 +883,125 @@ mod tests {
             names(Codes::CoreUpload),
             ["cancelled", "internal", "body_stream_error"]
         );
+        assert_eq!(
+            names(Codes::SwarmPart),
+            ["cancelled", "body_stream_error", "stalled"]
+        );
         for codes in [
             Codes::Service,
             Codes::CoreBody,
             Codes::Piece,
             Codes::CoreUpload,
+            Codes::SwarmPart,
         ] {
             assert!(!codes.allows(AbortCode::TooLarge), "{codes:?}");
         }
+    }
+
+    /// Design 0015: only a part's `body_stream_error` names an error code;
+    /// every other stream, and every other code of a part's, refuses one.
+    #[test]
+    fn only_a_parts_body_stream_error_names_an_error_code() {
+        let named = |code| Abort::new(code, "m").with_error_code("ENOENT").unwrap();
+        for codes in [
+            Codes::Service,
+            Codes::CoreBody,
+            Codes::Piece,
+            Codes::SwarmPiece,
+            Codes::CoreUpload,
+            Codes::SwarmPart,
+        ] {
+            for code in AbortCode::ALL {
+                let plain = codes.allows_abort(&Abort::new(code, "m"));
+                assert_eq!(plain, codes.allows(code), "{codes:?} {code:?}");
+                let allowed = codes == Codes::SwarmPart && code == AbortCode::BodyStreamError;
+                assert_eq!(
+                    codes.allows_abort(&named(code)),
+                    allowed,
+                    "{codes:?} {code:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_error_code_is_an_errno_name() {
+        let parsed = Abort::from_json(
+            br#"{"code":"body_stream_error","message":"m","error_code":"EACCES"}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.error_code.as_deref(), Some("EACCES"));
+        assert_eq!(
+            parsed.to_json().unwrap(),
+            br#"{"code":"body_stream_error","message":"m","error_code":"EACCES"}"#
+        );
+        let longest = format!("E{}", "_9".repeat(15) + "Z");
+        assert_eq!(longest.len(), MAX_ERROR_CODE);
+        for good in [
+            "E",
+            "EIO",
+            "ENOENT",
+            "ERR_FS_FILE_TOO_LARGE",
+            longest.as_str(),
+        ] {
+            assert!(is_error_code(good), "{good}");
+            assert!(
+                Abort::new(AbortCode::BodyStreamError, "m")
+                    .with_error_code(good)
+                    .is_some()
+            );
+            let json =
+                format!(r#"{{"code":"body_stream_error","message":"m","error_code":"{good}"}}"#);
+            assert!(Abort::from_json(json.as_bytes()).is_ok(), "{json}");
+        }
+        let too_long = format!("{longest}X");
+        for bad in [
+            "",
+            "enoent",
+            "Enoent",
+            "1EIO",
+            "_EIO",
+            "E-IO",
+            "E IO",
+            "ÉIO",
+            too_long.as_str(),
+        ] {
+            assert!(!is_error_code(bad), "{bad}");
+            assert!(
+                Abort::new(AbortCode::BodyStreamError, "m")
+                    .with_error_code(bad)
+                    .is_none()
+            );
+            let json = format!(
+                r#"{{"code":"body_stream_error","message":"m","error_code":{}}}"#,
+                serde_json::to_string(bad).unwrap()
+            );
+            assert_eq!(
+                Abort::from_json(json.as_bytes()),
+                Err(StreamError::AbortPayload),
+                "{json}"
+            );
+        }
+        for bad in [
+            &br#"{"code":"body_stream_error","message":"m","error_code":null}"#[..],
+            br#"{"code":"body_stream_error","message":"m","error_code":2}"#,
+            br#"{"code":"body_stream_error","message":"m","error_code":["EIO"]}"#,
+            br#"{"code":"body_stream_error","message":"m","error_code":"EIO","error_code":"EIO"}"#,
+        ] {
+            assert_eq!(
+                Abort::from_json(bad),
+                Err(StreamError::AbortPayload),
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+        // Absent, it isn't written.
+        assert_eq!(
+            Abort::new(AbortCode::BodyStreamError, "m")
+                .to_json()
+                .unwrap(),
+            br#"{"code":"body_stream_error","message":"m"}"#
+        );
     }
 
     #[test]

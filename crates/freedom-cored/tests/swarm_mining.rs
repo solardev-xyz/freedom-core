@@ -362,11 +362,11 @@ impl Lane {
         self.main.answer(id, answer);
     }
 
-    /// The thread holds nothing: no charge and no request.
+    /// The thread holds nothing: no charge, no request and no stream.
     fn settled(&mut self) {
         for _ in 0..400 {
             let held = self.world(json!({}));
-            if held == json!({ "memory": 0, "requests": 0 }) {
+            if held == json!({ "memory": 0, "requests": 0, "streams": 0 }) {
                 return;
             }
             self.step(Duration::from_millis(5));

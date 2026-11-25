@@ -1,43 +1,51 @@
-//! The dweb thread's hashing pool (design 0009, `dweb.verify`: "A pool of
-//! two hashing threads computes BMT roots and SHA-256 digests, and checks
-//! RSA signatures, for it").
+//! The hashing pools (design 0009, `dweb.verify`: "A pool of two hashing
+//! threads computes BMT roots and SHA-256 digests, and checks RSA
+//! signatures, for it"; design 0015's D9: the swarm thread has a pool of
+//! its own, for `readData`'s leaf checks). Each thread that hashes owns one:
+//! the dweb thread's ([`hashing`]) and the swarm thread's ([`swarm`]), each
+//! of [`THREADS`] threads, with their own results, so neither waits on the
+//! other's jobs.
 //!
-//! - **What runs here:** the verifier's hash jobs ([`Job::run`]): a chunk's
-//!   BMT root and keccak, a feed update's signature recovery, a leaf's
-//!   digest, an IPFS block's digest, an IPNS record's signature. The dweb
-//!   thread runs the walks; the pool keeps the hashing off it, so one large
-//!   block never holds up every other request's next step.
+//! - **What runs here:** the dweb verifier's hash jobs ([`Job::run`]): a
+//!   chunk's BMT root and keccak, a feed update's signature recovery, a
+//!   leaf's digest, an IPFS block's digest, an IPNS record's signature; and
+//!   the swarm thread's `readData` leaf checks
+//!   ([`fc_swarm_provider::machine::Job::run`]). The owner runs the walks;
+//!   the pool keeps the hashing off it, so one large block never holds up
+//!   every other request's next step.
 //! - **Two slots, and no queue of the pool's own.** The pool takes a job only
-//!   while one of its threads has neither a job nor a result the dweb thread
+//!   while one of its threads has neither a job nor a result the owner
 //!   hasn't taken ([`Pool::try_run`]); otherwise it hands the job back. Jobs
-//!   wait in the dweb thread's FIFO ([`Queue`]), which that thread owns, and
-//!   each job's bytes count against its request's memory in the verifier
-//!   until its result comes back (0009, Bounds: "jobs queue in the dweb
-//!   thread, under the request's memory"). So the pool holds at most two
-//!   jobs and their two results.
+//!   wait in the owner's FIFO ([`Queue`]), which that thread owns, and each
+//!   job's bytes count against its request's memory until its result comes
+//!   back (0009, Bounds: "jobs queue in the dweb thread, under the request's
+//!   memory"; 0015: a read's bytes stay under its charge). So the pool holds
+//!   at most two jobs and their two results.
 //! - **The FIFO gives back its room as it drains.** A job's slot counts
 //!   against its request while the job is out; room the FIFO kept for jobs
 //!   that have gone would count against none. So past [`KEPT`] slots, once
 //!   fewer than a quarter are taken, it shrinks to twice what it holds, as
 //!   the verifier's memory tests' FIFO does: at most [`KEPT`] slots idle,
 //!   and otherwise at most four per job waiting, whose request is running.
-//! - **Results** wait in the pool until the dweb thread takes them
+//! - **Results** wait in the pool until the owner takes them
 //!   ([`Pool::take`]), and a slot frees only then. Room for a result is held
 //!   from its job's dispatch, so a thread never waits to hand one over.
 //!   A thread that parks a result calls `wake`, once until the results are
-//!   taken: a marker on the dweb thread's mailbox, which must not block, as
+//!   taken: a marker on the owner's mailbox, which must not block, as
 //!   naming's and chain's wakers don't.
 //! - **No call waits on a job.** The pool's lock is held for constant-time
 //!   handoffs only, never while a job runs.
 //! - **Matching:** the pool knows no requests. Each result carries its job's
-//!   ID, and a verifier refuses one that isn't its own. A request that ends
-//!   keeps its verifier, and the job's bytes charged, until each of its jobs
-//!   has come back ([`fc_dweb::verifier::Verifier::finished`]).
+//!   ID: a dweb verifier refuses one that isn't its own, and the swarm
+//!   thread's jobs carry their request and ask. A request that ends keeps
+//!   its state, and the job's bytes charged, until each of its jobs has come
+//!   back ([`fc_dweb::verifier::Verifier::finished`]; the swarm engine's
+//!   hashing asks).
 //! - **Stopping:** an explicit [`Pool::shutdown`], a drop or an unwind, and a
 //!   start that fails part way all take one path. The pool closes, drops the
 //!   jobs no thread has started and the results not taken, and joins every
 //!   thread it started, each after the job it is running. No thread waits on
-//!   the dweb thread, so the join can't deadlock. A thread that panics is
+//!   the owner, so the join can't deadlock. A thread that panics is
 //!   reported, as every thread of the core is ([`DeathNotice`]), and the
 //!   core exits.
 
@@ -48,14 +56,15 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 
 use fc_dweb::verifier::{Hashed, Job};
+use fc_swarm_provider::machine::{AskId, JobDone};
 
 use crate::serve::Event;
 use crate::transport::DeathNotice;
 
 /// The hashing threads (0009, Bounds: "hashing pool: 2 threads").
 pub const THREADS: usize = 2;
-/// Slots the dweb thread's FIFO keeps however few jobs wait: 64 jobs' worth,
-/// 7 KiB (a job is 112 bytes on 64-bit targets).
+/// Slots an owner's FIFO keeps however few jobs wait: 64 jobs' worth,
+/// 7 KiB for the dweb thread's (a job is 112 bytes on 64-bit targets).
 pub const KEPT: usize = 64;
 
 struct State<T, R> {
@@ -256,9 +265,9 @@ fn serve<T, R>(shared: &Shared<T, R>, work: &dyn Fn(T) -> R, wake: &dyn Fn()) {
     }
 }
 
-/// The dweb thread's side of a pool: its own FIFO of jobs waiting for a
-/// slot, first in, first out across every request, and the pool. The dweb
-/// thread owns it; nothing here locks but the pool's handoffs.
+/// An owner's side of a pool: its own FIFO of jobs waiting for a slot,
+/// first in, first out across every request, and the pool. The owner's
+/// thread holds it; nothing here locks but the pool's handoffs.
 pub struct Queue<T: Send + 'static, R: Send + 'static> {
     pool: Pool<T, R>,
     waiting: VecDeque<T>,
@@ -273,6 +282,25 @@ pub fn hashing(
     events: Sender<Event>,
 ) -> io::Result<Hashing> {
     Pool::spawn("dweb-hash", THREADS, Job::run, wake, events).map(Queue::new)
+}
+
+/// A swarm thread's hashing job: its request, its ask and the leaves to
+/// check (design 0015's D9).
+pub type SwarmJob = (u64, AskId, fc_swarm_provider::machine::Job);
+/// Its result, for that request's ask.
+pub type SwarmHashed = (u64, AskId, JobDone);
+
+/// The swarm thread's hashing (design 0015's D9): two threads of its own
+/// running `readData`'s leaf checks.
+pub type SwarmHashing = Queue<SwarmJob, SwarmHashed>;
+
+/// Starts the swarm thread's hashing. `wake` is the swarm thread's waker.
+pub fn swarm(
+    wake: impl Fn() + Send + Sync + 'static,
+    events: Sender<Event>,
+) -> io::Result<SwarmHashing> {
+    let work = |(request, ask, job): SwarmJob| (request, ask, job.run());
+    Pool::spawn("swarm-hash", THREADS, work, wake, events).map(Queue::new)
 }
 
 impl<T: Send + 'static, R: Send + 'static> Queue<T, R> {
@@ -297,13 +325,13 @@ impl<T: Send + 'static, R: Send + 'static> Queue<T, R> {
     }
 
     /// Jobs waiting for a slot.
-    #[allow(dead_code)] // the tests', and 5d's gates'
+    #[allow(dead_code)] // the tests', and the gates'
     pub fn waiting(&self) -> usize {
         self.waiting.len()
     }
 
     /// Jobs in the pool: running, handed over, or with a result not taken.
-    #[allow(dead_code)] // the tests', and 5d's gates'
+    #[allow(dead_code)] // the tests', and the gates'
     pub fn running(&self) -> usize {
         self.pool.busy()
     }
@@ -314,7 +342,7 @@ impl<T: Send + 'static, R: Send + 'static> Queue<T, R> {
     }
 
     /// Slots the FIFO holds room for, taken or not.
-    #[allow(dead_code)] // the tests', and 5d's gates'
+    #[allow(dead_code)] // the tests', and the gates'
     pub fn room(&self) -> usize {
         self.waiting.capacity()
     }

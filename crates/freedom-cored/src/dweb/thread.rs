@@ -63,9 +63,9 @@ use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
 use super::engine::{Bounds, Engine, Fault, Get, Io, Ms, Refusal, Reply};
-use super::pool::{self, Hashing};
 use super::wire;
 use crate::log;
+use crate::pool::{self, Hashing};
 use crate::requests::{self, Dispatch, Owner, Requests, Start};
 use crate::serve::Event;
 use crate::transport::{self, Allowance, Credit, Out, StreamEntry, StreamMark};
