@@ -105,6 +105,11 @@ struct Thread {
     ready: Vec<(ReadyCheck, usize)>,
     calls: Vec<Logged>,
     mines: Vec<MineJob>,
+    /// The subscriptions main opened (`shell.swarm_subscribe`) and closed.
+    opened: Vec<Subscription>,
+    closed: Vec<JsString>,
+    /// The id main answers an open with: the reference's, for the step.
+    subscription_id: JsString,
     most_open: usize,
     cancels_after_outcome: usize,
 }
@@ -133,6 +138,9 @@ impl Thread {
             ready: Vec::new(),
             calls: Vec::new(),
             mines: Vec::new(),
+            opened: Vec::new(),
+            closed: Vec::new(),
+            subscription_id: JsString::from(SUBSCRIPTION_ID),
             most_open: 0,
             cancels_after_outcome: 0,
         }
@@ -202,6 +210,8 @@ impl Thread {
         self.ready.clear();
         self.calls.clear();
         self.mines.clear();
+        self.opened.clear();
+        self.closed.clear();
         self.most_open = 0;
         self.cancels_after_outcome = 0;
         let mut request = Request::start(call, &mut self.world).expect("a messaging method");
@@ -250,6 +260,16 @@ impl Thread {
                 Need::Live => {
                     assert_eq!(ask.charge, 0);
                     vec![Event::Live(self.world.live())]
+                }
+                Need::Subscribe(subscription) => {
+                    assert_eq!(ask.charge, 0);
+                    self.opened.push(subscription);
+                    vec![Event::Opened(Ok(self.subscription_id.clone()))]
+                }
+                Need::Unsubscribe(id) => {
+                    assert_eq!(ask.charge, 0);
+                    self.closed.push(id);
+                    vec![Event::Closed]
                 }
                 other => panic!("an ask messaging never makes: {other:?}"),
             };
@@ -467,8 +487,13 @@ fn ready_checks(step: V<'_, '_>) -> usize {
     events + probes
 }
 
-/// A subscription against the reference's: its kind and key, and the
-/// socket main opens among the case's `websockets`.
+/// The id the reference's registry gave its subscriptions, as the vectors
+/// record it; main's test double answers its opens with it.
+const SUBSCRIPTION_ID: &str = "59820d1a24fddf7bceaad40b518018f0";
+
+/// The subscription main opened against the reference's: its kind and key
+/// as the reference answered them, and the socket main opens among the
+/// case's `websockets`.
 fn check_subscription(id: &str, case: V<'_, '_>, step: V<'_, '_>, got: &Subscription) {
     let result = get(step, "result");
     assert!(get(result, "kind").is_str(got.kind.as_str()), "{id}: kind");
@@ -488,13 +513,6 @@ fn check_subscription(id: &str, case: V<'_, '_>, step: V<'_, '_>, got: &Subscrip
     );
     let sockets: Vec<String> = get(case, "websockets").children().map(string).collect();
     assert_eq!(sockets, [url], "{id}: the socket main opens");
-    // The answer as main reads it.
-    let value = got.to_value();
-    assert_eq!(
-        value.get("subscribe").get("key"),
-        &Value::str(&hex(&got.key)),
-        "{id}"
-    );
 }
 
 struct Vectors {
@@ -598,12 +616,15 @@ fn messaging_methods() {
             played += 1;
 
             let last = k + 1 == steps.len();
-            match (&outcome, want) {
-                (Outcome::Subscribe(got), Want::Reference) => {
-                    check_subscription(&sid, case, *step, got)
-                }
-                (Outcome::Subscribe(got), other) => panic!("{sid}: {got:?} where {other:?}"),
-                _ => check_outcome(&sid, want, last, case, *step, &outcome),
+            check_outcome(&sid, want, last, case, *step, &outcome);
+            // A subscription the page got is the one main opened, with the
+            // reference's id; one that didn't reach the page is closed.
+            if name == "swarm_subscribe" && matches!(outcome, Outcome::Result(_)) {
+                assert_eq!(thread.opened.len(), 1, "{sid}: one subscription opened");
+                assert!(thread.closed.is_empty(), "{sid}: and kept");
+                check_subscription(&sid, case, *step, &thread.opened[0]);
+            } else {
+                assert_eq!(thread.closed.len(), thread.opened.len(), "{sid}: closed");
             }
             if want == Want::Exact && last {
                 // The core's own answer: main opens no socket.
@@ -611,6 +632,7 @@ fn messaging_methods() {
                 if let Some(sockets) = core.get("websockets") {
                     assert_eq!(sockets.children().count(), 0, "{sid}");
                     assert!(matches!(outcome, Outcome::Error(_)), "{sid}");
+                    assert!(thread.opened.is_empty(), "{sid}: nothing opened");
                 }
             }
 
@@ -652,9 +674,9 @@ fn messaging_methods() {
                 assert_eq!(*job, gsoc_job_of(topic), "{sid}: the job");
                 mined += 1;
             }
-            // A subscription answered `{ subscribe }` derived its key: a
-            // GSOC topic's is the mined address.
-            if let Outcome::Subscribe(got) = &outcome
+            // A subscription main opened derived its key: a GSOC topic's
+            // is the mined address.
+            if let Some(got) = thread.opened.first()
                 && got.kind == fc_swarm_provider::machine::SubscriptionKind::Gsoc
                 && let Some(topic) = handoff.params.get("topic").as_js_string()
             {
@@ -746,6 +768,9 @@ fn site_thread(stamps: &str) -> Thread {
         ready: Vec::new(),
         calls: Vec::new(),
         mines: Vec::new(),
+        opened: Vec::new(),
+        closed: Vec::new(),
+        subscription_id: JsString::from(SUBSCRIPTION_ID),
         most_open: 0,
         cancels_after_outcome: 0,
     }

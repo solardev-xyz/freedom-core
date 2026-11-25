@@ -1669,6 +1669,22 @@ impl Main<'_> {
                     self.take(request);
                 }
             }
+            // Main opens and closes a subscription with no roll either, so
+            // the other answers stay as they were.
+            Need::Subscribe(_) => {
+                if request.outcome().is_none() {
+                    let opened =
+                        Event::Opened(Ok(JsString::from("59820d1a24fddf7bceaad40b518018f0")));
+                    request.answer(&mut self.world, id, opened);
+                    self.take(request);
+                }
+            }
+            Need::Unsubscribe(_) => {
+                if request.outcome().is_none() {
+                    request.answer(&mut self.world, id, Event::Closed);
+                    self.take(request);
+                }
+            }
             Need::Mine(job) => {
                 let mined = self.mined(job);
                 self.give(request, checker, id, Event::Mined(mined));
@@ -2111,7 +2127,6 @@ fn every_call_matches_its_row() {
                 *rows_called.entry(row).or_default() += checker.calls.len();
                 let kind = match request.outcome() {
                     Some(Outcome::Result(_)) => "result",
-                    Some(Outcome::Subscribe(_)) => "subscribe",
                     Some(Outcome::Error(_)) => "error",
                     Some(Outcome::Cancelled) => "cancelled",
                     Some(Outcome::Protocol(_)) => "protocol",

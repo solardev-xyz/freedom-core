@@ -30,7 +30,15 @@
 //!   "subscribe" }` (main's probe after question 4's proxy check:
 //!   `proxy-or-tor` refuses, deviation `subscribe-proxy`), the key (the
 //!   page's GSOC address, the mined one for a topic, or a PSS topic's
-//!   hash), the guard, and [`Outcome::Subscribe`] for main to open.
+//!   hash), the guard, then main opens the subscription for the request's
+//!   document (`shell.swarm_subscribe`, design 0015's D16) and the live
+//!   facts are asked again (page-swarm.js, after the method's wait, custody
+//!   left out): while the name and the document still hold the key, the
+//!   page gets `{ subscriptionId, kind, key }` with main's id; otherwise
+//!   main closes it (`shell.swarm_unsubscribe`) and the page gets
+//!   `NO_ADDRESS`. A subscription that doesn't open answers as
+//!   `subscribeError` does. A request that ends while main opens or holds
+//!   its subscription closes it.
 //!
 //! The guard is page-swarm.js's `guardEffect` with `whileMessagingGranted`,
 //! on the live facts asked just before it (design 0015's D1): the name, for
@@ -50,7 +58,7 @@ use fc_swarm::gsoc;
 
 use super::chunk_reads::ready;
 use super::feed_write::{Data, data_of};
-use super::limits::{MAX_MESSAGE_BYTES, MAX_TARGET_DEPTH};
+use super::limits::{MAX_MESSAGE_BYTES, MAX_SUBSCRIPTIONS, MAX_TARGET_DEPTH};
 use super::publish::OTHER_REFERENCE_MESSAGE;
 use super::writes::{Fail, batch_with, bytes_uploaded, soc_up};
 use super::{live_of, no_address, permitted};
@@ -62,8 +70,8 @@ use crate::json::{Reader, Token};
 use crate::machine::node::{Failed, JSON_REPLY_CAP, transport_text};
 use crate::machine::params::{empty_options, hex_string, normalize_address, require_params};
 use crate::machine::{
-    Approval, AskId, Body, Cx, Event, Failure, Form, Live, MineJob, Mined, NodeCall, Outcome,
-    ReadyCheck, Step, Subscription, SubscriptionKind, World, done, fail,
+    Approval, AskId, Body, Closing, Cx, Event, Failure, Form, Live, MineJob, Mined, NodeCall,
+    OpenFailed, Outcome, ReadyCheck, Step, Subscription, SubscriptionKind, World, done, fail,
 };
 use crate::stamps::{BatchId, SelectOptions};
 use crate::stores::manifests::Capability;
@@ -1074,6 +1082,44 @@ impl SendGsoc {
 
 // --- subscribe --------------------------------------------------------------
 
+/// `subscribeError`: what a subscription that didn't open answers, from the
+/// registry's reason and message as main gives them.
+fn subscribe_error(failed: OpenFailed) -> Failure {
+    let OpenFailed { reason, message } = failed;
+    let unavailable = |message: JsString, reason: &JsString| Failure {
+        code: crate::errors::NODE_UNAVAILABLE,
+        message,
+        data: Some(Value::object([("reason", Value::String(reason.clone()))])),
+    };
+    match reason {
+        // Never established within the window, or torn down while main
+        // waited (navigation, tab close, grant revoke): retryable.
+        Some(r)
+            if matches!(
+                r.as_str(),
+                "establish_timeout" | "subscription_cancelled" | "cancelled"
+            ) =>
+        {
+            unavailable(message, &r)
+        }
+        Some(r) if r.as_str() == "too_many_subscriptions" => Failure::invalid_params_with(
+            message,
+            "too_many_subscriptions",
+            vec![("limit", Value::int(MAX_SUBSCRIPTIONS))],
+        ),
+        // The node's pool is full (possibly by other sites): a retryable
+        // 4900, not a parameter error.
+        Some(r) if r.as_str() == "node_subscription_limit" => unavailable(
+            concat(&[
+                &JsString::from("Node subscription capacity exhausted: "),
+                &message,
+            ]),
+            &r,
+        ),
+        _ => Failure::internal(message),
+    }
+}
+
 enum SubscribeStage {
     Ready(AskId),
     Mine(AskId),
@@ -1082,6 +1128,20 @@ enum SubscribeStage {
         id: AskId,
         key: [u8; 32],
     },
+    /// Main opens the subscription.
+    Open {
+        id: AskId,
+        key: [u8; 32],
+    },
+    /// The live facts once it is open, with main's id.
+    Opened {
+        id: AskId,
+        key: [u8; 32],
+        subscription: JsString,
+    },
+    /// The name or the document moved: main closes it, then `NO_ADDRESS`.
+    Close(AskId),
+    Gone,
 }
 
 /// The key a subscription derives: given, a PSS topic's hash, or a GSOC
@@ -1092,8 +1152,8 @@ enum Key {
     Gsoc(MineJob),
 }
 
-/// `handleSubscribe` and `subscribeForPage`, up to the socket, which main
-/// opens.
+/// `handleSubscribe` and `subscribeForPage`, the socket opened by main, and
+/// page-swarm.js's check after it.
 pub(crate) struct Subscribe {
     kind: SubscriptionKind,
     key: Key,
@@ -1176,14 +1236,29 @@ impl Subscribe {
         Step::Wait
     }
 
+    /// What the request still closes when it ends without its machine: the
+    /// subscription main opened for it, or the one it is opening.
+    pub(crate) fn closing(&self) -> Option<Closing> {
+        match &self.stage {
+            SubscribeStage::Open { id, .. } => Some(Closing::AfterOpen(*id)),
+            SubscribeStage::Opened { subscription, .. } => {
+                Some(Closing::Unsubscribe(subscription.clone()))
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn on<W: World>(&mut self, cx: &mut Cx<'_, W>, id: AskId, event: Event) -> Step {
-        match self.stage {
+        match std::mem::replace(&mut self.stage, SubscribeStage::Gone) {
             SubscribeStage::Ready(ready_id) if id == ready_id => {
                 if let Err(step) = ready(event) {
                     return step;
                 }
                 match &self.key {
-                    Key::Given(key) | Key::Pss(key) => self.open(cx, *key),
+                    Key::Given(key) | Key::Pss(key) => {
+                        let key = *key;
+                        self.open(cx, key)
+                    }
                     Key::Gsoc(job) => {
                         self.stage = SubscribeStage::Mine(cx.mine(*job));
                         Step::Wait
@@ -1208,15 +1283,63 @@ impl Subscribe {
                 let Some(live) = live_of(&event) else {
                     return fail(Failure::internal_error());
                 };
-                // The subscription for main.
                 if let Err(refused) = guard(cx, live, None) {
                     return fail(refused);
                 }
-                Step::Done(Outcome::Subscribe(Subscription {
+                // `subscriptionRegistry.subscribe`, in main.
+                let subscription = Subscription {
                     kind: self.kind,
                     key,
-                }))
+                };
+                self.stage = SubscribeStage::Open {
+                    id: cx.subscribe(subscription),
+                    key,
+                };
+                Step::Wait
             }
+            SubscribeStage::Open { id: asked, key } if id == asked => match event {
+                Event::Opened(Ok(subscription)) => {
+                    // After the method's wait: what binds the key goes out
+                    // only while the name still answers.
+                    self.stage = SubscribeStage::Opened {
+                        id: cx.live(),
+                        key,
+                        subscription,
+                    };
+                    Step::Wait
+                }
+                Event::Opened(Err(failed)) => fail(subscribe_error(failed)),
+                _ => fail(Failure::internal_error()),
+            },
+            SubscribeStage::Opened {
+                id: asked,
+                key,
+                subscription,
+            } if id == asked => match live_of(&event) {
+                Some(live) if live.holds() => done(Value::object([
+                    ("subscriptionId", Value::String(subscription)),
+                    ("kind", Value::str(self.kind.as_str())),
+                    ("key", Value::str(&hex(&key))),
+                ])),
+                // `endDocumentSubscription`, then `NO_ADDRESS`.
+                Some(_) => {
+                    self.stage = SubscribeStage::Close(cx.unsubscribe(subscription));
+                    Step::Wait
+                }
+                None => {
+                    // What main opened is closed as the request ends.
+                    self.stage = SubscribeStage::Opened {
+                        id: asked,
+                        key,
+                        subscription,
+                    };
+                    fail(Failure::internal_error())
+                }
+            },
+            SubscribeStage::Close(asked) if id == asked => match event {
+                Event::Closed => fail(no_address()),
+                _ => fail(Failure::internal_error()),
+            },
             _ => fail(Failure::internal_error()),
         }
     }

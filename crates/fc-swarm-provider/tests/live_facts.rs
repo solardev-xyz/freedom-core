@@ -27,8 +27,9 @@ use fc_json::index::Index;
 use fc_json::{JsString, JsValue};
 use fc_swarm_provider::machine::node::BodyOut;
 use fc_swarm_provider::machine::{
-    Approval, Ask, AskId, Body, Call, Effect, Event, Live, Mined, Need, NodeCall, Outcome,
-    Protocol, ReadyCheck, Request, SignKey, Signed, StoreWrite,
+    Approval, Ask, AskId, Body, Call, Effect, Event, Live, Mined, Need, NodeCall, OpenFailed,
+    Outcome, Protocol, ReadyCheck, Request, SignKey, Signed, StoreWrite, Subscription,
+    SubscriptionKind,
 };
 use fc_swarm_provider::stores::feeds::{FeedChange, Source};
 use fc_swarm_provider::stores::manifests::Capability;
@@ -40,6 +41,8 @@ const STAMPS: &str = r#"{"stamps":[{"batchID":"a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a
 const ADDRESSES: &str = r#"{"overlay":"36b7efd913ca4cf880b8eeac5093fa27b0825906c600685b6abdd6566e6cfe8f","underlay":["/ip4/127.0.0.1"],"ethereum":"0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0","publicKey":"039fd0991d0222b4e1339c1a1a5b5f6d9f6a96672a3247b638ee6156d9ea877a2f","pssPublicKey":"03c22c83fb49ab0ad897aa0c74e51311c95a3d1e1b27b2dedd7f42a7d2538c3a9e"}"#;
 const TAG: &str = r#"{"uid":101,"split":10,"seen":2,"stored":10,"sent":5,"synced":3,"address":"ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB","startedAt":"2026-01-01T00:00:00Z"}"#;
 const RECIPIENT: &str = "023263e186e68d31581a2ac1bec6ca730ba9b9e6b4a194dd78798a36271d0a4a0b";
+/// The id main gives the subscriptions it opens.
+const SUBSCRIPTION_ID: &str = "59820d1a24fddf7bceaad40b518018f0";
 /// The first `/bzz` upload's tag (the fake node's).
 const FIRST_TAG: u64 = 101;
 /// A feed entry past one chunk, which goes to `POST /bytes` first.
@@ -74,6 +77,8 @@ enum Asked {
     Effectful,
     /// A store write: a feed-store change.
     Feeds,
+    /// A subscription's close.
+    Close,
     /// The rest: readiness, the vault's owner, the history.
     Other,
 }
@@ -87,6 +92,11 @@ struct Main {
     signers: HashMap<[u8; 32], u32>,
     rows: i64,
     log: Vec<Asked>,
+    /// The subscriptions main opened and closed.
+    opened: usize,
+    closed: usize,
+    /// Main's `{ failed }` to every open, when set.
+    open_fails: Option<OpenFailed>,
 }
 
 type Script<'a> = &'a mut dyn FnMut(usize, &mut TestWorld) -> Live;
@@ -156,6 +166,9 @@ impl Main {
             signers: HashMap::new(),
             rows: 0,
             log: Vec::new(),
+            opened: 0,
+            closed: 0,
+            open_fails: None,
         }
     }
 
@@ -227,9 +240,13 @@ impl Main {
     ) -> Vec<Effect> {
         let asked = match &ask.need {
             Need::Live => Asked::Live,
-            Need::Node(_) | Need::Sign(_) | Need::Mine(_) | Need::Upload | Need::Lock(_) => {
-                Asked::Effectful
-            }
+            Need::Node(_)
+            | Need::Sign(_)
+            | Need::Mine(_)
+            | Need::Upload
+            | Need::Lock(_)
+            | Need::Subscribe(_) => Asked::Effectful,
+            Need::Unsubscribe(_) => Asked::Close,
             Need::Write(StoreWrite::Feeds(_)) => Asked::Feeds,
             _ => Asked::Other,
         };
@@ -283,6 +300,18 @@ impl Main {
             }
             Need::Upload => vec![Event::Turn],
             Need::Lock(_) => vec![Event::Locked],
+            Need::Subscribe(_) => match &self.open_fails {
+                Some(failed) => vec![Event::Opened(Err(failed.clone()))],
+                None => {
+                    self.opened += 1;
+                    vec![Event::Opened(Ok(JsString::from(SUBSCRIPTION_ID)))]
+                }
+            },
+            Need::Unsubscribe(id) => {
+                assert_eq!(id, SUBSCRIPTION_ID, "main closes what it opened");
+                self.closed += 1;
+                vec![Event::Closed]
+            }
             Need::Write(StoreWrite::HistoryInsert(_)) => {
                 self.rows += 1;
                 vec![Event::Inserted(Ok(self.rows))]
@@ -614,7 +643,11 @@ fn methods() -> Vec<Method> {
         ),
         Method {
             ruled: false,
-            ..method("subscribe", subscribe, &[Point::Guard(Grant::Messaging)])
+            ..method(
+                "subscribe",
+                subscribe,
+                &[Point::Guard(Grant::Messaging), Point::Answer],
+            )
         },
         Method {
             ruled: false,
@@ -634,7 +667,6 @@ fn facts(name: bool, live: bool, agent: bool) -> Live {
 fn answered(outcome: &Outcome) -> String {
     match outcome {
         Outcome::Result(_) => "result".to_owned(),
-        Outcome::Subscribe(_) => "subscribe".to_owned(),
         Outcome::Error(failure) => failure
             .data
             .as_ref()
@@ -730,7 +762,7 @@ fn each_method_asks_once_at_each_point() {
             (method.setup)(&mut main);
             let outcome = main.honest(&(method.call)(approval));
             assert!(
-                matches!(outcome, Outcome::Result(_) | Outcome::Subscribe(_)),
+                matches!(outcome, Outcome::Result(_)),
                 "{}: {outcome:?}",
                 method.what
             );
@@ -847,7 +879,7 @@ fn each_guard_reads_them_in_the_references_order() {
                 let (got, main) = play_at(&method, n, approval, at, world_change, grant);
                 let label = format!("{} guard {n}, {what}", method.what);
                 if want == "pass" {
-                    assert!(got == "result" || got == "subscribe", "{label}: {got}");
+                    assert_eq!(got, "result", "{label}");
                     continue;
                 }
                 assert_eq!(got, want, "{label}");
@@ -965,12 +997,20 @@ fn an_answer_under_the_key_waits_for_them() {
                 ("the name moved", facts(false, true, false), "no_address"),
                 ("the key gone", facts(true, false, false), "no_address"),
             ] {
-                let (got, _) = play_at(&method, n, None, at, Change::None, Grant::Connection);
+                let (got, main) = play_at(&method, n, None, at, Change::None, Grant::Connection);
                 assert_eq!(got, want, "{} answer, {what}", method.what);
+                // A subscription the page doesn't get is closed.
+                let kept = if want == "result" { main.opened } else { 0 };
+                assert_eq!(
+                    main.closed,
+                    main.opened - kept,
+                    "{} answer, {what}",
+                    method.what
+                );
             }
         }
     }
-    assert_eq!(points, 2);
+    assert_eq!(points, 3);
 }
 
 /// page-swarm.js's `uploadStatus` asks the name after `executeSwarmMethod`
@@ -1184,4 +1224,488 @@ fn a_cancel_cancels_the_ask_and_drops_its_answer() {
     // A wrong kind after the outcome changes nothing either.
     request.answer(&mut main.world, live, Event::Turn);
     assert_eq!(request.outcome(), Some(&Outcome::Cancelled));
+}
+
+// ---------------------------------------------------------------------------
+// Running to an ask, and what a request leaves when it ends there.
+
+impl Main {
+    /// Plays `call` honestly until the ask `stop` picks (given how many live
+    /// asks came before it), which is taken but not answered.
+    fn run_to(&mut self, call: &Call, stop: impl Fn(&Need, usize) -> bool) -> (Request, Ask) {
+        self.log.clear();
+        let mut request = Request::start(call, &mut self.world).expect("a method with a machine");
+        let mut queue: VecDeque<Effect> = request.take_effects().into();
+        let mut bodies: BTreeMap<AskId, (NodeCall, Vec<u8>)> = BTreeMap::new();
+        let mut lives = 0;
+        while let Some(effect) = queue.pop_front() {
+            let more = match effect {
+                Effect::Ask(ask) => {
+                    if stop(&ask.need, lives) {
+                        return (request, ask);
+                    }
+                    self.answer(&mut request, ask, &mut bodies, &mut lives, &mut |_, w| {
+                        w.live()
+                    })
+                }
+                Effect::Body { id, out } => match out {
+                    BodyOut::Data(data) => {
+                        let len = data.len();
+                        bodies.get_mut(&id).unwrap().1.extend(data);
+                        request.answer(&mut self.world, id, Event::BodyCredit(len));
+                        request.take_effects()
+                    }
+                    BodyOut::End => {
+                        let (call, data) = bodies.remove(&id).unwrap();
+                        let spec = self.node.upload(call.method(), &call.path, &data);
+                        let mut more = Vec::new();
+                        for event in forward(&spec, &call).1 {
+                            request.answer(&mut self.world, id, event);
+                            more.extend(request.take_effects());
+                        }
+                        more
+                    }
+                    BodyOut::Head { .. } | BodyOut::Abort(_) => Vec::new(),
+                },
+                Effect::Cancel(_) | Effect::Credit { .. } => Vec::new(),
+            };
+            queue.extend(more);
+        }
+        panic!("no such ask: {:?}", request.outcome())
+    }
+}
+
+/// The history rows a request's effects end `failed` with `text`.
+fn rows_failed(effects: &[Effect], text: &str) -> usize {
+    use fc_swarm_provider::stores::history::Bind;
+    effects
+        .iter()
+        .filter(|e| {
+            matches!(e, Effect::Ask(Ask {
+                need: Need::Write(StoreWrite::History(statements)),
+                ..
+            }) if statements.iter().any(|s| {
+                s.params.contains(&Bind::Text("failed".to_owned()))
+                    && s.params.contains(&Bind::Text(text.to_owned()))
+            }))
+        })
+        .count()
+}
+
+/// A cancel while an `afterEffect`'s live facts are asked (the effect
+/// already made): the request answers `cancelled`, the ask is cancelled,
+/// the row ends `failed` with `cancelled`, and nothing is kept under the
+/// key, even when the late answer says the name still holds, which is
+/// dropped.
+#[test]
+fn a_cancel_at_an_after_effect_keeps_nothing_and_fails_the_row() {
+    /// What, main's earlier requests, the call, the live asks before the
+    /// `afterEffect`'s, and what it keeps.
+    type Case = (
+        &'static str,
+        fn(&mut Main),
+        fn(Option<Approval>) -> Call,
+        usize,
+        fn(&Main) -> bool,
+    );
+    let cases: [Case; 3] = [
+        (
+            "publishFiles' tag owner",
+            no_setup,
+            publish_files,
+            1,
+            tag_kept,
+        ),
+        ("createFeed's record", no_setup, create_feed, 1, feed_kept),
+        (
+            "updateFeed's reference",
+            a_feed,
+            update_feed,
+            2,
+            reference_kept,
+        ),
+    ];
+    for (what, setup, call, before, kept) in cases {
+        let mut main = Main::new();
+        setup(&mut main);
+        let (mut request, live) = main.run_to(&call(Some(Approval::User)), |need, lives| {
+            *need == Need::Live && lives == before
+        });
+        // The effect is made: its upload went before this ask.
+        assert!(main.log.contains(&Asked::Effectful), "{what}");
+        request.cancel();
+        assert_eq!(request.outcome(), Some(&Outcome::Cancelled), "{what}");
+        let effects = request.take_effects();
+        assert!(
+            effects.contains(&Effect::Cancel(live.id)),
+            "{what}: {effects:?}"
+        );
+        assert_eq!(
+            rows_failed(&effects, "cancelled"),
+            1,
+            "{what}: the row: {effects:?}"
+        );
+        let open = request.open_asks();
+        request.answer(
+            &mut main.world,
+            live.id,
+            Event::Live(facts(true, true, false)),
+        );
+        assert_eq!(request.open_asks(), open - 1, "{what}: the ask closed");
+        assert!(
+            request.take_effects().is_empty(),
+            "{what}: the late answer dropped"
+        );
+        assert!(!kept(&main), "{what}: nothing kept under the key");
+        assert_eq!(request.outcome(), Some(&Outcome::Cancelled), "{what}");
+    }
+}
+
+fn pss_key() -> [u8; 32] {
+    fc_evm::keccak256(b"chat")
+}
+
+/// A subscription opens inside the request (D16): its guard, then main's
+/// open, then the live facts again; the page gets the reference's result
+/// with main's id.
+#[test]
+fn a_subscription_opens_then_asks_the_name() {
+    let mut main = Main::new();
+    let outcome = main.honest(&subscribe(None));
+    let Outcome::Result(result) = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(
+        result,
+        Value::object([
+            ("subscriptionId", Value::str(SUBSCRIPTION_ID)),
+            ("kind", Value::str("pss")),
+            ("key", Value::str(&hex(&pss_key()))),
+        ])
+    );
+    assert_eq!(
+        main.log,
+        [Asked::Other, Asked::Live, Asked::Effectful, Asked::Live],
+        "readiness, the guard, the open, the name"
+    );
+    assert_eq!((main.opened, main.closed), (1, 0));
+    // What main opens: the kind and the topic's key.
+    let (_, open) = main.run_to(&subscribe(None), |need, _| {
+        matches!(need, Need::Subscribe(_))
+    });
+    assert_eq!(
+        open.need,
+        Need::Subscribe(Subscription {
+            kind: SubscriptionKind::Pss,
+            key: pss_key(),
+        })
+    );
+    assert_eq!(open.charge, 0);
+}
+
+/// After the open, a moved name or a lost key closes the subscription and
+/// answers `NO_ADDRESS` once main has closed it; custody isn't read.
+#[test]
+fn a_subscription_the_name_lost_is_closed() {
+    for (what, after_open, want, closed) in [
+        ("the name moved", facts(false, true, false), "no_address", 1),
+        ("the key gone", facts(true, false, false), "no_address", 1),
+        ("custody taken", facts(true, true, true), "result", 0),
+    ] {
+        let mut main = Main::new();
+        let outcome = main.play(&subscribe(Some(Approval::Auto)), &mut |turn, world| {
+            if turn == 1 { after_open } else { world.live() }
+        });
+        assert_eq!(answered(&outcome), want, "{what}");
+        assert_eq!((main.opened, main.closed), (1, closed), "{what}");
+        if closed == 1 {
+            assert_eq!(
+                main.log.last(),
+                Some(&Asked::Close),
+                "{what}: closed, then answered"
+            );
+        }
+    }
+    // The answer waits for the close.
+    let mut main = Main::new();
+    let (mut request, live) = main.run_to(&subscribe(None), |need, lives| {
+        *need == Need::Live && lives == 1
+    });
+    request.answer(
+        &mut main.world,
+        live.id,
+        Event::Live(facts(false, true, false)),
+    );
+    assert_eq!(request.outcome(), None);
+    let effects = request.take_effects();
+    let [Effect::Ask(close)] = &effects[..] else {
+        panic!("{effects:?}")
+    };
+    assert_eq!(
+        close.need,
+        Need::Unsubscribe(JsString::from(SUBSCRIPTION_ID))
+    );
+    request.answer(&mut main.world, close.id, Event::Closed);
+    assert_eq!(answered(request.outcome().unwrap()), "no_address");
+}
+
+/// A subscription that doesn't open answers as `subscribeError` does, and
+/// nothing more is asked.
+#[test]
+fn a_failed_open_answers_as_subscribe_error() {
+    let failed = |reason: Option<&str>, message: &str| OpenFailed {
+        reason: reason.map(JsString::from),
+        message: JsString::from(message),
+    };
+    let unavailable = |message: &str, reason: &str| {
+        (
+            4900,
+            message.to_owned(),
+            Some(Value::object([("reason", Value::str(reason))])),
+        )
+    };
+    let cases = [
+        (
+            failed(
+                Some("establish_timeout"),
+                "Subscription did not establish within 10000ms",
+            ),
+            unavailable(
+                "Subscription did not establish within 10000ms",
+                "establish_timeout",
+            ),
+        ),
+        (
+            failed(
+                Some("subscription_cancelled"),
+                "Subscription was cancelled before it was established",
+            ),
+            unavailable(
+                "Subscription was cancelled before it was established",
+                "subscription_cancelled",
+            ),
+        ),
+        (
+            failed(Some("cancelled"), "Subscription cancelled"),
+            unavailable("Subscription cancelled", "cancelled"),
+        ),
+        (
+            failed(
+                Some("too_many_subscriptions"),
+                "Origin has reached the maximum of 32 subscriptions",
+            ),
+            (
+                -32602,
+                "Origin has reached the maximum of 32 subscriptions".to_owned(),
+                Some(Value::object([
+                    ("reason", Value::str("too_many_subscriptions")),
+                    ("limit", Value::int(32)),
+                ])),
+            ),
+        ),
+        (
+            failed(
+                Some("node_subscription_limit"),
+                "Node subscription limit reached",
+            ),
+            unavailable(
+                "Node subscription capacity exhausted: Node subscription limit reached",
+                "node_subscription_limit",
+            ),
+        ),
+        (
+            failed(None, "socket hang up"),
+            (-32603, "socket hang up".to_owned(), None),
+        ),
+        (
+            failed(Some("other"), "Unexpected server response: 500"),
+            (-32603, "Unexpected server response: 500".to_owned(), None),
+        ),
+    ];
+    for (open, (code, message, data)) in cases {
+        let mut main = Main::new();
+        main.open_fails = Some(open.clone());
+        let outcome = main.honest(&subscribe(None));
+        let Outcome::Error(failure) = outcome else {
+            panic!("{open:?}: {outcome:?}")
+        };
+        assert_eq!(failure.code, code, "{open:?}");
+        assert_eq!(failure.message.as_str(), message, "{open:?}");
+        assert_eq!(failure.data, data, "{open:?}");
+        assert_eq!(
+            main.log.last(),
+            Some(&Asked::Effectful),
+            "{open:?}: nothing after"
+        );
+    }
+}
+
+/// `subscribe` up to main's close, the name having moved after the open.
+fn to_the_close(main: &mut Main) -> (Request, Ask) {
+    let (mut request, live) = main.run_to(&subscribe(None), |need, lives| {
+        *need == Need::Live && lives == 1
+    });
+    request.answer(
+        &mut main.world,
+        live.id,
+        Event::Live(facts(false, true, false)),
+    );
+    assert!(request.outcome().is_none());
+    let mut effects = request.take_effects();
+    let Some(Effect::Ask(close)) = effects.pop() else {
+        panic!("the close")
+    };
+    assert!(effects.is_empty());
+    assert_eq!(
+        close.need,
+        Need::Unsubscribe(JsString::from(SUBSCRIPTION_ID))
+    );
+    (request, close)
+}
+
+/// A request that ends while main opens or holds its subscription closes
+/// what main opened: a cancel before the open asks nothing of it; one
+/// while it opens closes what the open answers; one after it closes it
+/// at once; one while main closes it leaves the close to finish.
+#[test]
+fn a_cancel_closes_what_main_opened() {
+    let close_of = |effects: &[Effect]| {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Ask(
+                    ask @ Ask {
+                        need: Need::Unsubscribe(id),
+                        ..
+                    },
+                ) => {
+                    assert_eq!(id, SUBSCRIPTION_ID);
+                    Some(ask.id)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let opened = || Event::Opened(Ok(JsString::from(SUBSCRIPTION_ID)));
+
+    // Before the open: the guard's ask is cancelled, nothing opened.
+    let mut main = Main::new();
+    let (mut request, guard) = main.run_to(&subscribe(None), |need, _| *need == Need::Live);
+    request.cancel();
+    let effects = request.take_effects();
+    assert_eq!(effects, [Effect::Cancel(guard.id)]);
+    request.answer(
+        &mut main.world,
+        guard.id,
+        Event::Live(facts(true, true, false)),
+    );
+    assert!(request.take_effects().is_empty(), "nothing opened");
+    assert_eq!(request.open_asks(), 0);
+
+    // While it opens: the open is cancelled, and what it opens is closed.
+    for late in [
+        opened(),
+        Event::Opened(Err(OpenFailed {
+            reason: Some(JsString::from("cancelled")),
+            message: JsString::from("cancelled"),
+        })),
+    ] {
+        let mut main = Main::new();
+        let (mut request, open) = main.run_to(&subscribe(None), |need, _| {
+            matches!(need, Need::Subscribe(_))
+        });
+        request.cancel();
+        assert_eq!(request.take_effects(), [Effect::Cancel(open.id)]);
+        assert_eq!(request.outcome(), Some(&Outcome::Cancelled));
+        let closes = matches!(late, Event::Opened(Ok(_)));
+        request.answer(&mut main.world, open.id, late);
+        let effects = request.take_effects();
+        let close = close_of(&effects);
+        assert_eq!(close.len(), usize::from(closes), "{effects:?}");
+        if let Some(close) = close.first() {
+            request.answer(&mut main.world, *close, Event::Closed);
+        }
+        assert!(request.take_effects().is_empty());
+        assert_eq!(request.open_asks(), 0);
+        assert_eq!(request.outcome(), Some(&Outcome::Cancelled));
+    }
+
+    // After it, while the name is asked: closed at once; the late live
+    // facts dropped.
+    let mut main = Main::new();
+    let (mut request, live) = main.run_to(&subscribe(None), |need, lives| {
+        *need == Need::Live && lives == 1
+    });
+    request.cancel();
+    let effects = request.take_effects();
+    assert!(effects.contains(&Effect::Cancel(live.id)), "{effects:?}");
+    let close = close_of(&effects);
+    assert_eq!(close.len(), 1, "{effects:?}");
+    assert!(
+        !effects.contains(&Effect::Cancel(close[0])),
+        "a close isn't called back"
+    );
+    request.answer(
+        &mut main.world,
+        live.id,
+        Event::Live(facts(true, true, false)),
+    );
+    request.answer(&mut main.world, close[0], Event::Closed);
+    assert!(request.take_effects().is_empty());
+    assert_eq!(request.open_asks(), 0);
+    assert_eq!(request.outcome(), Some(&Outcome::Cancelled));
+
+    // While main closes it: the close isn't called back.
+    let mut main = Main::new();
+    let (mut request, close) = to_the_close(&mut main);
+    request.cancel();
+    assert!(request.take_effects().is_empty(), "the close goes on");
+    request.answer(&mut main.world, close.id, Event::Closed);
+    assert_eq!(request.open_asks(), 0);
+    assert_eq!(request.outcome(), Some(&Outcome::Cancelled));
+}
+
+/// Both new asks are read strictly; a protocol error after the open still
+/// closes the subscription.
+#[test]
+fn the_open_and_the_close_are_read_strictly() {
+    let mut main = Main::new();
+    let (mut request, open) = main.run_to(&subscribe(None), |need, _| {
+        matches!(need, Need::Subscribe(_))
+    });
+    request.answer(&mut main.world, open.id, Event::Closed);
+    assert_eq!(
+        request.outcome(),
+        Some(&Outcome::Protocol(Protocol::WrongKind))
+    );
+
+    let mut main = Main::new();
+    let (mut request, live) = main.run_to(&subscribe(None), |need, lives| {
+        *need == Need::Live && lives == 1
+    });
+    request.answer(
+        &mut main.world,
+        live.id,
+        Event::Opened(Ok(JsString::from("x"))),
+    );
+    assert_eq!(
+        request.outcome(),
+        Some(&Outcome::Protocol(Protocol::WrongKind))
+    );
+    let effects = request.take_effects();
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Ask(Ask {
+            need: Need::Unsubscribe(id),
+            ..
+        }) if id == SUBSCRIPTION_ID)),
+        "{effects:?}"
+    );
+
+    let mut main = Main::new();
+    let (mut request, close) = to_the_close(&mut main);
+    request.answer(&mut main.world, close.id, Event::Locked);
+    assert_eq!(
+        request.outcome(),
+        Some(&Outcome::Protocol(Protocol::WrongKind))
+    );
 }

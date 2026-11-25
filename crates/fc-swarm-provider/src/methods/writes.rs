@@ -706,7 +706,7 @@ pub(crate) fn closing(
         return None;
     }
     let text = match outcome {
-        Outcome::Result(_) | Outcome::Subscribe(_) => return None,
+        Outcome::Result(_) => return None,
         Outcome::Error(failure) => failure.message.clone(),
         Outcome::Cancelled => JsString::from("cancelled"),
         Outcome::Protocol(_) => Failure::internal_error().message,
