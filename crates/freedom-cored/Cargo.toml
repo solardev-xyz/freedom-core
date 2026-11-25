@@ -150,6 +150,10 @@ name = "swarm"
 required-features = ["testhooks"]
 
 [[test]]
+name = "swarm_mining"
+required-features = ["testhooks"]
+
+[[test]]
 name = "swarm_streams"
 required-features = ["testhooks"]
 
