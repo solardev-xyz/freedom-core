@@ -439,6 +439,50 @@ pub enum Abort {
     BodyStreamError,
     /// Past `max_bytes`.
     TooLarge,
+    /// `body_stream_error` with main's reason, on a `shell.swarm_part`
+    /// stream only: reading the part's file failed with this error code
+    /// (a picked file's `EIO`, `ENOENT`, `EACCES`). The reference's
+    /// `describePickedPathError` names the file and the code.
+    Unreadable(ErrorCode),
+}
+
+/// An error code's name as main gives it with a part's abort: an errno
+/// name, `^[A-Z][A-Z0-9_]{0,31}$`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ErrorCode {
+    len: u8,
+    name: [u8; 32],
+}
+
+impl ErrorCode {
+    /// The code, where `name` is one: `None` for anything else.
+    pub fn new(name: &str) -> Option<ErrorCode> {
+        let bytes = name.as_bytes();
+        let first_ok = bytes.first().is_some_and(u8::is_ascii_uppercase);
+        let rest_ok = bytes
+            .iter()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || *b == b'_');
+        if !first_ok || !rest_ok || bytes.len() > 32 {
+            return None;
+        }
+        let mut code = ErrorCode {
+            len: u8::try_from(bytes.len()).ok()?,
+            name: [0; 32],
+        };
+        code.name[..bytes.len()].copy_from_slice(bytes);
+        Some(code)
+    }
+
+    pub fn as_str(&self) -> &str {
+        // Only ASCII is ever stored.
+        std::str::from_utf8(&self.name[..usize::from(self.len)]).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for ErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ErrorCode({})", self.as_str())
+    }
 }
 
 /// The grammar's rule main refused a call by (`invalid_argument` with

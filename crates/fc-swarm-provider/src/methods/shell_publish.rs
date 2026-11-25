@@ -29,6 +29,8 @@
 //! D13's bounds, `busy`, a protocol error) leaves the row's update to
 //! [`ShellPublish::closing`].
 
+use std::collections::BTreeMap;
+
 use fc_json::{JsString, JsValue};
 
 use super::body::{BodyWriter, Fault, Piece};
@@ -112,6 +114,8 @@ pub(crate) struct ShellPublish {
     /// The row's last update is asked.
     closed: bool,
     body: Option<BodyWriter>,
+    /// Each streamed part's file name, for a read error's text.
+    picked: BTreeMap<u32, String>,
     /// The clock at the last answer, for the row's update when the request
     /// ends without the machine.
     now: u64,
@@ -154,6 +158,20 @@ impl ShellPublish {
                 .or_else(|| top_index.then(|| "index.html".to_owned())),
             _ => None,
         };
+        // The file each streamed part reads, by its name
+        // (`path.basename`): a picked file's, or a collection entry's, for
+        // `describePickedPathError`. A data part reads no file.
+        let mut picked = BTreeMap::new();
+        for p in &call.parts {
+            let file = match (call.kind, &p.path) {
+                (PublishKind::File, _) => call.name.as_ref(),
+                (PublishKind::Collection, Some(path)) => Some(path),
+                _ => None,
+            };
+            if let (Source::Part(k), Some(file)) = (&p.source, file) {
+                picked.insert(*k, basename(file.as_str()).to_owned());
+            }
+        }
         let piece = |source: Source, len: u64| match source {
             Source::Inline(bytes) => Piece::Own(bytes),
             Source::Part(part) => Piece::Part { part, len },
@@ -187,6 +205,7 @@ impl ShellPublish {
             row: None,
             closed: false,
             body: None,
+            picked,
             now: cx.world.now(),
         };
         let step = match publish.history.clone() {
@@ -532,7 +551,7 @@ impl ShellPublish {
     /// protocol error).
     fn fault<W: World>(&mut self, cx: &mut Cx<'_, W>, call: AskId, fault: Fault) -> ShellStep {
         let why = match fault {
-            Fault::Part => BodyAbort::BodyStreamError,
+            Fault::Part | Fault::Unreadable { .. } => BodyAbort::BodyStreamError,
             Fault::PartLength | Fault::Internal => BodyAbort::Internal,
         };
         if let Some(body) = self.body.as_mut() {
@@ -541,6 +560,15 @@ impl ShellPublish {
         cx.cancel(call);
         match fault {
             Fault::PartLength => ShellStep::Done(ShellOutcome::Protocol(Protocol::PartLength)),
+            // publishFile's and publishDirectory's catches: the file and the
+            // error's code, the path itself never.
+            Fault::Unreadable { part, code } => match self.picked.get(&part) {
+                Some(name) => {
+                    let text = format!("Could not read \"{name}\" ({})", code.as_str());
+                    self.close_failed(cx, shell::error(text))
+                }
+                None => self.close_failed(cx, shell::internal()),
+            },
             Fault::Part | Fault::Internal => self.close_failed(cx, shell::internal()),
         }
     }
@@ -637,6 +665,13 @@ impl ShellPublish {
             None => ShellStep::Done(shell::internal()),
         }
     }
+}
+
+/// `path.basename(p)` for a `/`-separated path: its last segment, a
+/// trailing `/` dropped.
+fn basename(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    trimmed.rsplit('/').next().unwrap_or(trimmed)
 }
 
 /// `updateEntry(row, updates)`'s statement at `now`.

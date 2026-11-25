@@ -658,7 +658,7 @@ impl Publish {
     /// length than its params gave (a protocol error).
     fn fault<W: World>(&mut self, cx: &mut Cx<'_, W>, fault: Fault) -> Step {
         let why = match fault {
-            Fault::Part => BodyAbort::BodyStreamError,
+            Fault::Part | Fault::Unreadable { .. } => BodyAbort::BodyStreamError,
             Fault::PartLength | Fault::Internal => BodyAbort::Internal,
         };
         if let Some(body) = self.body.as_mut() {
@@ -669,7 +669,9 @@ impl Publish {
         }
         match fault {
             Fault::PartLength => Step::Done(Outcome::Protocol(Protocol::PartLength)),
-            Fault::Part | Fault::Internal => self.close_failed(cx, internal()),
+            Fault::Part | Fault::Unreadable { .. } | Fault::Internal => {
+                self.close_failed(cx, internal())
+            }
         }
     }
 

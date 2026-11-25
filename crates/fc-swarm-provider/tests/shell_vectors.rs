@@ -39,8 +39,8 @@ use fc_swarm_provider::machine::shell::{
     AskBound, Deadline, Shell, ShellCall, ShellError, ShellMethod, ShellOutcome, ask_bound,
 };
 use fc_swarm_provider::machine::{
-    Ask, AskId, Body, Effect, Event, Failed, Form, Need, NodeCall, Protocol, Reply, Rule, SignKey,
-    SignSoc, Signed, StoreWrite, UPLOAD_CHARGE, whole_charge,
+    Abort, Ask, AskId, Body, Effect, ErrorCode, Event, Failed, Form, Need, NodeCall, Protocol,
+    Reply, Rule, SignKey, SignSoc, Signed, StoreWrite, UPLOAD_CHARGE, whole_charge,
 };
 use fc_swarm_provider::methods::shell_publish::{EARLY_ANSWER_MESSAGE, USER_ORIGIN};
 use fc_swarm_provider::stores::history::{self, Bind, Cell, Statement};
@@ -68,6 +68,7 @@ type NodeFn<'a> = Box<dyn FnMut(&NodeCall, &[u8]) -> Event + 'a>;
 
 struct PartFeed {
     id: AskId,
+    part: u32,
     data: Vec<u8>,
     sent: usize,
     window: usize,
@@ -105,6 +106,9 @@ struct Main<'a> {
     db: Option<HistoryDb>,
     /// Stop (and return) once this many node calls were asked.
     stop_after: Option<usize>,
+    /// Main ends this part with this abort after its first frame (a
+    /// picked file's read failing).
+    abort_part: Option<(u32, Abort)>,
 }
 
 impl<'a> Main<'a> {
@@ -119,6 +123,7 @@ impl<'a> Main<'a> {
             fail_writes: None,
             db: None,
             stop_after: None,
+            abort_part: None,
         }
     }
 
@@ -199,7 +204,12 @@ impl<'a> Main<'a> {
             {
                 let n = part.window.min(MAX_FRAME).min(part.data.len() - part.sent);
                 let id = part.id;
-                if n > 0 {
+                if let Some((_, abort)) = self.abort_part.filter(|(k, _)| *k == part.part)
+                    && (part.sent > 0 || part.data.is_empty())
+                {
+                    part.ended = true;
+                    shell.answer(&mut self.world, id, Event::Abort(abort));
+                } else if n > 0 {
                     let frame = part.data[part.sent..part.sent + n].to_vec();
                     part.sent += n;
                     part.window -= n;
@@ -307,6 +317,7 @@ impl<'a> Main<'a> {
                 let len = data.len() as u64;
                 parts.push(PartFeed {
                     id,
+                    part: k,
                     data,
                     sent: 0,
                     window: WINDOW as usize,
@@ -2409,4 +2420,184 @@ fn an_ask_past_its_bound_ends_the_request() {
     };
     assert_eq!(s[0].sql, history::TRIM_SQL);
     assert!(s[1].params.contains(&Bind::Text("busy".to_owned())));
+}
+
+// ---------------------------------------------------------------------------
+// A picked file's read error (main's part abort with its reason).
+
+#[test]
+fn error_codes_are_errno_names() {
+    for good in ["EIO", "ENOENT", "EACCES", "E", "E_2BIG", &"E".repeat(32)] {
+        assert_eq!(
+            ErrorCode::new(good).map(|c| c.as_str().to_owned()),
+            Some(good.to_owned())
+        );
+    }
+    for bad in ["", "eio", "2BIG", "_E", "E-IO", "EÏO", &"E".repeat(33)] {
+        assert_eq!(ErrorCode::new(bad), None, "{bad}");
+    }
+}
+
+/// publishFile's and publishDirectory's catches: `describePickedPathError`
+/// gives `Could not read "<the file's name>" (<code>)` for an error with a
+/// code, as the answer and as the row's text; a part main ends without a
+/// reason, a data part, and D13's expiry keep `Internal error`.
+#[test]
+fn a_picked_files_read_error_names_the_file_and_its_code() {
+    let v = Vectors::load();
+    let keys = keys_of(&v);
+    let unreadable = |code: &str| Abort::Unreadable(ErrorCode::new(code).unwrap());
+    let file = r#"{"kind":"file","parts":[{"bytes":200000,"part":0}],"name":"report.txt","pin":true,"deferred":true,"history":{"type":"file","name":"report.txt"}}"#;
+    let collection = r#"{"kind":"collection","parts":[{"path":"index.html","bytes":4,"base64":"PGgxPg=="},{"path":"assets/app.js","bytes":200000,"part":1}],"pin":true,"deferred":true,"history":{"type":"directory","name":"site"}}"#;
+    let data = r#"{"kind":"data","parts":[{"bytes":200000,"part":0}],"pin":true,"deferred":false}"#;
+    for (what, params, part, abort, want) in [
+        (
+            "a file, EIO",
+            file,
+            0,
+            unreadable("EIO"),
+            r#"Could not read "report.txt" (EIO)"#,
+        ),
+        (
+            "a collection's entry, ENOENT",
+            collection,
+            1,
+            unreadable("ENOENT"),
+            r#"Could not read "app.js" (ENOENT)"#,
+        ),
+        (
+            "a file, no reason",
+            file,
+            0,
+            Abort::BodyStreamError,
+            "Internal error",
+        ),
+        (
+            "data, a reason",
+            data,
+            0,
+            unreadable("EACCES"),
+            "Internal error",
+        ),
+    ] {
+        let mut main = Main::new(&keys, honest_node(a1_stamps()));
+        main.parts.insert(part, vec![9; 200_000]);
+        main.abort_part = Some((part, abort));
+        main.db = Some(HistoryDb::open());
+        let (outcome, played, shell) = main.play(parse(ShellMethod::Publish, params));
+        assert_eq!(outcome, error(want), "{what}");
+        let upload = played.calls.last().unwrap();
+        assert!(
+            matches!(upload.call.form, Form::BzzFile | Form::BzzTar),
+            "{what}"
+        );
+        // The body ends `body_stream_error`, the call goes, nothing stays open.
+        assert!(
+            played
+                .terminals
+                .iter()
+                .any(|(_, out)| *out == BodyOut::Abort(BodyAbort::BodyStreamError)),
+            "{what}: {:?}",
+            played.terminals
+        );
+        assert_eq!(
+            shell.open_asks(),
+            1,
+            "{what}: the call, until main answers it"
+        );
+        let entries = main.db.as_ref().unwrap().entries();
+        if params.contains("history") {
+            assert_eq!(
+                entry_field(&entries[0], "errorMessage"),
+                fc_json::JsValue::string(want),
+                "{what}"
+            );
+        }
+    }
+
+    // D13's bound on the part: its fixed text, not a read error's.
+    let mut world = TestWorld::new(CLOCK);
+    let call = parse(
+        ShellMethod::Publish,
+        &format!(
+            r#"{{"kind":"file","parts":[{{"bytes":10,"part":0}}],"name":"report.txt","batch":"{}","pin":true,"deferred":true}}"#,
+            "a1".repeat(32)
+        ),
+    );
+    let mut shell = Shell::start(call, &mut world);
+    let next = |shell: &mut Shell| match &shell.take_effects()[..] {
+        [Effect::Ask(ask)] => ask.clone(),
+        other => panic!("{other:?}"),
+    };
+    let turn = next(&mut shell);
+    shell.answer(&mut world, turn.id, Event::Turn);
+    let upload = next(&mut shell);
+    shell.answer(&mut world, upload.id, Event::BodyOpen);
+    let part = shell
+        .take_effects()
+        .into_iter()
+        .find_map(|e| match e {
+            Effect::Ask(Ask {
+                id,
+                need: Need::Part(0),
+                ..
+            }) => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    shell.answer(&mut world, part, Event::PartHead(10));
+    shell.expire(&mut world, part);
+    assert_eq!(shell.outcome(), Some(&error("Internal error")));
+}
+
+/// A read error is a part's reason only: on a node reply it is main
+/// breaking the protocol.
+#[test]
+fn a_read_error_on_a_node_reply_is_a_protocol_error() {
+    let mut world = TestWorld::new(CLOCK);
+    let key = JsString::from("https://site.example");
+    let call = fc_swarm_provider::machine::Call {
+        method: Value::str("swarm_readFeedEntry"),
+        params: Value::object([
+            ("topic", Value::str(&"ab".repeat(32))),
+            ("owner", Value::str(&"cd".repeat(20))),
+        ]),
+        key,
+        approval: None,
+    };
+    let mut request = fc_swarm_provider::machine::Request::start(&call, &mut world).unwrap();
+    let ask = |request: &mut fc_swarm_provider::machine::Request| match &request.take_effects()[..]
+    {
+        [Effect::Ask(ask)] => ask.id,
+        other => panic!("{other:?}"),
+    };
+    let ready = ask(&mut request);
+    request.answer(&mut world, ready, Event::Ready(Ok(())));
+    let read = ask(&mut request);
+    request.answer(
+        &mut world,
+        read,
+        Event::Head(fc_swarm_provider::machine::Head {
+            status: 200,
+            status_text: "OK".to_owned(),
+            headers: vec![
+                ("swarm-feed-index".to_owned(), "0000000000000000".to_owned()),
+                (
+                    "swarm-feed-index-next".to_owned(),
+                    "0000000000000001".to_owned(),
+                ),
+            ],
+        }),
+    );
+    request.answer(
+        &mut world,
+        read,
+        Event::Abort(Abort::Unreadable(ErrorCode::new("EIO").unwrap())),
+    );
+    assert_eq!(
+        request.outcome(),
+        Some(&fc_swarm_provider::machine::Outcome::Protocol(
+            Protocol::WrongKind
+        ))
+    );
 }

@@ -69,8 +69,8 @@ use fc_swarm::verify;
 use fc_swarm_provider::machine::node::{BodyOut, WINDOW};
 use fc_swarm_provider::machine::shell::{Shell, ShellCall, ShellMethod, ShellOutcome};
 use fc_swarm_provider::machine::{
-    Abort, Approval, Ask, AskId, Body, Call, Effect, Event, Failed, Form, Head, MineJob, Mined,
-    Need, NodeCall, Outcome, ReadyCheck, Reply, Request, Rule, SignKey, Signed, StoreWrite,
+    Abort, Approval, Ask, AskId, Body, Call, Effect, ErrorCode, Event, Failed, Form, Head, MineJob,
+    Mined, Need, NodeCall, Outcome, ReadyCheck, Reply, Request, Rule, SignKey, Signed, StoreWrite,
 };
 use fc_swarm_provider::methods::feed_index::{round_trip, wrapping_index};
 use fc_swarm_provider::stores::feeds::{FeedChange, Source};
@@ -2026,7 +2026,14 @@ impl Main<'_> {
                     self.parts.retain(|p| p.id != id);
                 }
                 if abort {
-                    self.give(request, checker, id, Event::Abort(Abort::BodyStreamError));
+                    // A part's stream failing, with a file's read error as
+                    // its reason now and then.
+                    let why = if self.rng.chance(50) {
+                        Abort::BodyStreamError
+                    } else {
+                        Abort::Unreadable(ErrorCode::new("EIO").unwrap())
+                    };
+                    self.give(request, checker, id, Event::Abort(why));
                     continue;
                 }
                 if !frame.is_empty() {

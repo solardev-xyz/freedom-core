@@ -64,8 +64,8 @@ pub(crate) mod params;
 pub mod shell;
 
 pub use node::{
-    Abort, Body, BodyAbort, BodyOut, CHUNK_REPLY_CAP, Failed, FeedRef, Form, Head, JSON_REPLY_CAP,
-    MAX_FRAME, NodeCall, Reply, Rule, TreeRef, stream_charge, whole_charge,
+    Abort, Body, BodyAbort, BodyOut, CHUNK_REPLY_CAP, ErrorCode, Failed, FeedRef, Form, Head,
+    JSON_REPLY_CAP, MAX_FRAME, NodeCall, Reply, Rule, TreeRef, stream_charge, whole_charge,
 };
 pub use page::Failure;
 
@@ -782,6 +782,10 @@ impl Asks {
                 }
                 frame(bytes.len(), received, *window)?;
                 false
+            }
+            // A file's read error is a part's reason, never a node reply's.
+            (Kind::Stream { .. }, Event::Abort(Abort::Unreadable(_))) => {
+                return Err(Protocol::WrongKind);
             }
             (Kind::Stream { head, .. } | Kind::Part { head, .. }, Event::End | Event::Abort(_)) => {
                 if !*head {

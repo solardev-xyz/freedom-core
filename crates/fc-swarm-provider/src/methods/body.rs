@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use fc_swarm::chunker::{Chunker, Root};
 use fc_swarm::tar::TarWriter;
 
-use crate::machine::node::{BodyAbort, BodyOut, MAX_FRAME, WINDOW};
+use crate::machine::node::{Abort, BodyAbort, BodyOut, ErrorCode, MAX_FRAME, WINDOW};
 use crate::machine::{AskId, Cx, Event, World};
 
 /// Where some of a body's bytes come from.
@@ -54,6 +54,7 @@ enum Next {
 #[derive(Debug)]
 struct Copy {
     id: AskId,
+    part: u32,
     len: u64,
     received: u64,
     ended: bool,
@@ -66,6 +67,9 @@ pub(crate) enum Fault {
     PartLength,
     /// A part main couldn't stream (aborted, failed, refused).
     Part,
+    /// Part `part`'s file couldn't be read: main's abort with its reason
+    /// (`Abort::Unreadable`).
+    Unreadable { part: u32, code: ErrorCode },
     /// The tar writer refused (a size past its field), or the bytes
     /// written aren't the length announced: a core bug.
     Internal,
@@ -215,6 +219,12 @@ impl BodyWriter {
             }
             Event::End if copy.received == copy.len => copy.ended = true,
             Event::End => return Err(Fault::PartLength),
+            Event::Abort(Abort::Unreadable(code)) => {
+                return Err(Fault::Unreadable {
+                    part: copy.part,
+                    code,
+                });
+            }
             _ => return Err(Fault::Part),
         }
         self.pump(cx)
@@ -314,6 +324,7 @@ impl BodyWriter {
                     let id = cx.part(part);
                     self.copy = Some(Copy {
                         id,
+                        part,
                         len,
                         received: 0,
                         ended: false,
