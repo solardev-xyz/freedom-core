@@ -448,13 +448,13 @@ impl Publish {
                         Err(failing) => return self.close_failed(cx, failing),
                     }
                 }
-                // `Math.floor(Date.now() / 1000)`, each header's time.
-                let mtime = cx.world.now() / 1000;
+                // Each header's time is the clock as it is written
+                // (`tarPieces` reads `Date.now()` for each in turn).
                 let entries = std::mem::take(files)
                     .into_iter()
                     .map(|(path, piece)| (path.as_str().to_owned(), piece))
                     .collect();
-                let Some(writer) = BodyWriter::tar(entries, mtime) else {
+                let Some(writer) = BodyWriter::tar(entries) else {
                     return self.close_failed(cx, internal());
                 };
                 let bytes = writer.total();

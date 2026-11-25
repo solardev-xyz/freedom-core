@@ -112,11 +112,14 @@ impl BodyWriter {
         self.root.as_ref()
     }
 
-    /// A tar of `entries` (path, bytes) as page-upload.js writes it, each
-    /// header stamped `mtime` (seconds), or `None` where the tar writer
-    /// refuses an entry.
-    pub(crate) fn tar(entries: Vec<(String, Piece)>, mtime: u64) -> Option<BodyWriter> {
-        let mut measure = TarWriter::new(mtime).ok()?;
+    /// A tar of `entries` (path, bytes) as page-upload.js and bee-js's
+    /// `TarStream` write it, or `None` where the tar writer refuses an
+    /// entry. Each header is stamped with the clock as it is written,
+    /// `Math.floor(Date.now() / 1000)`: once the entry before it has gone
+    /// out, as both read `Date.now()` for each header in turn.
+    pub(crate) fn tar(entries: Vec<(String, Piece)>) -> Option<BodyWriter> {
+        // A header's length doesn't depend on its time.
+        let mut measure = TarWriter::new(0).ok()?;
         let mut total: u64 = 0;
         let mut queue = VecDeque::new();
         for (path, piece) in entries {
@@ -135,7 +138,8 @@ impl BodyWriter {
         }
         total = total.checked_add(measure.finish().ok()?.len() as u64)?;
         queue.push_back(Next::Finish);
-        let tar = TarWriter::new(mtime).ok()?;
+        // Each entry's header makes its own writer, stamped then.
+        let tar = TarWriter::new(0).ok()?;
         Some(BodyWriter::new(total, Some(tar), queue))
     }
 
@@ -316,8 +320,15 @@ impl BodyWriter {
                     });
                 }
                 Some(Next::Header { path, len }) => {
-                    let tar = self.tar.as_mut().ok_or(Fault::Internal)?;
+                    if self.tar.is_none() {
+                        return Err(Fault::Internal);
+                    }
+                    // The clock now, as `Date.now()` is read for each
+                    // header; no entry is open between two.
+                    let mut tar =
+                        TarWriter::new(cx.world.now() / 1000).map_err(|_| Fault::Internal)?;
                     let header = tar.begin(&path, len).map_err(|_| Fault::Internal)?;
+                    self.tar = Some(tar);
                     self.pending.push_back((header, None));
                 }
                 Some(Next::EndEntry { len }) => {

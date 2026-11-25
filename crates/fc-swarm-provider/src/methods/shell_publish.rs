@@ -414,9 +414,8 @@ impl ShellPublish {
                 if let Some(index) = &self.index_document {
                     headers.push(("swarm-index-document".to_owned(), index.clone()));
                 }
-                // `Math.floor(Date.now() / 1000)`, each header's time.
-                let mtime = cx.world.now() / 1000;
-                let Some(writer) = BodyWriter::tar(std::mem::take(entries), mtime) else {
+                // Each header's time is the clock as it is written.
+                let Some(writer) = BodyWriter::tar(std::mem::take(entries)) else {
                     return self.close_failed(cx, shell::internal());
                 };
                 let bytes = writer.total();
