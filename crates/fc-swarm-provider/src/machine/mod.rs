@@ -247,10 +247,30 @@ pub enum Need {
     /// limits. Answered [`Event::Opened`].
     Subscribe(Subscription),
     /// `shell.swarm_unsubscribe { id }` (D16): main closes subscription
-    /// `id`, which it opened for this request, if it is still open. A
-    /// whole call that can't be called back, like a store write: answered
-    /// [`Event::Closed`].
-    Unsubscribe(JsString),
+    /// `id`, which it opened for this request, if it is still open.
+    /// Answered [`Event::Closed`]. A whole call that is never called back,
+    /// like a store write: neither a cancel nor the request's deadline ends
+    /// it, so it can stay open after the request's outcome (the close a
+    /// cancel, the deadline, `busy` or a protocol error sends). Instead it
+    /// carries its own bound: main must answer within `answer_within_ms`
+    /// ([`CLOSE_BOUND_MS`]) of the ask, and past it the driver ends the
+    /// connection, as for a peer that breaks the protocol (D13's rule for
+    /// a cancelled ask). No close holds its request for ever.
+    Unsubscribe { id: JsString, answer_within_ms: u64 },
+}
+
+/// How long main has to answer a close ([`Need::Unsubscribe`]) before the
+/// connection ends (design 0015's D16).
+pub const CLOSE_BOUND_MS: u64 = 60_000;
+
+impl Need {
+    /// A close of subscription `id`, with its bound.
+    pub(crate) fn close(id: JsString) -> Need {
+        Need::Unsubscribe {
+            id,
+            answer_within_ms: CLOSE_BOUND_MS,
+        }
+    }
 }
 
 /// What the vault signs: a SOC over `span ‖ payload` with `identifier`,
@@ -470,8 +490,12 @@ pub enum Outcome {
     Result(Value),
     /// `{ error }`.
     Error(Failure),
-    /// Cancelled by main or past its deadline: answered `cancelled`, with
-    /// nothing more asked.
+    /// Cancelled by main or past its deadline: answered `cancelled`. Every
+    /// open ask is cancelled and nothing more is asked, but for what the
+    /// method still owes as it ends: an upload's history row ended
+    /// `failed`, and a subscription main opened, or opens once its
+    /// cancelled open answers, closed ([`Need::Unsubscribe`], which no
+    /// cancel ends; its answer comes within its bound).
     Cancelled,
     /// Main broke the protocol: answered -32603 `Internal error`.
     Protocol(Protocol),
@@ -625,7 +649,7 @@ impl Asks {
             Need::Lock(_) => Kind::Lock,
             Need::Live => Kind::Live,
             Need::Subscribe(_) => Kind::Subscribe,
-            Need::Unsubscribe(_) => Kind::Unsubscribe,
+            Need::Unsubscribe { .. } => Kind::Unsubscribe,
         };
         self.open.insert(
             id,
@@ -645,7 +669,7 @@ impl Asks {
             open.cancelled = true;
             // Work on the hashing pool, a store write and a subscription's
             // close can't be called back; the answer is dropped when it
-            // comes.
+            // comes (a close's within its bound, or the connection ends).
             if !matches!(
                 open.kind,
                 Kind::Hash | Kind::Write | Kind::Insert | Kind::Unsubscribe
@@ -935,7 +959,7 @@ impl<W: World> Cx<'_, W> {
 
     /// Main closes subscription `id`, which it opened for this request.
     pub fn unsubscribe(&mut self, id: JsString) -> AskId {
-        self.asks.push(Need::Unsubscribe(id), 0)
+        self.asks.push(Need::close(id), 0)
     }
 
     /// The vault: a key's owner.
@@ -1087,7 +1111,7 @@ impl After {
                 });
             }
             Some(Closing::Unsubscribe(id)) => {
-                asks.push(Need::Unsubscribe(id), 0);
+                asks.push(Need::close(id), 0);
             }
             Some(Closing::AfterOpen(id)) => *slot = Some(After::Open(id)),
             None => {}
@@ -1122,7 +1146,7 @@ impl After {
             (Some(After::Insert(insert)), Event::Inserted(Err(_))) if insert.id == id => {}
             // Opened as the request ended: closed at once.
             (Some(After::Open(open)), Event::Opened(Ok(subscription))) if open == id => {
-                asks.push(Need::Unsubscribe(subscription), 0);
+                asks.push(Need::close(subscription), 0);
             }
             (Some(After::Open(open)), Event::Opened(Err(_))) if open == id => {}
             (Some(After::Write { id: write, retry }), Event::Written(result)) if write == id => {
@@ -1306,7 +1330,8 @@ impl Request {
     }
 
     /// Main cancelled the request, or its deadline passed: every open ask
-    /// is cancelled and the request answers `cancelled`.
+    /// is cancelled and the request answers `cancelled`; what the method
+    /// still owes as it ends is asked then ([`Outcome::Cancelled`]).
     pub fn cancel(&mut self) {
         if self.outcome.is_none() {
             self.finish(Outcome::Cancelled);

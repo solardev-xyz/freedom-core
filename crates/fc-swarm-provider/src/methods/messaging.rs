@@ -1083,7 +1083,8 @@ impl SendGsoc {
 // --- subscribe --------------------------------------------------------------
 
 /// `subscribeError`: what a subscription that didn't open answers, from the
-/// registry's reason and message as main gives them.
+/// registry's reason and message as main gives them; or question 4's
+/// refusal, which main's check just before the open gives.
 fn subscribe_error(failed: OpenFailed) -> Failure {
     let OpenFailed { reason, message } = failed;
     let unavailable = |message: JsString, reason: &JsString| Failure {
@@ -1116,6 +1117,10 @@ fn subscribe_error(failed: OpenFailed) -> Failure {
             ]),
             &r,
         ),
+        // Main's own check again just before it opens (question 4, deviation
+        // `subscribe-proxy`): a proxy or Tor came on while a GSOC key was
+        // mined. The page gets the first check's 4900 shape.
+        Some(r) if r.as_str() == "proxy-or-tor" => Failure::node_unavailable(&r),
         _ => Failure::internal(message),
     }
 }
