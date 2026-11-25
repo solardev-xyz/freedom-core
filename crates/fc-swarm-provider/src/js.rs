@@ -1,10 +1,14 @@
 //! The few JavaScript operations the reference's texts and arithmetic rest
 //! on, with ECMAScript's exact results: `String.prototype.trim`,
 //! `toLowerCase` compared against ASCII text, `Math.round`, `2 ** n`,
-//! `Number.isInteger`, and the two ways the reference turns a node's bytes
-//! into a string (`Response.text()` and `Buffer.toString('utf8')`).
+//! `Number.isInteger`, `ToNumber` and V8's sort ([`sort`], which the
+//! stores' lists go through), and the two ways the reference turns a node's
+//! bytes into a string (`Response.text()` and `Buffer.toString('utf8')`).
 
-use fc_json::JsString;
+use fc_json::{JsString, JsValue, ToPrimitiveError};
+
+mod sort;
+pub use sort::sort;
 
 /// `Response.text()`: UTF-8 with U+FFFD for each bad sequence (the WHATWG
 /// decoder's maximal subparts, as `String::from_utf8_lossy` replaces them),
@@ -144,6 +148,124 @@ pub fn is_integer(x: f64) -> bool {
     x.is_finite() && x.floor() == x
 }
 
+/// `ToNumber(value)`, through `ToPrimitive(value, number)` for an array or
+/// an object (its `toString`: no JSON value has a callable `valueOf`).
+pub fn to_number(value: &JsValue) -> Result<f64, ToPrimitiveError> {
+    Ok(match value {
+        JsValue::Undefined => f64::NAN,
+        JsValue::Null => 0.0,
+        JsValue::Bool(flag) => f64::from(u8::from(*flag)),
+        JsValue::Number(number) => *number,
+        // A lone surrogate reads as U+FFFD, which no number holds either.
+        JsValue::String(text) => string_to_number(text.as_str()),
+        JsValue::Array(_) | JsValue::Object(_) => string_to_number(&value.js_string()?),
+    })
+}
+
+/// `Number(text)`: ECMAScript's `StringToNumber`. Decimals are rounded to
+/// the nearest double (ties to even), as `str::parse` rounds them; `0x`,
+/// `0o` and `0b` integers too, as V8 rounds them.
+pub fn string_to_number(text: &str) -> f64 {
+    let text = text.trim_matches(is_js_whitespace);
+    if text.is_empty() {
+        return 0.0;
+    }
+    for (prefix, bits) in [
+        ("0x", 4),
+        ("0X", 4),
+        ("0o", 3),
+        ("0O", 3),
+        ("0b", 1),
+        ("0B", 1),
+    ] {
+        if let Some(digits) = text.strip_prefix(prefix) {
+            return radix_integer(digits, bits);
+        }
+    }
+    let (negative, body) = match text.as_bytes().first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+    let magnitude = if body == "Infinity" {
+        f64::INFINITY
+    } else if decimal_literal(body) {
+        body.parse::<f64>().unwrap_or(f64::NAN)
+    } else {
+        return f64::NAN;
+    };
+    if negative { -magnitude } else { magnitude }
+}
+
+/// StrUnsignedDecimalLiteral, but `Infinity`: digits with an optional point
+/// (a digit on at least one side of it) and an optional exponent.
+fn decimal_literal(text: &str) -> bool {
+    let (mantissa, exponent) = match text.find(['e', 'E']) {
+        Some(at) => (&text[..at], Some(&text[at + 1..])),
+        None => (text, None),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    if (whole.is_empty() && fraction.is_empty()) || !digits(whole) || !digits(fraction) {
+        return false;
+    }
+    match exponent {
+        None => true,
+        Some(e) => {
+            let e = e.strip_prefix(['+', '-']).unwrap_or(e);
+            !e.is_empty() && digits(e)
+        }
+    }
+}
+
+/// A `0x`/`0o`/`0b` integer's digits (`bits` a digit) as the nearest
+/// double, ties to even; `NaN` if there are none or one isn't a digit.
+fn radix_integer(digits: &str, bits: u32) -> f64 {
+    let radix = 1u32 << bits;
+    if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+        return f64::NAN;
+    }
+    // The first 60 or more significant bits, exactly; past them, how many
+    // bits were left off and whether any of them was set.
+    let mut mantissa: u64 = 0;
+    let mut dropped: i64 = 0;
+    let mut sticky = false;
+    for c in digits.chars() {
+        let digit = u64::from(c.to_digit(radix).unwrap_or(0));
+        if mantissa < 1 << 60 {
+            mantissa = (mantissa << bits) | digit;
+        } else {
+            dropped += i64::from(bits);
+            sticky |= digit != 0;
+        }
+    }
+    if mantissa == 0 {
+        return 0.0;
+    }
+    // Round to 53 bits.
+    let length = 64 - i64::from(mantissa.leading_zeros());
+    let mut shift = (length - 53).max(0);
+    let mut kept = mantissa >> shift;
+    if shift > 0 {
+        let rest = mantissa & ((1u64 << shift) - 1);
+        let half = 1u64 << (shift - 1);
+        if rest > half || (rest == half && (sticky || kept & 1 == 1)) {
+            kept += 1;
+            if kept == 1 << 53 {
+                kept >>= 1;
+                shift += 1;
+            }
+        }
+    }
+    let exponent = shift + dropped;
+    if exponent > 1023 {
+        return f64::INFINITY;
+    }
+    // `kept` < 2^53 is exact, and so is a power of two up to 2^1023.
+    let scale = f64::from_bits(((exponent + 1023) as u64) << 52);
+    kept as f64 * scale
+}
+
 /// A JavaScript string from its parts, each UTF-16 unit kept: `a + b`.
 pub fn concat(parts: &[&JsString]) -> JsString {
     if parts.iter().all(|p| p.is_well_formed()) {
@@ -227,6 +349,58 @@ mod tests {
             &JsString::from_units(&[0xd800]),
             "\u{FFFD}"
         ));
+    }
+
+    #[test]
+    fn numbers_of_strings() {
+        let cases: &[(&str, f64)] = &[
+            ("", 0.0),
+            (" \t\n\u{feff}\u{3000}", 0.0),
+            ("70000", 70000.0),
+            (" 42 ", 42.0),
+            ("+5", 5.0),
+            ("-5", -5.0),
+            ("5.", 5.0),
+            (".5", 0.5),
+            ("1e3", 1000.0),
+            ("1e400", f64::INFINITY),
+            ("-Infinity", f64::NEG_INFINITY),
+            ("0x10", 16.0),
+            ("0o17", 15.0),
+            ("0b101", 5.0),
+            ("0x", f64::NAN),
+            ("-0x10", f64::NAN),
+            ("1_000", f64::NAN),
+            ("NaN", f64::NAN),
+            (".", f64::NAN),
+            ("\u{85}5", f64::NAN),
+            ("abc", f64::NAN),
+            ("0x20000000000001", 9007199254740992.0),
+            ("0x20000000000003", 9007199254740996.0),
+        ];
+        for (text, expected) in cases {
+            let n = string_to_number(text);
+            assert!(
+                n == *expected || (n.is_nan() && expected.is_nan()),
+                "{text:?}: {n}"
+            );
+        }
+        assert_eq!(
+            string_to_number(&format!("0x{}", "f".repeat(300))),
+            f64::INFINITY
+        );
+    }
+
+    #[test]
+    fn numbers_of_values() {
+        let value = |text: &str| fc_json::parse(text).unwrap();
+        assert_eq!(to_number(&value("null")), Ok(0.0));
+        assert_eq!(to_number(&value("true")), Ok(1.0));
+        assert_eq!(to_number(&value("[]")), Ok(0.0));
+        assert_eq!(to_number(&value("[\"7\"]")), Ok(7.0));
+        assert!(to_number(&value("{}")).unwrap().is_nan());
+        assert!(to_number(&value("{\"toString\":1}")).is_err());
+        assert!(to_number(&JsValue::Undefined).unwrap().is_nan());
     }
 
     #[test]

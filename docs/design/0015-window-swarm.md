@@ -74,7 +74,7 @@ Twenty-one methods (`KNOWN_METHODS`, `swarm-provider-ipc.js:145–167`; the file
 
 | File | What | Written |
 |---|---|---|
-| `swarm-feeds.json` | `{ version: 2, nextPublisherKeyIndex, origins: { [key]: { activeIdentityId, identities, feedGranted, grantedAt, feeds } } }` (`feed-store.js:8–27`) | temp file and rename, no fsync; a file that doesn't parse is copied aside and replaced by an empty store (`feed-store.js:334–405`) |
+| `swarm-feeds.json` | `{ version: 2, nextPublisherKeyIndex, origins: { [key]: { activeIdentityId, identities, feedGranted, grantedAt, feeds } } }` (`feed-store.js:8–27`) | temp file and rename, no fsync; a file that doesn't parse is copied aside, and the empty store that replaces it is written at the next change (`feed-store.js:334–405`) |
 | `swarm-manifest-grants.json` | `{ version: 1, records }`: each site's permission-manifest decisions and receipts (`permission-manifests.js:19–100`) | a `.bak` copy, a temp file and a rename, no fsync |
 | `publish-history.sqlite` | table `publishes`, `user_version` 1, WAL (`publish-history.js:50–79`) | better-sqlite3; rows left `uploading` are swept to `failed` at open; no bound on rows |
 | `swarm-permissions.json` | the connection grant and auto-approve flags | 0012's |
@@ -164,7 +164,7 @@ Stage 1 trusts main (0001). The attackers here are a page (any page reaches the 
 | `swarm.upload_status` | chrome, shell | `{ tag_uid }` → `normalizeTag`'s object (`publish-service.js:74–98`) |
 | `swarm.identities` | chrome, shell | `{ op, … }`, one op per IPC handler of `feed-store.js:966–1050` → today's shapes |
 | `swarm.history` | chrome, shell | `{ op: "list" \| "clear" \| "remove", id? }` → today's rows (`rowToEntry`) |
-| `swarm.manifest` | shell | `{ op: "check" \| "decide" \| "list" \| "revoke", … }`; `check` takes the manifest's bytes (at most 8 KiB, `permission-manifests.js:20`) as main fetched them → display data and a token, as today |
+| `swarm.manifest` | shell | `{ op: "check" \| "decide" \| "list" \| "revoke", … }`; `check` runs the reference's legacy and backoff checks first, then asks main for the manifest at a `bzz:` address, and only then takes the bytes main fetched (at most 8 KiB, `permission-manifests.js:20`) → display data and a token, as today. Main never fetches for a URL that isn't `bzz:`, or when the backoff holds; the exchange's shape is SWM-4's |
 | `swarm.body` | shell | `{ for }` → a head `{ bytes }`, then the body of the core's pending `shell.swarm_api` request `for`, as a stream |
 
 - **`approval`** is `"user"` (main's prompt was answered) or `"auto"` (a standing rule). `auto` is admitted only when the grant's flag for the method's type is on and `agent` is false; otherwise `agent_custody` as today, or 4100 `no_rule`, which only a main bug reaches.
@@ -611,9 +611,9 @@ The core never parses a node's reply into a generic JSON value: a dense array of
 | Uploads streaming | 4 |
 | The swarm thread's memory for requests and bodies | 64 MiB, reserved before use ([above](#the-swarm-threads-memory)), apart from the stores |
 | Main's Swarm I/O pool | 64 MiB, reserved before the dial ([Main's Swarm I/O pool](#mains-swarm-io-pool)) |
-| `swarm-feeds.json` | 16 MiB; a write past it refused (`store_full`) |
-| `swarm-manifest-grants.json` | 1 MiB, the same way |
-| `publish-history.sqlite` | 10,000 rows; the oldest finished rows go first |
+| `swarm-feeds.json` | 16 MiB; a write past it refused (`store_full`); a file past it at load is kept aside as one that doesn't parse |
+| `swarm-manifest-grants.json` | 1 MiB, the same way; a file past it at load is unreadable, and the `.bak` copy is read instead |
+| `publish-history.sqlite` | 10,000 rows, trimmed after each insert and at open: finished rows first, oldest first, then the oldest others, never the row just inserted (a clock set back would make it the oldest), so the table never holds more |
 | Mining | one lane; batches of 256 candidates; 16 jobs waiting per site and 256 in all, then `busy`; a stuck batch's watchdog at 1 s |
 
 Today's code has none of these. Its own budgets stay as they are: the read budgets, the 16 new topics a minute, the 128-topic cache, the 32 subscriptions per site and 15 s per mining job. SWM-4 measures the uploads, the reads and the mining, and replaces the numbers if needed.
@@ -664,7 +664,12 @@ Against the reference pin, which has #1057. F-1's and F-5's first deviations (`f
 | `session-transport` | Node's `fetch` for every HTTP call (F-6) | the node's transport |
 | `transport-error-text` | undici's message for each failure | one text per failure class |
 | `subscribe-proxy` (question 4) | a subscription to a remote node goes around the proxy and Tor | refused while a proxy or Tor is on: 4900 `Node not available: proxy-or-tor`; open ones end; the user is told |
-| `history-bound` | no bound | 10,000 rows |
+| `history-bound` | no bound | 10,000 rows, trimmed after each insert and at open (finished rows first, oldest first), never the row just inserted |
+| `history-blobs` | a BLOB cell, which no writer makes, comes back from better-sqlite3 as a `Buffer`: a pass-through column answers it as is; `started_at` and a truthy `completed_at` go through `new Date(value)`, which reads the Buffer's text, so they give an ISO time or throw by its bytes (`X'30'` is 2000-01-01, `X'61'` throws) | every BLOB cell is refused, and the read that meets it fails, as a bad timestamp's does |
+| `store-shapes` | a store file it loads but then fails on (a manifest record of the wrong shape, a string `revision` concatenated), or a v2 feed map that isn't an object of objects kept as it is | read as a file that doesn't parse (manifests: the `.bak` copy, else unreadable); the feed map rebuilt as the reference's sanitizer does |
+| `store-refusal` | a refused change can leave the in-memory store changed (a refused label keeps its publisher index taken) | a refused change changes nothing (0013: memory changes only after the durable write) |
+| `own-keys` | a feed name that is a key of `Object.prototype` reads the inherited property: `toString` gives an empty "existing" feed (`createFeed` answers `bzz://undefined`), and a `__proto__` feed is never saved ([freedom-browser#1327](https://github.com/solardev-xyz/freedom-browser/issues/1327)) | every name is an own key: an ordinary feed |
+| `legacy-dates` | `Date.parse` of a legacy timestamp, V8's own formats and local time included | ECMAScript's date-time format with an offset; anything else is no date, so the import takes the open's time |
 | `store-writes` | temp file and rename, no fsync | 0001's durable write (0013) |
 
 ## Changes from today
@@ -713,6 +718,21 @@ Once decided:
 - **0005:** *Main's pool*: `service-client.js` charges `shell.swarm_*` replies to the Swarm I/O pool, not the chain I/O pool.
 - **0002:** `swarm.sign_soc` loses `chrome` at SWM-4 and goes at SWM-9.
 - **0006:** its *Later designs* bullet for 4.6 points here.
+
+**2026-11-25, SWM-3's stores:** the coordinator's technical calls, proposed, which the user may veto. Building the stores' codecs (SWM-3 part 2) against SWM-1's vectors found:
+- **The manifest check is two steps:** the legacy and backoff checks, then main's fetch of a `bzz:` manifest, then the decision, so the backoff still saves fetches.
+- **A file that doesn't parse** is copied aside, and its empty replacement written at the next change, as the reference does.
+- **Reads have the stores' bounds too:** a feed store past 16 MiB is kept aside; a manifest store past 1 MiB falls back to its `.bak`.
+- **`history-bound` trims** after each insert and at open, finished rows first, and never takes the row just inserted.
+- **New deviations:**
+  - `store-shapes`: files the reference loads and then fails on;
+  - `store-refusal`: a refused change changes nothing;
+  - `own-keys`: feed names like `toString` and `__proto__`, a reference bug filed as freedom-browser#1327;
+  - `legacy-dates`: only ECMAScript's date-time format with an offset is a date;
+  - `history-blobs`: a row with a BLOB cell fails the read.
+- **The manifest check's committed-URL guard** computes a permission key from a URL with the reference's `getPermissionKey` rules. That is the only key the core derives; every grant key is still 0011's, as main gives it (0012).
+- **`getEthereumWalletIdentityReferences`** sorts with ICU's `localeCompare`; it stays with part 3, which must port that order or name a deviation.
+- **Vector gaps:** the new deviations have no case yet; they follow with part 3's vectors change.
 
 **2026-11-25, SWM-3's first findings:** the coordinator's technical calls, proposed, which the user may veto. Building the batch choice, the node errors and the `/stamps` reader against SWM-1's vectors found:
 - **bee-js's schema refusal reaches the page:** the `/stamps` reader also keeps each field's type, and the refusal's text is held to the form's cap (`reply-bounds`). `/stamps`' charge is 7.7 MiB.
