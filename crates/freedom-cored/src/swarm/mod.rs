@@ -7,6 +7,7 @@
 //!   live facts, a topic's turn and an upload's, the streams both ways and
 //!   their idle bound, and the hashing pool's work;
 //! - [`memory`]: the thread's 64 MiB, reserved first in, first out;
+//! - [`lane`]: the mining lane, GSOC searches on a thread of their own;
 //! - [`wire`]: the messages, read strictly and written;
 //! - [`stream`]: the messages around the streams: a part's request and
 //!   head, `swarm.body`'s, and the abort codes each way;
@@ -14,6 +15,7 @@
 //!   hello settles protocol 2.
 
 pub mod engine;
+pub mod lane;
 pub mod memory;
 pub mod stream;
 pub mod thread;

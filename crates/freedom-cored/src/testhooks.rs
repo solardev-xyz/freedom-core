@@ -46,6 +46,12 @@
 //!   thread's world between the cases one core plays (D11): its read
 //!   budgets, tags' owners and feed store afresh, its `Date.now()`, the
 //!   Swarm grants in memory, tags' owners and the feed store.
+//! - The swarm thread's mining lane (design 0015, SWM-4's D11), before
+//!   each batch: `FREEDOM_CORED_TEST_SWARM_MINE_DELAY_MS` sleeps that long
+//!   (a slow batch); `FREEDOM_CORED_TEST_SWARM_MINE_BLOCK` names a file: a
+//!   batch that finds it removes it, writes `<file>.held`, and waits until
+//!   `<file>.release` exists or the core begins to exit (at most 120 s), a
+//!   stuck batch, one for each time the test writes the file.
 //! - `FREEDOM_CORED_TEST_DWEB_WRITER_MARKER` names a file the dweb thread
 //!   rewrites with the most verified-body bytes its writer has held queued
 //!   at once (the duplex sender's `held`, capped at 0009's 8 MiB), each
@@ -302,10 +308,11 @@
 //!   hook above names (`COMMIT_MARKER`, `COMMIT_HOLD`, `REFUSED_CLAIM_HOLD`,
 //!   `STEP_HOLD`, `DWEB_WRITER_MARKER`, `NAMING_MARKER`, `X402_SIGN_MARKER`,
 //!   `EIP1193_RETAINED_MARKER`, `GRANT_WRITE_FAIL`, `INTENT_IDS`,
-//!   `INTENT_LIMITS`, `APPROVAL_CLOCK`, `WALL_CLOCK`, and `SWAP`'s
-//!   replacement), and with `SWAP` renames across directories (`refer`),
-//!   since its replacement is renamed in from elsewhere. So every hook
-//!   works confined; without these variables, nothing is added.
+//!   `INTENT_LIMITS`, `APPROVAL_CLOCK`, `WALL_CLOCK`, `SWARM_MINE_BLOCK`,
+//!   and `SWAP`'s replacement), and with `SWAP` renames across
+//!   directories (`refer`), since its replacement is renamed in from
+//!   elsewhere. So every hook works confined; without these variables,
+//!   nothing is added.
 
 use std::time::Duration;
 
@@ -555,6 +562,27 @@ pub fn swarm_bounds(mut bounds: crate::swarm::engine::Bounds) -> crate::swarm::e
         bounds.stub_writes = true;
     }
     bounds
+}
+
+/// The mining lane's hooks, on the lane thread before each batch: the
+/// delay, then the block, which the batch consumes (its file removed).
+#[cfg(feature = "testhooks")]
+pub fn swarm_mine_batch() {
+    if let Some(ms) = millis("FREEDOM_CORED_TEST_SWARM_MINE_DELAY_MS") {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+    if let Some(file) = std::env::var_os("FREEDOM_CORED_TEST_SWARM_MINE_BLOCK")
+        && std::fs::remove_file(&file).is_ok()
+    {
+        let mut held = file.clone();
+        held.push(".held");
+        let _ = std::fs::write(&held, b"held");
+        let mut release = file;
+        release.push(".release");
+        hold(&release, || {
+            EXITING.load(std::sync::atomic::Ordering::SeqCst)
+        });
+    }
 }
 
 /// The most verified-body bytes the dweb writer has held at once.
@@ -1009,6 +1037,7 @@ const CORE_HOOK_FILES: &[&str] = &[
     "FREEDOM_CORED_TEST_INTENT_LIMITS",
     "FREEDOM_CORED_TEST_APPROVAL_CLOCK",
     "FREEDOM_CORED_TEST_WALL_CLOCK",
+    "FREEDOM_CORED_TEST_SWARM_MINE_BLOCK",
 ];
 
 /// What a confined `serve`, `hold-lock` or `recover` adds to its grant so
@@ -1232,3 +1261,6 @@ pub fn swarm_bounds(bounds: crate::swarm::engine::Bounds) -> crate::swarm::engin
 
 #[cfg(not(feature = "testhooks"))]
 pub fn dweb_writer_held(_held: usize) {}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn swarm_mine_batch() {}

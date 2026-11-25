@@ -57,16 +57,21 @@
 //!   connection.
 //! - **Hashing** (D9): `readData`'s leaf checks go to the thread's own
 //!   pool ([`Io::hash`]); the request stays until each result is back.
-//! - **What this step leaves for later:** the stores and the vault (PR 7),
-//!   the mining lane (PR 8: until it comes every GSOC search is answered
-//!   [`Mined::Off`], mining off) and main's own methods (PR 9). The door
-//!   keeps every method that would need them out, so an ask of that kind
-//!   is a core bug: it is logged and its request cancelled. (With the test
-//!   hooks' stand-in for the stores, [`Bounds::stub_writes`], the store
-//!   methods pass the door and every store write is answered as made,
-//!   writing nothing, so the uploads' streams run through the pipe.)
+//! - **A GSOC search** goes to the mining lane ([`lane`]) once its charge
+//!   is reserved, in the order the charges were; each batch goes to the
+//!   lane thread through [`Io::mine`], its answer comes back to
+//!   [`Engine::mined`], and the lane's watchdog is one of the deadlines
+//!   [`Engine::tick`] keeps. A search's charge goes with its answer.
+//! - **What this step leaves for later:** the stores and the vault (PR 7)
+//!   and main's own methods (PR 9). The door keeps every method that would
+//!   need them out, so an ask of that kind is a core bug: it is logged and
+//!   its request cancelled. (With the test hooks' stand-in for the stores,
+//!   [`Bounds::stub_writes`], the store methods pass the door and every
+//!   store write is answered as made, writing nothing, so the uploads'
+//!   streams run through the pipe.)
 //!
 //! [`memory`]: super::memory
+//! [`lane`]: super::lane
 //! [`CLOSE_BOUND_MS`]: fc_swarm_provider::machine::CLOSE_BOUND_MS
 //! [`SWARM_STREAMS`]: crate::transport::SWARM_STREAMS
 
@@ -84,12 +89,14 @@ use fc_swarm_provider::machine::node::{ERROR_BODY, b64};
 use fc_swarm_provider::machine::shell::Deadline;
 use fc_swarm_provider::machine::{
     AskId, Body, BodyOut, Call, Capability, Effect, Event, Failed, Failure, Job, KNOWN_METHODS,
-    Live, Mined, Need, NotBuilt, Outcome, Protocol, REQUEST_CHARGE, RUNNING_REQUESTS, Reads,
-    Request, STREAMING_UPLOADS, StoreWrite, TagOwners, WAITING_REQUESTS, World,
+    Live, Need, NotBuilt, Outcome, Protocol, REQUEST_CHARGE, RUNNING_REQUESTS, Reads, Request,
+    STREAMING_UPLOADS, StoreWrite, TagOwners, WAITING_REQUESTS, World,
 };
+use fc_swarm_provider::mining::{Batch, Ran};
 use fc_swarm_provider::stores::feeds::FeedStore;
 use fc_swarm_provider::value::Value;
 
+use super::lane::{self, Mining};
 use super::memory::{self, Pool};
 use super::stream;
 use super::wire::{self, Params, Refusal};
@@ -241,6 +248,9 @@ pub trait Io {
     /// Work for the thread's hashing pool (D9): its result comes to
     /// [`Engine::hashed`] for request `id`'s ask `ask`.
     fn hash(&mut self, id: u64, ask: AskId, job: Job);
+    /// Runs a mining batch on lane thread `lane`, started if it isn't the
+    /// thread running now; its answer comes to [`Engine::mined`].
+    fn mine(&mut self, lane: u64, batch: Batch);
 }
 
 /// What the swarm thread holds that every request reads (design 0015, "In
@@ -407,6 +417,8 @@ enum Stage {
     /// Main's head for the core's request `core` came: its stream is open
     /// (or, cancelled, retiring until main's terminal).
     Open(u64),
+    /// Its charge held, a search on the mining lane.
+    Mine,
 }
 
 /// An ask the engine holds, until its terminal answer has been handed back
@@ -592,6 +604,10 @@ pub struct Engine {
     closed_bodies: VecDeque<u64>,
     /// The stand-in stores' last history row ([`Bounds::stub_writes`]).
     stub_rows: i64,
+    /// The mining lane.
+    mining: Mining,
+    /// Searches with their charge, to submit to the lane in order.
+    mine_queue: VecDeque<(u64, AskId)>,
 }
 
 impl Engine {
@@ -627,7 +643,15 @@ impl Engine {
             body_of: BTreeMap::new(),
             closed_bodies: VecDeque::new(),
             stub_rows: 0,
+            mining: Mining::new(),
+            mine_queue: VecDeque::new(),
         }
+    }
+
+    /// The mining lane, for the test hooks (D11).
+    #[cfg(feature = "testhooks")]
+    pub fn mining_mut(&mut self) -> &mut Mining {
+        &mut self.mining
     }
 
     /// The world every request reads, for the test hooks (D11).
@@ -970,7 +994,17 @@ impl Engine {
         for id in idle {
             self.stall(io, now, id)?;
         }
+        self.watchdog(now);
         self.drive(io, now)
+    }
+
+    /// The lane's watchdog at `now`: a batch out for its second ends its
+    /// job (its answers handed back as the caller drives), before a batch's
+    /// answer is taken at `now`, so one that comes at or after it is the
+    /// stuck lane's, and dropped.
+    fn watchdog(&mut self, now: Ms) {
+        let stuck = self.mining.watch(now);
+        self.answer_mined(stuck);
     }
 
     /// The requests whose deadline has come by `now` end at it, before
@@ -1013,7 +1047,8 @@ impl Engine {
         Ok(())
     }
 
-    /// When the next deadline or close bound falls due.
+    /// When the next deadline, close bound or the lane's watchdog falls
+    /// due.
     pub fn next_due(&self) -> Option<Ms> {
         let deadlines = self
             .slots
@@ -1025,7 +1060,18 @@ impl Engine {
             .chain(idle)
             .chain(self.closes.values().copied())
             .chain(self.retiring.values().copied())
+            .chain(self.mining.due())
             .min()
+    }
+
+    /// Lane thread `lane`'s answer for a batch: the jobs it ends answer
+    /// their waiters, and the next batch goes.
+    pub fn mined(&mut self, io: &mut impl Io, now: Ms, lane: u64, ran: Ran) -> Result<(), Fault> {
+        self.deadlines(io, now)?;
+        self.watchdog(now);
+        let answers = self.mining.ran(now, lane, ran);
+        self.answer_mined(answers);
+        self.drive(io, now)
     }
 
     // -----------------------------------------------------------------------
@@ -1063,6 +1109,7 @@ impl Engine {
             if self.pump_api()
                 || self.pump_streams()
                 || self.pump_outbox(io, now)?
+                || self.pump_mining(io, now)
                 || self.pump_admission(io, now)?
             {
                 continue;
@@ -1111,6 +1158,9 @@ impl Engine {
         ask.held = ask.charge;
         if matches!(ask.need, Need::Upload) {
             self.take_turn(id, ask_id);
+        } else if matches!(ask.need, Need::Mine(_)) {
+            ask.stage = Stage::Mine;
+            self.mine_queue.push_back((id, ask_id));
         } else {
             ask.stage = Stage::Slot;
             self.api_queue.push_back((id, ask_id));
@@ -1342,7 +1392,7 @@ impl Engine {
                     .insert((id, ask_id), now.saturating_add(*answer_within_ms));
                 Stage::Outbox
             }
-            Need::Node(_) | Need::Upload => Stage::Memory,
+            Need::Node(_) | Need::Upload | Need::Mine(_) => Stage::Memory,
             // A part's bytes are held under its upload's turn: it needs only
             // a stream's slot.
             Need::Part(_) => Stage::Streams,
@@ -1373,11 +1423,6 @@ impl Engine {
                     return;
                 }
                 Stage::Lock(topic)
-            }
-            // No mining lane before SWM-4 PR 8: mining is off.
-            Need::Mine(_) => {
-                self.ready.push_back((id, ask_id, Event::Mined(Mined::Off)));
-                return;
             }
             Need::Sign(_) | Need::Owner(_) | Need::Write(_) => {
                 crate::log::warn(
@@ -1524,10 +1569,60 @@ impl Engine {
                 self.grant(granted);
                 return;
             }
+            // Only its own wait ends: the job stops at its batch's answer
+            // when it was the last.
+            Stage::Mine => self.mining.cancel(&(id, ask_id)),
             Stage::Slot | Stage::Outbox | Stage::Lock(_) | Stage::Turn | Stage::Streams => {}
         }
         if let Some(ask) = self.take_ask(id, ask_id) {
             self.release(ask.held);
+        }
+    }
+
+    /// The mining lane: searches with their charge submitted in order (a
+    /// cache hit, the budget, `busy` or mining off answered at once), then
+    /// the next batch while the lane thread has none.
+    fn pump_mining(&mut self, io: &mut impl Io, now: Ms) -> bool {
+        let mut moved = false;
+        while let Some((id, ask_id)) = self.mine_queue.pop_front() {
+            let Some(slot) = self.slots.get(&id) else {
+                continue;
+            };
+            let Some(Ask {
+                need: Need::Mine(job),
+                stage: Stage::Mine,
+                ..
+            }) = slot.asks.get(&ask_id)
+            else {
+                continue;
+            };
+            let site = JsString::from(slot.page.origin.as_str());
+            if let Some(mined) = self.mining.submit(io.wall_ms(), &site, *job, (id, ask_id)) {
+                self.answer_mined(vec![((id, ask_id), mined)]);
+            }
+            moved = true;
+        }
+        let lane::Next { answers, batch } = self.mining.work(now);
+        moved |= !answers.is_empty();
+        self.answer_mined(answers);
+        if let Some((lane, batch)) = batch {
+            io.mine(lane, batch);
+            moved = true;
+        }
+        moved
+    }
+
+    /// The lane's answers: each search's ask ends, its charge goes, and its
+    /// request has its answer.
+    fn answer_mined(&mut self, answers: lane::Answers) {
+        for ((id, ask_id), mined) in answers {
+            let held = self
+                .slots
+                .get_mut(&id)
+                .and_then(|slot| slot.asks.remove(&ask_id))
+                .map_or(0, |ask| ask.held);
+            self.release(held);
+            self.ready.push_back((id, ask_id, Event::Mined(mined)));
         }
     }
 

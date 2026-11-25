@@ -10,14 +10,14 @@
 //! pool), `readFeedEntry` (an index's SOC and its streamed join, the latest
 //! entry streamed; a feed by name from the case's feed store),
 //! `getUploadStatus`, `getMessagingIdentity`, `subscribe` (D16's open and
-//! close inside the request) and `sendPss`, and the method dispatch's own
-//! cases. A `getUploadStatus` case's `publishFiles` steps aren't played
-//! (the stores come with PR 7): the tag each gave the site is set in the
-//! thread's world instead, as the reference's upload recorded it. Not
-//! played, and counted: a GSOC subscription by topic (mining, PR 8), and
-//! cases with other methods (PRs 7 to 9). The streams' own cases (windows
-//! and credit, parts and `swarm.body`, the idle bound) are in
-//! `tests/swarm_streams.rs`.
+//! close inside the request, a GSOC topic's signer mined on the lane),
+//! `sendPss` and `sendGsoc` (its signer mined on the lane, PR 8), and the
+//! method dispatch's own cases. A `getUploadStatus` case's `publishFiles`
+//! steps aren't played (the stores come with PR 7): the tag each gave the
+//! site is set in the thread's world instead, as the reference's upload
+//! recorded it. Not played, and counted: cases with other methods (PRs 7
+//! to 9). The streams' own cases (windows and credit, parts and
+//! `swarm.body`, the idle bound) are in `tests/swarm_streams.rs`.
 //!
 //! **What is checked,** each step: the answer, read back from its typed
 //! form, against the reference's (the case's `core` where a deviation
@@ -39,7 +39,7 @@ use swarm_world::logic::{self, Want};
 use swarm_world::{Main, Name, Naming, Script, grants_json, named_page, page, wire_typed};
 
 /// The methods whose cases this step plays.
-const PLAYED: [&str; 10] = [
+const PLAYED: [&str; 11] = [
     "swarm_requestAccess",
     "swarm_getCapabilities",
     "swarm_readChunk",
@@ -50,6 +50,7 @@ const PLAYED: [&str; 10] = [
     "swarm_getMessagingIdentity",
     "swarm_subscribe",
     "swarm_sendPss",
+    "swarm_sendGsoc",
 ];
 
 /// Cases of those methods not played, each with why.
@@ -79,6 +80,7 @@ fn row_of(method: &str, params: fc_json::index::Value<'_, '_>) -> &'static str {
         "swarm_getMessagingIdentity" => "getMessagingIdentity",
         "swarm_subscribe" => "subscribe",
         "swarm_sendPss" => "sendPss",
+        "swarm_sendGsoc" => "sendGsoc",
         other => panic!("{other}"),
     }
 }
@@ -124,7 +126,7 @@ fn indexed(params: fc_json::index::Value<'_, '_>) -> bool {
 /// How main approved a send: a standing rule read custody and showed no
 /// prompt; anything else the user's. Other methods carry none.
 fn approval_of(method: &str, step: fc_json::index::Value<'_, '_>) -> Option<&'static str> {
-    if method != "swarm_sendPss" {
+    if method != "swarm_sendPss" && method != "swarm_sendGsoc" {
         return None;
     }
     let events: Vec<_> = step
@@ -136,32 +138,6 @@ fn approval_of(method: &str, step: fc_json::index::Value<'_, '_>) -> Option<&'st
         .iter()
         .any(|e| e.get("custody").is_some_and(|c| c.kind() == Kind::False));
     Some(if ruled && !prompted { "auto" } else { "user" })
-}
-
-/// A GSOC subscription by topic: its signer is mined (PR 8).
-fn mines(step: fc_json::index::Value<'_, '_>) -> bool {
-    if !step
-        .get("method")
-        .is_some_and(|m| m.is_str("swarm_subscribe"))
-    {
-        return false;
-    }
-    let Some(members) = step.get("params").and_then(|p| p.get("object")) else {
-        return false;
-    };
-    let member = |name: &str| {
-        members.children().find_map(|pair| {
-            let mut it = pair.children();
-            let (key, value) = (it.next()?, it.next()?);
-            key.is_str(name).then_some(value)
-        })
-    };
-    let gsoc = member("kind")
-        .and_then(|kind| kind.get("string"))
-        .is_some_and(|kind| kind.is_str("gsoc"));
-    let topic = member("topic")
-        .is_some_and(|topic| topic.get("null").is_none() && topic.get("undefined").is_none());
-    gsoc && topic
 }
 
 #[test]
@@ -178,7 +154,7 @@ fn every_served_case_plays() {
 
     let mut main = swarm_world::main();
     let (mut played, mut main_answered, mut seeded) = (0usize, 0usize, 0usize);
-    let (mut mining, mut later) = (0usize, 0usize);
+    let mut later = 0usize;
     let mut scenarios_used = std::collections::BTreeSet::new();
     let mut skipped = std::collections::BTreeSet::new();
     let mut left_out_seen = Vec::new();
@@ -220,11 +196,6 @@ fn every_served_case_plays() {
         });
         if others && !dispatch {
             later += 1;
-            skipped.insert(id);
-            continue;
-        }
-        if steps.iter().any(|s| mines(*s)) {
-            mining += 1;
             skipped.insert(id);
             continue;
         }
@@ -391,6 +362,7 @@ fn every_served_case_plays() {
             "getMessagingIdentity",
             "subscribe",
             "sendPss",
+            "sendGsoc",
         ];
         if skipped.contains(case_id) || !played_row.contains(&row.as_str()) {
             continue;
@@ -401,11 +373,11 @@ fn every_served_case_plays() {
         );
     }
     assert_eq!(
-        (played, main_answered, seeded, mining, later),
-        (238, 15, 7, 5, 3),
-        "steps played, main's own, uploads seeded, mining and later cases"
+        (played, main_answered, seeded, later),
+        (280, 16, 7, 3),
+        "steps played, main's own, uploads seeded and later cases"
     );
-    assert_eq!(scenarios_used.len(), 129);
+    assert_eq!(scenarios_used.len(), 157);
 }
 
 /// A `readChunk` of the vectors' 11-byte chunk.
