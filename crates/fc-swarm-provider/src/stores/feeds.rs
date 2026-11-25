@@ -914,10 +914,7 @@ fn active_of_decorated(entry: Option<&JsValue>) -> Option<JsValue> {
     }
     let mode = entry.get("identityMode").filter(|m| m.truthy())?;
     let mut identity = object();
-    identity.set(
-        "id",
-        or_falsy(entry.get("activeIdentityId"), JsValue::Null),
-    );
+    identity.set("id", or_falsy(entry.get("activeIdentityId"), JsValue::Null));
     identity.set("mode", mode.clone());
     identity.set(
         "publisherKeyIndex",
@@ -992,7 +989,11 @@ impl FeedChange {
     /// The change, made on `store` at `now_ms`: its answer as a JSON value
     /// (`undefined` for one that answers nothing), the text to write and
     /// what a manifest lets go of. A refused change leaves `store` as it was.
-    pub fn apply(&self, store: &mut FeedStore, now_ms: u64) -> Result<Changed<JsValue>, StoreError> {
+    pub fn apply(
+        &self,
+        store: &mut FeedStore,
+        now_ms: u64,
+    ) -> Result<Changed<JsValue>, StoreError> {
         let unit = |changed: Changed<()>| Changed {
             value: JsValue::Undefined,
             write: changed.write,

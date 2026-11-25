@@ -37,16 +37,16 @@ use super::body::{BodyWriter, Fault, Piece};
 use super::feed_index::{Next, NextIndex, wrapping_index};
 use super::permitted;
 use super::writes::{
-    Ending, Fail, add_row, admit, bee_upload, batch, bytes_up, closing, feed_not_granted, guard,
-    inserted, owner, row, s, signature, signer_key, soc_up, soc_uploaded, stamps_call,
-    unavailable, written,
+    Ending, Fail, add_row, admit, batch, bee_upload, bytes_up, closing, feed_not_granted, guard,
+    holds_key, inserted, owner, row, s, signature, signer_key, soc_up, soc_uploaded, stamps_call,
+    still_here, unavailable, written,
 };
 use crate::chunks::single_owner;
 use crate::machine::node::BodyAbort;
 use crate::machine::params::{feed_name, is_hex, require_params};
 use crate::machine::{
-    Approval, AskId, Cx, Event, Failure, NodeCall, Outcome, Protocol, ReadyCheck, SignKey,
-    SignSoc, SocKind, Step, StoreWrite, World, fail,
+    Approval, AskId, Cx, Event, Failure, NodeCall, Outcome, Protocol, ReadyCheck, SignKey, SignSoc,
+    SocKind, Step, StoreWrite, World, fail,
 };
 use crate::methods::limits::MAX_DATA_BYTES;
 use crate::stamps::BatchId;
@@ -130,14 +130,26 @@ enum Stage {
     Trim(AskId),
     Stamps(AskId),
     Lock(AskId),
-    Lookup { id: AskId, next: NextIndex },
-    Exists { id: AskId, address: [u8; 32] },
+    Lookup {
+        id: AskId,
+        next: NextIndex,
+    },
+    Exists {
+        id: AskId,
+        address: [u8; 32],
+    },
     /// A large entry waits for its turn among the streaming uploads.
     Turn(AskId),
     /// Its `POST /bytes`, the body hashed as it goes out.
-    Upload { call: AskId, body: Box<BodyWriter> },
+    Upload {
+        call: AskId,
+        body: Box<BodyWriter>,
+    },
     Sign(Box<Signing>),
-    SocUp { id: AskId, address: [u8; 32] },
+    SocUp {
+        id: AskId,
+        address: [u8; 32],
+    },
     Record(AskId),
     Ending(Ending),
     Gone,
@@ -396,7 +408,10 @@ impl FeedWrite {
                 }
                 Step::Wait
             }
-            Stage::Lookup { id: asked, mut next } if asked == id => {
+            Stage::Lookup {
+                id: asked,
+                mut next,
+            } if asked == id => {
                 let step = match event {
                     Event::Reply(reply) => next.reply(&reply),
                     Event::Failed(failed) => next.failed(failed),
@@ -430,7 +445,8 @@ impl FeedWrite {
                                 _ => 0.0,
                             })
                         );
-                        let page = Failure::invalid_params(message.as_str(), "index_already_exists");
+                        let page =
+                            Failure::invalid_params(message.as_str(), "index_already_exists");
                         self.end(
                             cx,
                             Err(Fail {
@@ -500,6 +516,9 @@ impl FeedWrite {
                     return self.end(cx, Err(failure));
                 }
                 match &self.kind {
+                    // `afterEffect`: recorded only while the name answers;
+                    // the write stands either way.
+                    Kind::Update { .. } if !holds_key(cx) => self.updated(cx),
                     Kind::Update { reference, .. } => {
                         let change = FeedChange::UpdateFeedReference {
                             key: cx.origin.clone(),
@@ -519,33 +538,38 @@ impl FeedWrite {
                 if let Err(text) = written(event) {
                     return self.end(cx, Err(Fail::text(text)));
                 }
-                let Kind::Update {
-                    reference, bzz_url, ..
-                } = &self.kind
-                else {
-                    return self.end(cx, Err(Fail::internal()));
-                };
-                let result = Value::object([
-                    ("feedId", Value::String(self.name.clone())),
-                    ("reference", Value::String(reference.clone())),
-                    ("bzzUrl", Value::String(bzz_url.clone())),
-                    ("index", self.shown.clone()),
-                ]);
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "the index as a JavaScript number"
-                )]
-                let index = JsValue::Number(self.index as f64);
-                let updates = row(&[
-                    ("status", s("completed")),
-                    ("index", index),
-                    ("reference", JsValue::String(reference.clone())),
-                ]);
-                self.end(cx, Ok((result, updates)))
+                self.updated(cx)
             }
             Stage::Ending(ending) if ending.id == id => ending.on(event),
             _ => self.end(cx, Err(Fail::internal())),
         }
+    }
+
+    /// `updateFeed`'s answer and its row's update.
+    fn updated<W: World>(&mut self, cx: &mut Cx<'_, W>) -> Step {
+        let Kind::Update {
+            reference, bzz_url, ..
+        } = &self.kind
+        else {
+            return self.end(cx, Err(Fail::internal()));
+        };
+        let result = Value::object([
+            ("feedId", Value::String(self.name.clone())),
+            ("reference", Value::String(reference.clone())),
+            ("bzzUrl", Value::String(bzz_url.clone())),
+            ("index", self.shown.clone()),
+        ]);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "the index as a JavaScript number"
+        )]
+        let index = JsValue::Number(self.index as f64);
+        let updates = row(&[
+            ("status", s("completed")),
+            ("index", index),
+            ("reference", JsValue::String(reference.clone())),
+        ]);
+        self.end(cx, Ok((result, updates)))
     }
 
     /// The index is known: the update, signed, or a large entry's upload
@@ -588,6 +612,9 @@ impl FeedWrite {
     }
 
     fn sign<W: World>(&mut self, cx: &mut Cx<'_, W>, span: u64, payload: Vec<u8>) -> Step {
+        if let Err(moved) = still_here(cx) {
+            return self.end(cx, Err(Fail::answer(moved)));
+        }
         let identifier = feed_update_id(&self.topic, self.index);
         let prepared = match fc_swarm::prepare_soc(&identifier, Some(span), &payload) {
             Ok(prepared) => prepared,
@@ -682,9 +709,17 @@ impl FeedWrite {
         closing(self.row, self.closed, outcome, self.now)
     }
 
-    fn end<W: World>(&mut self, cx: &mut Cx<'_, W>, result: Result<(Value, JsValue), Fail>) -> Step {
+    fn end<W: World>(
+        &mut self,
+        cx: &mut Cx<'_, W>,
+        result: Result<(Value, JsValue), Fail>,
+    ) -> Step {
         let Some(row) = self.row else {
-            return fail(result.err().map_or_else(Failure::internal_error, |f| f.page));
+            return fail(
+                result
+                    .err()
+                    .map_or_else(Failure::internal_error, |f| f.page),
+            );
         };
         self.closed = true;
         match Ending::start(cx, row, result) {

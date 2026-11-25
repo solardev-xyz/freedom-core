@@ -32,8 +32,8 @@ use fc_swarm::verify::soc_address;
 
 use super::permitted;
 use super::writes::{
-    Ending, Fail, add_row, admit, batch, closing, feed_not_granted, guard, inserted, owner, row,
-    s, signature, signer_key, soc_up, soc_uploaded, stamps_call, unavailable, written,
+    Ending, Fail, add_row, admit, batch, closing, feed_not_granted, guard, inserted, owner, row, s,
+    signature, signer_key, soc_up, soc_uploaded, stamps_call, still_here, unavailable, written,
 };
 use crate::chunks::hex;
 use crate::machine::params::{bytes32, empty_options, hex_string, require_params};
@@ -82,12 +82,21 @@ pub(crate) struct SocWrite {
 enum Stage {
     /// The vault: the key's owner; `recheck` once the row exists (the
     /// active identity changed before the signature).
-    Owner { id: AskId, recheck: bool },
+    Owner {
+        id: AskId,
+        recheck: bool,
+    },
     Ready(AskId),
     Insert(AskId),
     Trim(AskId),
-    Sign { id: AskId, prepared: PreparedChunk },
-    Stamps { id: AskId, signature: [u8; 65] },
+    Sign {
+        id: AskId,
+        prepared: PreparedChunk,
+    },
+    Stamps {
+        id: AskId,
+        signature: [u8; 65],
+    },
     SocUp {
         id: AskId,
         address: [u8; 32],
@@ -226,18 +235,19 @@ impl SocWrite {
                 Ok(()) => self.sign(cx),
                 Err(text) => self.end(cx, Err(Fail::text(text))),
             },
-            Stage::Sign { id: asked, prepared } if asked == id => {
-                match signature(event, &self.owner, &prepared) {
-                    Ok(signature) => {
-                        self.stage = Stage::Stamps {
-                            id: cx.whole(stamps_call()),
-                            signature,
-                        };
-                        Step::Wait
-                    }
-                    Err(failure) => self.end(cx, Err(failure)),
+            Stage::Sign {
+                id: asked,
+                prepared,
+            } if asked == id => match signature(event, &self.owner, &prepared) {
+                Ok(signature) => {
+                    self.stage = Stage::Stamps {
+                        id: cx.whole(stamps_call()),
+                        signature,
+                    };
+                    Step::Wait
                 }
-            }
+                Err(failure) => self.end(cx, Err(failure)),
+            },
             Stage::Stamps {
                 id: asked,
                 signature,
@@ -294,7 +304,7 @@ impl SocWrite {
     /// The step that hands the signature to the vault: SW-1 again, with
     /// the feed-grant check, then the signature under the hold.
     fn sign<W: World>(&mut self, cx: &mut Cx<'_, W>) -> Step {
-        let key = match check(cx) {
+        let key = match check(cx).and_then(|key| still_here(cx).map(|()| key)) {
             Ok(key) => key,
             Err(failure) => return self.end(cx, Err(Fail::answer(failure))),
         };
@@ -329,9 +339,17 @@ impl SocWrite {
         closing(self.row, self.closed, outcome, self.now)
     }
 
-    fn end<W: World>(&mut self, cx: &mut Cx<'_, W>, result: Result<(Value, JsValue), Fail>) -> Step {
+    fn end<W: World>(
+        &mut self,
+        cx: &mut Cx<'_, W>,
+        result: Result<(Value, JsValue), Fail>,
+    ) -> Step {
         let Some(row) = self.row else {
-            return fail(result.err().map_or_else(Failure::internal_error, |f| f.page));
+            return fail(
+                result
+                    .err()
+                    .map_or_else(Failure::internal_error, |f| f.page),
+            );
         };
         self.closed = true;
         match Ending::start(cx, row, result) {

@@ -12,8 +12,9 @@ use fc_json::{JsString, JsValue};
 
 use super::permitted;
 use super::writes::{
-    Ending, Fail, add_row, admit, bee_upload, batch, closing, feed_manifest, feed_not_granted,
-    guard, inserted, owner, row as fields, s, signer_key, stamps_call, unavailable, written,
+    Ending, Fail, add_row, admit, batch, bee_upload, closing, feed_manifest, feed_not_granted,
+    guard, holds_key, inserted, owner, row as fields, s, signer_key, stamps_call, unavailable,
+    written,
 };
 use crate::chunks::hex;
 use crate::js::concat;
@@ -82,7 +83,10 @@ impl CreateFeed {
                 ("feedId", Value::String(name.clone())),
                 ("owner", Value::from_js(field("owner"))),
                 ("topic", Value::from_js(field("topic"))),
-                ("manifestReference", Value::from_js(field("manifestReference"))),
+                (
+                    "manifestReference",
+                    Value::from_js(field("manifestReference")),
+                ),
                 (
                     "bzzUrl",
                     Value::String(concat(&[
@@ -172,7 +176,8 @@ impl CreateFeed {
                 if let Err(refused) = guard(cx, self.approval, Capability::Feeds) {
                     return self.end(cx, Err(Fail::answer(refused)));
                 }
-                self.stage = Stage::Manifest(cx.whole(feed_manifest(&self.owner, &self.topic, &batch)));
+                self.stage =
+                    Stage::Manifest(cx.whole(feed_manifest(&self.owner, &self.topic, &batch)));
                 Step::Wait
             }
             Stage::Manifest(asked) if asked == id => {
@@ -206,6 +211,12 @@ impl CreateFeed {
                         Value::from_js(&identity_mode(self.identity.as_ref())),
                     ),
                 ]);
+                if !holds_key(cx) {
+                    // `afterEffect`: the record is kept only while the
+                    // name answers; the manifest stands either way.
+                    let updates = row_of_result(&result);
+                    return self.end(cx, Ok((result, updates)));
+                }
                 let change = FeedChange::SetFeed {
                     key: cx.origin.clone(),
                     name: self.name.clone(),
@@ -236,9 +247,17 @@ impl CreateFeed {
     }
 
     /// The row's last update, then the answer; at once with no row.
-    fn end<W: World>(&mut self, cx: &mut Cx<'_, W>, result: Result<(Value, JsValue), Fail>) -> Step {
+    fn end<W: World>(
+        &mut self,
+        cx: &mut Cx<'_, W>,
+        result: Result<(Value, JsValue), Fail>,
+    ) -> Step {
         let Some(row) = self.row else {
-            return fail(result.err().map_or_else(Failure::internal_error, |f| f.page));
+            return fail(
+                result
+                    .err()
+                    .map_or_else(Failure::internal_error, |f| f.page),
+            );
         };
         self.closed = true;
         match Ending::start(cx, row, result) {

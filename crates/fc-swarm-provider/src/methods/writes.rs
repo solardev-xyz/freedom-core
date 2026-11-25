@@ -8,10 +8,13 @@
 //! - **the vault's answers**: a key's owner, and a signature checked as
 //!   `createSwarmSigner` checks it;
 //! - **the effect's guard** (`meta.page.effect` and `whileGranted`): just
-//!   before each upload, in the step that makes it, the document still
-//!   holding its key and, for an automatic request, Agent custody and the
-//!   site's rule (read live, [`World::key_holds`], [`World::agent`]), then
-//!   the connection and the feed grant;
+//!   before each upload, in the step that makes it and in the reference's
+//!   order, the page's name still binding its key, for an automatic
+//!   request Agent custody and the site's rule, the document still under
+//!   the key (read live: [`World::name_holds`], [`World::agent`],
+//!   [`World::key_holds`]), then the connection and the feed grant; and
+//!   before each signature, the name and the document (design 0015, "Name
+//!   checks": before each effect, a signature among them);
 //! - **the batch** from one `/stamps` read (`selectBestBatch`, deviation
 //!   `stamps-one-read`), and the node's replies to the uploads;
 //! - **the history row** (`addEntry`, `updateEntry`) and the failures after
@@ -20,14 +23,14 @@
 use fc_json::{JsString, JsValue};
 use fc_swarm::PreparedChunk;
 
+use crate::ReplyError;
 use crate::chunks::hex;
 use crate::errors::{self, ServiceError, Site, node_write_error};
 use crate::js::{is_integer, strip_bom, to_lower};
 use crate::json::{ReadError, Reader, Token};
 use crate::machine::node::{Failed, JSON_REPLY_CAP, transport_text};
 use crate::machine::{
-    Approval, AskId, Body, Cx, Event, Failure, Form, NodeCall, Outcome, SignKey, StoreWrite,
-    World,
+    Approval, AskId, Body, Cx, Event, Failure, Form, NodeCall, Outcome, SignKey, StoreWrite, World,
 };
 use crate::stamps::{BatchId, SelectOptions, read_stamps, select_best_batch};
 use crate::stores::feeds::{
@@ -36,7 +39,6 @@ use crate::stores::feeds::{
 use crate::stores::manifests::Capability;
 use crate::stores::{history, is_str, object, template, text};
 use crate::zod::{Expected, Issue, Issues, Received, Segment};
-use crate::ReplyError;
 
 /// A failure after the history row: the row's `errorMessage` and the
 /// page's error.
@@ -122,8 +124,7 @@ pub(crate) fn signer_key(identity: Option<&JsValue>) -> Result<SignKey, Failure>
         return Ok(SignKey::BeeWallet);
     }
     if is_str(Some(&mode), APP_SCOPED) {
-        let Some(JsValue::Number(index)) = identity.and_then(|i| i.get("publisherKeyIndex"))
-        else {
+        let Some(JsValue::Number(index)) = identity.and_then(|i| i.get("publisherKeyIndex")) else {
             return Err(Failure::internal(
                 "App-scoped identity is missing a publisher key index",
             ));
@@ -142,9 +143,7 @@ pub(crate) fn signer_key(identity: Option<&JsValue>) -> Result<SignKey, Failure>
             reason = "a non-negative integer, saturated"
         )]
         let index = *index as u64;
-        return Ok(SignKey::Publisher(
-            u32::try_from(index).unwrap_or(u32::MAX),
-        ));
+        return Ok(SignKey::Publisher(u32::try_from(index).unwrap_or(u32::MAX)));
     }
     if is_str(Some(&mode), ETHEREUM_WALLET) {
         return Err(Failure::internal(ETHEREUM_WALLET_UNAVAILABLE));
@@ -222,16 +221,17 @@ pub(crate) fn admit<W: World>(
 
 /// The effect's guard (page-swarm.js's `guardEffect`, then the provider's
 /// `whileGranted` with the feed grant), in the step that makes the effect,
-/// after its last wait: the document still holds its key; for a request
-/// the site's rule approved, the agent doesn't hold its tab and the rule
-/// stands (`AGENT_CUSTODY`, `RULE_OFF`); the site is still connected and
+/// after its last wait, in the reference's order: the page's name still
+/// binds its key; for a request the site's rule approved, the agent
+/// doesn't hold its tab and the rule stands (`AGENT_CUSTODY`, `RULE_OFF`);
+/// the document is still under the key; the site is still connected and
 /// still has its feed grant.
 pub(crate) fn guard<W: World>(
     cx: &Cx<'_, W>,
     approval: Option<Approval>,
     capability: Capability,
 ) -> Result<(), Failure> {
-    if !cx.key_holds() {
+    if !cx.name_holds() {
         return Err(super::no_address());
     }
     if approval == Some(Approval::Auto) {
@@ -242,6 +242,9 @@ pub(crate) fn guard<W: World>(
             return Err(Failure::not_authorized("not_auto_approved"));
         }
     }
+    if !cx.key_holds() {
+        return Err(super::no_address());
+    }
     if !cx.connected() {
         return Err(Failure::not_connected());
     }
@@ -249,6 +252,25 @@ pub(crate) fn guard<W: World>(
         return Err(feed_not_granted());
     }
     Ok(())
+}
+
+/// Before a signature, the name and the document again (design 0015, "Name
+/// checks": 0012's `transport_key` before each effect, a signature among
+/// them). The reference signs without them, and its guard refuses the
+/// upload after: the page reads the same `NO_ADDRESS`, and nothing is
+/// signed for a page that moved.
+pub(crate) fn still_here<W: World>(cx: &Cx<'_, W>) -> Result<(), Failure> {
+    if !cx.name_holds() || !cx.key_holds() {
+        return Err(super::no_address());
+    }
+    Ok(())
+}
+
+/// `afterEffect`: what a write leaves under the key (a feed's record, its
+/// last reference) is kept only while the name still binds it and the
+/// document is still under it.
+pub(crate) fn holds_key<W: World>(cx: &Cx<'_, W>) -> bool {
+    cx.name_holds() && cx.key_holds()
 }
 
 // --- the batch -------------------------------------------------------------
@@ -404,9 +426,8 @@ fn upload_reference(body: &[u8]) -> Result<Result<JsString, Issue>, ReadError> {
         r.skip(token)?;
     }
     r.finish()?;
-    Ok(reference.map_err(|received| {
-        Issue::new(Expected::String, received, &[Segment::Key("reference")])
-    }))
+    Ok(reference
+        .map_err(|received| Issue::new(Expected::String, received, &[Segment::Key("reference")])))
 }
 
 fn received(token: &Token<'_>) -> Received {
@@ -451,7 +472,11 @@ fn reference_bytes(text: &JsString) -> Result<Vec<u8>, JsString> {
             "Bytes#checkByteLength: bytes length is {len} but expected 32 or 64"
         )));
     }
-    let digit = |c: u8| char::from(c).to_digit(16).and_then(|d| u8::try_from(d).ok());
+    let digit = |c: u8| {
+        char::from(c)
+            .to_digit(16)
+            .and_then(|d| u8::try_from(d).ok())
+    };
     digits
         .as_bytes()
         .chunks(2)
@@ -602,7 +627,10 @@ pub(crate) fn failed_row(fail: &Fail) -> JsValue {
 
 /// The rowid an insert answered, and the bound after it, which keeps the
 /// new row (`history::trim(Some(rowid))`).
-pub(crate) fn inserted<W: World>(cx: &mut Cx<'_, W>, event: Event) -> Result<(i64, AskId), Failure> {
+pub(crate) fn inserted<W: World>(
+    cx: &mut Cx<'_, W>,
+    event: Event,
+) -> Result<(i64, AskId), Failure> {
     match event {
         Event::Inserted(Ok(id)) => {
             let trim = cx.write(StoreWrite::History(vec![history::trim(Some(id))]));
@@ -739,12 +767,20 @@ mod tests {
         assert_eq!(read("{}"), Ok(JsString::default()));
         assert_eq!(read(r#"{"reference":0}"#), Ok(JsString::default()));
         assert_eq!(read(r#"{"reference":12}"#), Ok(JsString::from("12")));
-        assert_eq!(read(r#"{"reference":["a",[1,null]]}"#), Ok(JsString::from("a,1,")));
-        assert_eq!(read(r#"{"reference":{}}"#), Ok(JsString::from("[object Object]")));
+        assert_eq!(
+            read(r#"{"reference":["a",[1,null]]}"#),
+            Ok(JsString::from("a,1,"))
+        );
+        assert_eq!(
+            read(r#"{"reference":{}}"#),
+            Ok(JsString::from("[object Object]"))
+        );
         assert_eq!(read("\"x\""), Ok(JsString::default()));
         assert_eq!(
             read("null"),
-            Err(String::from("Cannot read properties of null (reading 'reference')"))
+            Err(String::from(
+                "Cannot read properties of null (reading 'reference')"
+            ))
         );
     }
 }

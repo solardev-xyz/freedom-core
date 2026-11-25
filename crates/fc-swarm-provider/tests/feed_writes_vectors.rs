@@ -125,7 +125,8 @@ struct WriteWorld {
     /// The page's name still answers and its document holds its key.
     live: bool,
     tags: TagOwners,
-    /// The effect guards run: each reads the key's binding first.
+    /// The name checks made: one in each effect's guard, one before each
+    /// signature, one before a write's record.
     guards: std::cell::Cell<usize>,
 }
 
@@ -152,8 +153,11 @@ impl World for WriteWorld {
     fn budgets(&mut self) -> &mut ReadBudgets {
         &mut self.budgets
     }
-    fn key_holds(&self, _key: &JsString) -> bool {
+    fn name_holds(&self, _key: &JsString) -> bool {
         self.guards.set(self.guards.get() + 1);
+        self.live
+    }
+    fn key_holds(&self, _key: &JsString) -> bool {
         self.live
     }
     fn agent(&self, _key: &JsString) -> bool {
@@ -222,9 +226,7 @@ impl Vault<'_> {
     }
 
     fn owner(&self, key: SignKey) -> Event {
-        Event::Owner(Ok(self
-            .unlocked
-            .then(|| fc_evm::address_of(self.key(key)))))
+        Event::Owner(Ok(self.unlocked.then(|| fc_evm::address_of(self.key(key)))))
     }
 
     fn sign(&mut self, soc: &SignSoc) -> Event {
@@ -232,9 +234,13 @@ impl Vault<'_> {
             return Event::Signed(Err(JsString::from("Vault is locked")));
         }
         self.signed.push(soc.clone());
-        let signed =
-            fc_swarm::sign_soc(self.key(soc.key), &soc.identifier, Some(soc.span), &soc.payload)
-                .unwrap();
+        let signed = fc_swarm::sign_soc(
+            self.key(soc.key),
+            &soc.identifier,
+            Some(soc.span),
+            &soc.payload,
+        )
+        .unwrap();
         Event::Signed(Ok(Signed {
             signature: signed.signature,
             owner: signed.owner,
@@ -483,9 +489,10 @@ impl WriteNode {
                 self.bzz_tag += 1;
                 (created(hex(&root.address()), Some(self.bzz_tag)), None)
             }
-            ("POST", p) if p.starts_with("/feeds/") => {
-                (created(sha(format!("feed manifest {p}").as_bytes()), None), None)
-            }
+            ("POST", p) if p.starts_with("/feeds/") => (
+                created(sha(format!("feed manifest {p}").as_bytes()), None),
+                None,
+            ),
             ("GET", _) => (self.base.reply(method, path), None),
             _ => panic!("the fake node has no answer for {method} {path}"),
         }
@@ -657,10 +664,7 @@ impl<'k> Thread<'k> {
     fn end_holds(&mut self) {
         let mut write = Self::write_store(self.fail_writes);
         for hold in std::mem::take(&mut self.holds) {
-            let answers = self
-                .world
-                .keeper
-                .release(hold, self.world.now, &mut write);
+            let answers = self.world.keeper.release(hold, self.world.now, &mut write);
             self.answers.extend(answers);
         }
     }
@@ -845,7 +849,8 @@ impl<'k> Thread<'k> {
             Need::Node(call) => {
                 if let Some(Body::Stream { .. }) = call.body {
                     assert_eq!(ask.charge, whole_charge(call.form));
-                    self.uploads.insert(ask.id, (call, ask.charge, None, Vec::new()));
+                    self.uploads
+                        .insert(ask.id, (call, ask.charge, None, Vec::new()));
                     self.give(ask.id, Event::BodyOpen);
                     return;
                 }
@@ -1082,10 +1087,7 @@ fn parts_of(step: V<'_, '_>) -> BTreeMap<u32, Vec<u8>> {
             parts
                 .children()
                 .map(|p| {
-                    let bytes = content(
-                        &string(get(p, "seed")),
-                        number(get(p, "length")) as usize,
-                    );
+                    let bytes = content(&string(get(p, "seed")), number(get(p, "length")) as usize);
                     assert_eq!(sha(&bytes), string(get(p, "sha256")));
                     (number(get(p, "part")) as u32, bytes)
                 })
@@ -1202,7 +1204,11 @@ fn check_binds(
 ) {
     let feed_row = matches!(row, "createFeed" | "updateFeed" | "writeFeedEntry");
     let name = params
-        .get(if row == "updateFeed" { "feedId" } else { "name" })
+        .get(if row == "updateFeed" {
+            "feedId"
+        } else {
+            "name"
+        })
         .as_js_string()
         .map(|n| n.as_str().to_owned());
     let topic = name.map(|n| fc_swarm::feed::topic(&format!("{}/{n}", key.as_str())));
@@ -1235,7 +1241,10 @@ fn check_binds(
                 }
             }
             Form::BytesUp => {
-                let reply = logged.body.as_ref().map(|b| String::from_utf8_lossy(b).into_owned());
+                let reply = logged
+                    .body
+                    .as_ref()
+                    .map(|b| String::from_utf8_lossy(b).into_owned());
                 uploaded = reply.and_then(|r| {
                     let parsed = fc_json::parse(&r).ok()?;
                     Some(parsed.get("reference")?.as_str()?.to_owned())
@@ -1248,7 +1257,11 @@ fn check_binds(
                 };
                 if row == "writeSingleOwnerChunk" {
                     let identifier = params.get("identifier").as_js_string().unwrap();
-                    assert_eq!(segments[3], identifier.as_str().to_lowercase(), "{id}: <id>");
+                    assert_eq!(
+                        segments[3],
+                        identifier.as_str().to_lowercase(),
+                        "{id}: <id>"
+                    );
                     continue;
                 }
                 // The identifier is keccak256(<t> ‖ the write's index): the
@@ -1274,7 +1287,11 @@ fn check_binds(
                 if body.len() > 8 + 4096 || uploaded.is_some() {
                     let span: [u8; 8] = body[..8].try_into().unwrap();
                     let address = verify::address_of(&span, &body[8..]).unwrap();
-                    assert_eq!(Some(hex(&address)), uploaded, "{id}: the root bytes_up named");
+                    assert_eq!(
+                        Some(hex(&address)),
+                        uploaded,
+                        "{id}: the root bytes_up named"
+                    );
                 }
             }
             _ => {}
@@ -1315,7 +1332,11 @@ fn check_signatures(
             "{id}: identifier"
         );
         let payload = get(*want, "payload");
-        assert_eq!(number(get(payload, "bytes")) as usize, soc.payload.len(), "{id}");
+        assert_eq!(
+            number(get(payload, "bytes")) as usize,
+            soc.payload.len(),
+            "{id}"
+        );
         match (payload.get("hex"), payload.get("sha256")) {
             (Some(h), _) => assert_eq!(string(h), hex(&soc.payload), "{id}: payload"),
             (None, Some(d)) => assert_eq!(string(d), sha(&soc.payload), "{id}: payload"),
@@ -1351,7 +1372,9 @@ fn expected_history(case: V<'_, '_>, want: Want) -> JsValue {
     )
     .unwrap();
     let core_error = match want {
-        Want::Exact => get(case, "core").get("error").map(|e| string(get(e, "message"))),
+        Want::Exact => get(case, "core")
+            .get("error")
+            .map(|e| string(get(e, "message"))),
         Want::Transport => Some(fc_swarm_provider::machine::node::ERROR_TEXT.to_owned()),
         _ => None,
     };
@@ -1520,15 +1543,32 @@ fn feed_and_soc_writes() {
                     check_calls(&sid, *scenario, &thread, earlier);
                     scenarios_used.insert(sid.clone());
                 }
-                None => assert!(thread.calls.is_empty(), "{sid}: calls, and no honest scenario"),
+                None => assert!(
+                    thread.calls.is_empty(),
+                    "{sid}: calls, and no honest scenario"
+                ),
             }
             check_signatures(&sid, *step, approval, &thread, earlier);
+            // A name check in each effect's guard, before each signature,
+            // and before a write's record (`afterEffect`).
+            let records = usize::from(
+                matches!(outcome, Outcome::Result(_))
+                    && thread.calls.iter().any(|c| {
+                        c.call.form == Form::FeedManifest
+                            || (name == "swarm_updateFeed" && c.call.form == Form::SocUp)
+                    }),
+            );
+            let checks = count(*step, "effect") + count(*step, "sign_soc") + records;
             if earlier {
-                assert!(thread.world.guards.get() <= count(*step, "effect"), "{sid}: effects");
+                assert!(thread.world.guards.get() <= checks, "{sid}: name checks");
                 assert!(thread.ready.len() <= count(*step, "readiness"), "{sid}");
             } else {
-                assert_eq!(thread.world.guards.get(), count(*step, "effect"), "{sid}: effects");
-                assert_eq!(thread.ready.len(), count(*step, "readiness"), "{sid}: readiness");
+                assert_eq!(thread.world.guards.get(), checks, "{sid}: name checks");
+                assert_eq!(
+                    thread.ready.len(),
+                    count(*step, "readiness"),
+                    "{sid}: readiness"
+                );
             }
             assert_eq!(
                 thread.node.soc_posts,
@@ -1576,7 +1616,10 @@ fn feed_and_soc_writes() {
         if !FIVE.iter().any(|m| row_of(m) == row) || left_out.contains(case_id) {
             continue;
         }
-        assert!(scenarios_used.contains(sid), "{sid}: an honest scenario no step played");
+        assert!(
+            scenarios_used.contains(sid),
+            "{sid}: an honest scenario no step played"
+        );
     }
     for d in [
         "index-probe",
@@ -1589,7 +1632,11 @@ fn feed_and_soc_writes() {
     ] {
         assert!(deviations.contains(d), "{d}: no case played");
     }
-    assert_eq!((played, main_answered), (181, 11), "steps played and main's own");
+    assert_eq!(
+        (played, main_answered),
+        (181, 11),
+        "steps played and main's own"
+    );
     assert_eq!(scenarios_used.len(), 99);
 }
 
@@ -1621,7 +1668,11 @@ fn the_page_giving_up_is_a_cancel() {
         approval: approval_of(step),
     });
     assert_eq!(thread.run(), Outcome::Cancelled);
-    assert_eq!(thread.calls.len(), 2, "the stamps, then the existence check");
+    assert_eq!(
+        thread.calls.len(),
+        2,
+        "the stamps, then the existence check"
+    );
     assert!(thread.vault.signed.is_empty());
     assert_eq!(thread.node.soc_posts, 0);
 }
@@ -1825,7 +1876,11 @@ fn write_errors_read_as_each_site() {
                     number(get(digest, "units")),
                     "{id}"
                 );
-                assert_eq!(sha(failure.message.as_bytes()), string(get(digest, "sha256")), "{id}");
+                assert_eq!(
+                    sha(failure.message.as_bytes()),
+                    string(get(digest, "sha256")),
+                    "{id}"
+                );
                 failure.message.clone()
             }
         };
@@ -1845,7 +1900,11 @@ fn write_errors_read_as_each_site() {
     }
     assert_eq!(
         played.into_iter().collect::<Vec<_>>(),
-        [("bee-js-arraybuffer", 18), ("bee-js-json", 36), ("soc-upload", 18)]
+        [
+            ("bee-js-arraybuffer", 18),
+            ("bee-js-json", 36),
+            ("soc-upload", 18)
+        ]
     );
 }
 
@@ -1927,7 +1986,6 @@ fn shared_identity() -> Outcome {
     Outcome::Error(fc_swarm_provider::methods::soc_write::shared_identity())
 }
 
-
 /// The change wins: paused after the first SW-1 check (at the vault's
 /// owner), the change lands; the re-check refuses: no signature, no upload.
 #[test]
@@ -1948,14 +2006,19 @@ fn gate_the_change_wins() {
         raw_soc(&mut thread);
         let owner = thread.run_until(is_owner).expect("paused at the vault");
         // No hold yet: the change completes at once.
-        assert!(matches!(thread.change(change.clone()), Ran::Applied(Ok(_))), "{change:?}");
+        assert!(
+            matches!(thread.change(change.clone()), Ran::Applied(Ok(_))),
+            "{change:?}"
+        );
         thread.answer(owner);
         assert_eq!(thread.run(), want, "{change:?}");
         assert!(thread.vault.signed.is_empty(), "{change:?}: no signature");
         assert_eq!(thread.node.soc_posts, 0, "{change:?}: no upload");
         let rows = thread.history();
         assert_eq!(
-            rows.as_array().unwrap()[0].get("status").and_then(JsValue::as_str),
+            rows.as_array().unwrap()[0]
+                .get("status")
+                .and_then(JsValue::as_str),
             Some("failed")
         );
     }
@@ -2085,7 +2148,10 @@ fn gate_a_write_failure_during_the_hold() {
     assert!(matches!(thread.run(), Outcome::Result(_)));
     assert_eq!(thread.node.soc_posts, 1);
     raw_soc(&mut thread);
-    assert!(matches!(thread.run(), Outcome::Result(_)), "the next raw SOC passes");
+    assert!(
+        matches!(thread.run(), Outcome::Result(_)),
+        "the next raw SOC passes"
+    );
     assert_eq!((thread.vault.signed.len(), thread.node.soc_posts), (1, 1));
 
     // Another store write fails during the hold.
@@ -2141,7 +2207,10 @@ fn gate_allocation_during_the_hold() {
     assert!(matches!(thread.run(), Outcome::Result(_)));
     assert_eq!((thread.vault.signed.len(), thread.node.soc_posts), (1, 1));
     raw_soc(&mut thread);
-    assert!(matches!(thread.run(), Outcome::Result(_)), "still exclusive");
+    assert!(
+        matches!(thread.run(), Outcome::Result(_)),
+        "still exclusive"
+    );
 }
 
 /// SW-1's cases at today's check, with today's errors in today's order:
@@ -2159,19 +2228,33 @@ fn sw1_cases() {
         FeedStore::load(Some(text.as_bytes()), 0, |_| false).store
     };
     let bee = r#"{"id":"bee-wallet","mode":"bee-wallet","publisherKeyIndex":null}"#;
-    let app = |i: &str| format!(r#"{{"id":"app-scoped:{i}","mode":"app-scoped","publisherKeyIndex":{i}}}"#);
+    let app = |i: &str| {
+        format!(r#"{{"id":"app-scoped:{i}","mode":"app-scoped","publisherKeyIndex":{i}}}"#)
+    };
     let eth = r#"{"id":"ethereum-wallet:0","mode":"ethereum-wallet","walletIndex":0}"#;
     let cases: Vec<(&str, FeedStore, Option<Outcome>)> = vec![
-        ("the Bee wallet", store(bee, "bee-wallet", bee), Some(shared_identity())),
+        (
+            "the Bee wallet",
+            store(bee, "bee-wallet", bee),
+            Some(shared_identity()),
+        ),
         (
             "a shared index",
             store(&app("1"), "app-scoped:1", &app("1")),
             Some(shared_identity()),
         ),
-        ("an exclusive index", store(&app("1"), "app-scoped:1", &app("2")), None),
+        (
+            "an exclusive index",
+            store(&app("1"), "app-scoped:1", &app("2")),
+            None,
+        ),
         (
             "a missing index",
-            store(r#"{"id":"app-scoped:x","mode":"app-scoped"}"#, "app-scoped:x", bee),
+            store(
+                r#"{"id":"app-scoped:x","mode":"app-scoped"}"#,
+                "app-scoped:x",
+                bee,
+            ),
             Some(shared_identity()),
         ),
         (

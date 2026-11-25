@@ -244,8 +244,7 @@ fn blocks(hold: &Hold, change: &FeedChange, store: &FeedStore) -> bool {
         // without an active identity.
         FeedChange::EnsureAntWalletIdentity { key, options, .. } => {
             own(key)
-                && (activate(options) == Some(JsValue::Bool(true))
-                    || !store.has_identity_mode(key))
+                && (activate(options) == Some(JsValue::Bool(true)) || !store.has_identity_mode(key))
         }
         FeedChange::RevokeFeedAccess { key, .. } => own(key),
         FeedChange::AllocatePublisherKeyIndex
