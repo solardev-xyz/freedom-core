@@ -405,7 +405,7 @@ fn reference_kept(main: &Main) -> bool {
         .feeds
         .feed(&key(), &JsString::from("blog"))
         .and_then(|feed| feed.get("lastReference").cloned())
-        == Some(JsValue::string(&"cd".repeat(32)))
+        == Some(JsValue::string("cd".repeat(32)))
 }
 
 fn publish_data(approval: Option<Approval>) -> Call {
