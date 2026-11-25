@@ -18,13 +18,16 @@ use base64::Engine as _;
 use fc_json::JsString;
 use fc_json::index::Value as V;
 use fc_swarm_provider::machine::{
-    Body, Event, Failed, Failure, FeedRef, Form, NodeCall, Outcome, ReadyCheck, Subscription,
-    SubscriptionKind, TreeRef,
+    Abort, Body, Event, Failed, Failure, FeedRef, Form, NodeCall, Outcome, ReadyCheck,
+    Subscription, SubscriptionKind, TreeRef,
 };
 use fc_swarm_provider::value::Value as Typed;
 use serde_json::{Value, json};
 
-use crate::common::{Core, dirs, spawn_env};
+use crate::common::{
+    Core, KIND_ABORT, KIND_DATA, KIND_END, KIND_STREAM_CREDIT, Wire, dirs, spawn_env,
+    stream_frame,
+};
 
 #[path = "../../../fc-swarm-provider/tests/common/mod.rs"]
 pub mod logic;
@@ -122,11 +125,19 @@ const FORMS: [Form; 15] = [
     Form::PssSend,
 ];
 
+/// A stream's window (design 0007): 128 KiB.
+pub const WINDOW: u64 = 128 * 1024;
+
 /// The core, its temporary directories, and main's next request ID.
 pub struct Main {
     pub core: Core,
     next: u64,
     _dir: tempfile::TempDir,
+    /// Messages read while main waited for a stream's credit, for the next
+    /// read.
+    pub backlog: VecDeque<Value>,
+    /// The credit the core gave each of its requests' streams main sends.
+    pub credit: BTreeMap<u64, u64>,
 }
 
 /// A core whose Swarm grants have moved, with the test methods.
@@ -142,14 +153,18 @@ pub fn main_with(grant_moved: &[&'static str], env: &[(&str, &str)]) -> Main {
     envs.extend_from_slice(env);
     let mut core = spawn_env("serve", &data, &locks, &[], &envs);
     core.grant_moved = grant_moved.to_vec();
-    let hello = core.hello();
+    // Fragments, as main offers them: a read's answer can pass a frame.
+    let hello = core.hello_fragments();
     assert!(hello["result"].is_object(), "{hello}");
     let capabilities = hello["result"]["capabilities"].as_array().unwrap();
     assert!(capabilities.iter().any(|c| c == "swarm.request"));
+    assert!(capabilities.iter().any(|c| c == "swarm.body"));
     Main {
         core,
         next: 1000,
         _dir: dir,
+        backlog: VecDeque::new(),
+        credit: BTreeMap::new(),
     }
 }
 
@@ -206,16 +221,135 @@ impl Main {
 
     /// `test.swarm_world { … }`: sent, its answer awaited (answering
     /// whatever the thread asks meanwhile is the caller's): `{ memory,
-    /// requests }`.
+    /// requests, streams }`.
     pub fn world(&mut self, params: Value) -> Value {
         let id = self.id();
         self.core.send(&json!({
             "type": "request", "id": id, "method": "test.swarm_world", "params": params,
             "context": { "caller": "shell" },
         }));
-        let response = self.core.response(id);
+        let response = loop {
+            let message = self.recv();
+            if message["type"] == "response" && message["id"] == id {
+                break message;
+            }
+            panic!("{message}");
+        };
         assert!(response["result"].is_object(), "{response}");
         response["result"].clone()
+    }
+
+    /// The next whole message: one read while main waited for credit
+    /// first, then the next off the pipe, a fragmented one reassembled
+    /// (main's bulk credit returned once read), the core's credit for a
+    /// stream main sends noted on the way.
+    pub fn recv(&mut self) -> Value {
+        if let Some(message) = self.backlog.pop_front() {
+            return message;
+        }
+        loop {
+            match self.core.recv_wire() {
+                Wire::Message(message) => return message,
+                Wire::Begin { bytes, .. } => {
+                    let mut payload = Vec::with_capacity(bytes);
+                    loop {
+                        match self.core.recv_wire() {
+                            Wire::Fragment(part) => payload.extend_from_slice(&part),
+                            Wire::Last(part) => {
+                                payload.extend_from_slice(&part);
+                                break;
+                            }
+                            other => panic!("inside a fragmented message: {other:?}"),
+                        }
+                    }
+                    assert_eq!(payload.len(), bytes);
+                    self.core.send_credit();
+                    return serde_json::from_slice(&payload).unwrap();
+                }
+                Wire::Stream {
+                    kind: KIND_STREAM_CREDIT,
+                    id,
+                    rest,
+                } => {
+                    let n = u32::from_be_bytes(rest[..4].try_into().unwrap());
+                    *self.credit.entry(id).or_default() += u64::from(n);
+                }
+                Wire::Credit => {}
+                other => panic!("an unexpected frame: {other:?}"),
+            }
+        }
+    }
+
+    /// Main streams `events` (data, then a terminal) as the body of the
+    /// core's request `call`, within the credit the core gives it; a cancel
+    /// of `call` read while main waits for credit ends the stream
+    /// `cancelled`. Messages read meanwhile wait in the backlog.
+    pub fn stream(&mut self, call: u64, events: &[Event]) {
+        let mut sent = 0u64;
+        for event in events {
+            match event {
+                Event::Data(bytes) => {
+                    let len = bytes.len() as u64;
+                    while sent + len > WINDOW + self.credit.get(&call).copied().unwrap_or(0) {
+                        if self.wait_credit(call) {
+                            self.abort(call, "cancelled");
+                            return;
+                        }
+                    }
+                    self.core.send_raw(&stream_frame(KIND_DATA, call, bytes));
+                    sent += len;
+                }
+                Event::End => self.core.send_raw(&stream_frame(KIND_END, call, b"")),
+                Event::Abort(abort) => self.abort(
+                    call,
+                    match abort {
+                        Abort::Cancelled => "cancelled",
+                        Abort::Stalled => "stalled",
+                        Abort::BodyStreamError => "body_stream_error",
+                        Abort::TooLarge => "too_large",
+                        Abort::Unreadable(_) => panic!("a node body's abort"),
+                    },
+                ),
+                other => panic!("not a stream's event: {other:?}"),
+            }
+        }
+    }
+
+    /// Reads until the core credits `call`'s stream: true if it cancels
+    /// `call` first.
+    fn wait_credit(&mut self, call: u64) -> bool {
+        let before = self.credit.get(&call).copied().unwrap_or(0);
+        loop {
+            match self.core.recv_wire() {
+                Wire::Stream {
+                    kind: KIND_STREAM_CREDIT,
+                    id,
+                    rest,
+                } => {
+                    let n = u32::from_be_bytes(rest[..4].try_into().unwrap());
+                    *self.credit.entry(id).or_default() += u64::from(n);
+                    if id == call && self.credit[&call] > before {
+                        return false;
+                    }
+                }
+                Wire::Message(message) => {
+                    let cancelled = message["type"] == "cancel" && message["id"] == call;
+                    self.backlog.push_back(message);
+                    if cancelled {
+                        return true;
+                    }
+                }
+                Wire::Credit => {}
+                other => panic!("while main waits for credit: {other:?}"),
+            }
+        }
+    }
+
+    /// An abort frame for stream `id`.
+    pub fn abort(&mut self, id: u64, code: &str) {
+        let json = json!({ "code": code, "message": "aborted" }).to_string();
+        self.core
+            .send_raw(&stream_frame(KIND_ABORT, id, json.as_bytes()));
     }
 
     /// Sends `swarm.request` from `page` with `params` (the wire's JSON):
@@ -311,7 +445,7 @@ impl Main {
         let mut probe = None;
         let mut pushes = BTreeSet::new();
         let held = loop {
-            let message = self.core.recv();
+            let message = self.recv();
             match message["type"].as_str().unwrap() {
                 "request" => self.serve(script, request, &message, &mut played, &mut pushes),
                 "cancel" => played.cancels += 1,
@@ -351,6 +485,7 @@ impl Main {
         }
         assert_eq!(held["memory"], 0, "no charge held after the step");
         assert_eq!(held["requests"], 0, "no request left after the step");
+        assert_eq!(held["streams"], 0, "no stream left after the step");
         played
     }
 
@@ -443,17 +578,34 @@ impl Main {
                     // The page gives up as the request reaches the node.
                     self.core.send(&json!({ "type": "cancel", "id": request }));
                 }
-                assert_eq!(events.len(), 1, "a whole call's one answer");
                 let body = match &events[0] {
                     Event::Reply(reply) if reply.ok() => Some(reply.body.clone()),
                     _ => None,
                 };
-                self.answer(id, reply_json(&events[0]));
                 played.calls.push(Logged {
                     call,
                     charge: 0,
                     body,
                 });
+                match &events[0] {
+                    // A streamed reply: its head, then its bytes within the
+                    // core's credit (design 0015, Streams).
+                    Event::Head(head) => {
+                        self.answer(
+                            id,
+                            json!({
+                                "status": head.status,
+                                "status_text": head.status_text,
+                                "headers": head.headers.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
+                            }),
+                        );
+                        self.stream(id, &events[1..]);
+                    }
+                    whole => {
+                        assert_eq!(events.len(), 1, "a whole call's one answer");
+                        self.answer(id, reply_json(whole));
+                    }
+                }
             }
             "approval.recheck" => {
                 assert_eq!(params["request"], request);
