@@ -22,8 +22,9 @@
 //!   answers it, its head, then its bytes within main's credit, then one
 //!   terminal ([`Effect::Body`]). Main's credit for it comes until main has
 //!   answered the call (its credits come first on the one connection), or
-//!   cancelled the body: then its route goes (D4), and a credit after it
-//!   isn't the thread's.
+//!   cancelled the body: then its route closes (D4), and a credit after it
+//!   is main breaking the protocol, refused by the event loop, or here for
+//!   one it had routed before the route closed.
 //! - **Each input first ends the requests whose deadline has come**, as
 //!   the engine's others do: a frame or a result that comes at or after a
 //!   request's deadline finds it cancelled.
@@ -160,7 +161,7 @@ impl Engine {
             Ok(call) => call,
             Err(message) => {
                 io.body_refuse(body, ErrorBody::new(ErrorCode::InvalidArgument, message));
-                io.forget(StreamKey::Body(body));
+                self.close_body(io, body);
                 return Ok(());
             }
         };
@@ -173,7 +174,7 @@ impl Engine {
             // The thread already ended the call (its idle bound): the body
             // gets its one terminal at once.
             io.body(body, BodyOut::Abort(BodyAbort::Cancelled));
-            io.forget(StreamKey::Body(body));
+            self.close_body(io, body);
             return Ok(());
         }
         self.bodies.insert(body, (id, ask_id));
@@ -184,8 +185,9 @@ impl Engine {
         self.drive(io, now)
     }
 
-    /// Main's credit for `swarm.body` `body`. Credit for one main has
-    /// cancelled, crossing the cancel, changes nothing.
+    /// Main's credit for `swarm.body` `body`. One for a body whose route
+    /// the thread closed (main answered its call, or cancelled it), routed
+    /// here before it closed, is main breaking the protocol (D4).
     pub fn body_credit(
         &mut self,
         io: &mut impl Io,
@@ -195,6 +197,9 @@ impl Engine {
     ) -> Result<(), Fault> {
         self.deadlines(io, now)?;
         let Some((id, ask_id)) = self.bodies.get(&body).copied() else {
+            if self.closed_bodies.contains(&body) {
+                return Err(Fault("stream_closed"));
+            }
             return Ok(());
         };
         let open = self
@@ -210,13 +215,23 @@ impl Engine {
         self.drive(io, now)
     }
 
+    /// Main's credit for `swarm.body` `body` past the body's terminal: late,
+    /// as credit crossing the terminal is, unless the thread had closed its
+    /// route (D4).
+    pub fn late_credit(&self, body: u64) -> Result<(), Fault> {
+        if self.closed_bodies.contains(&body) {
+            return Err(Fault("stream_closed"));
+        }
+        Ok(())
+    }
+
     /// Main cancelled `swarm.body` `body` (its sender has written its
     /// `cancelled`): no credit for it follows, so its route goes (D4). The
     /// machine's later parts of it are dropped; main answers the call.
     pub fn body_cancelled(&mut self, io: &mut impl Io, now: Ms, body: u64) -> Result<(), Fault> {
         self.deadlines(io, now)?;
         self.bodies.remove(&body);
-        io.forget(StreamKey::Body(body));
+        self.close_body(io, body);
         self.drive(io, now)
     }
 
@@ -349,8 +364,18 @@ impl Engine {
             .map(|(body, _)| *body);
         if let Some(body) = body {
             self.bodies.remove(&body);
-            io.forget(StreamKey::Body(body));
+            self.close_body(io, body);
         }
+    }
+
+    /// Main sends no credit for `swarm.body` `body` any more: its route
+    /// closes (D4), here and at the event loop.
+    pub(super) fn close_body(&mut self, io: &mut impl Io, body: u64) {
+        io.forget(StreamKey::Body(body));
+        if self.closed_bodies.len() >= crate::transport::CLOSED_BODIES {
+            self.closed_bodies.pop_front();
+        }
+        self.closed_bodies.push_back(body);
     }
 
     /// Request `id` has gone: its bodies' records with it, and the routes
@@ -365,7 +390,7 @@ impl Engine {
             .collect();
         for body in bodies {
             self.bodies.remove(&body);
-            io.forget(StreamKey::Body(body));
+            self.close_body(io, body);
         }
     }
 

@@ -688,6 +688,16 @@ pub fn run(options: &Options) -> Exit {
                     break exit;
                 }
             }
+            // A frame for a body whose route the swarm thread closed: main
+            // sent it after answering the body's call, or cancelling it
+            // (design 0015, D4).
+            Ok(Event::Stream(mark)) if core.requests.routes().closed(mark.key()) => {
+                log::error(
+                    "protocol error",
+                    serde_json::json!({ "category": "stream_closed" }),
+                );
+                break Exit::Protocol;
+            }
             // On to the stream's owner at once, in the order read, so a
             // piece's data follows its head there (design 0015, D4).
             Ok(Event::Stream(mark)) => match core.requests.routes().owner(mark.key()) {

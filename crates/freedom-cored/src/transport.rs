@@ -1031,10 +1031,23 @@ impl Pending {
 ///   is credited late, past its end, until main has read the end, so its
 ///   route must outlast that: a late credit routed to the dweb thread is a
 ///   protocol error there if the ID is above every request it was given.
+/// - **A body's route closed** ([`StreamRoutes::close`]): the Swarm thread
+///   closes a `swarm.body`'s route once main has answered the call it is
+///   the body of, or cancelled it, after which main sends no credit for it
+///   (design 0015, D4). A credit for one of the last [`CLOSED_BODIES`]
+///   bodies closed is main breaking the protocol, which the event loop
+///   refuses ([`StreamRoutes::closed`]); an older one's falls to the dweb
+///   thread's default, as a stray credit for any other request's ID does.
 #[derive(Default)]
 pub struct StreamRoutes {
     routes: Mutex<BTreeMap<StreamKey, crate::requests::Owner>>,
+    /// The bodies whose routes were closed last, oldest first.
+    closed: Mutex<VecDeque<StreamKey>>,
 }
+
+/// How many closed bodies' routes [`StreamRoutes`] remembers: sixteen
+/// times the uploads that stream at once (design 0015, Budgets).
+pub const CLOSED_BODIES: usize = 16 * SWARM_BODIES;
 
 impl StreamRoutes {
     /// The owner of `key`'s stream: the dweb thread unless a route says
@@ -1059,11 +1072,29 @@ impl StreamRoutes {
     }
 
     /// `key`'s stream can take no frame any more: its route goes.
-    #[allow(dead_code)] // the Swarm thread's streams' (SWM-4 PR 6)
     pub fn forget(&self, key: StreamKey) {
         if let Ok(mut routes) = self.routes.lock() {
             routes.remove(&key);
         }
+    }
+
+    /// `key`'s stream can take no frame any more, and one that comes is
+    /// main breaking the protocol: its route goes, and it is remembered as
+    /// closed among the last [`CLOSED_BODIES`].
+    pub fn close(&self, key: StreamKey) {
+        self.forget(key);
+        if let Ok(mut closed) = self.closed.lock() {
+            if closed.len() >= CLOSED_BODIES {
+                closed.pop_front();
+            }
+            closed.push_back(key);
+        }
+    }
+
+    /// Whether `key`'s route was closed, among the last [`CLOSED_BODIES`],
+    /// and not routed again since.
+    pub fn closed(&self, key: StreamKey) -> bool {
+        self.closed.lock().is_ok_and(|closed| closed.contains(&key))
     }
 
     /// The routes held.
@@ -2711,6 +2742,30 @@ mod tests {
         assert_eq!(routes.owner(StreamKey::Piece(5)), Owner::Dweb);
         assert_eq!(routes.owner(StreamKey::Body(9)), Owner::Swarm);
         assert_eq!(routes.len(), 1);
+        assert!(!routes.closed(StreamKey::Piece(5)));
+    }
+
+    /// Design 0015, D4: a body's route closed goes, and a frame for it is
+    /// refused while it is among the last closed; the oldest is let go of
+    /// past the bound.
+    #[test]
+    fn a_closed_bodys_route_is_remembered_within_its_bound() {
+        use crate::requests::Owner;
+        let routes = StreamRoutes::default();
+        routes.register(StreamKey::Body(1), Owner::Swarm);
+        routes.close(StreamKey::Body(1));
+        assert_eq!(routes.len(), 0);
+        assert!(routes.closed(StreamKey::Body(1)));
+        assert!(!routes.closed(StreamKey::Piece(1)));
+        for id in 2..=(CLOSED_BODIES as u64) {
+            routes.close(StreamKey::Body(id));
+        }
+        assert!(routes.closed(StreamKey::Body(1)));
+        routes.close(StreamKey::Body(1000));
+        assert!(!routes.closed(StreamKey::Body(1)));
+        assert!(routes.closed(StreamKey::Body(2)));
+        assert!(routes.closed(StreamKey::Body(1000)));
+        assert_eq!(routes.closed.lock().unwrap().len(), CLOSED_BODIES);
     }
 
     /// Each mark carries its stream's key, which the event loop routes it

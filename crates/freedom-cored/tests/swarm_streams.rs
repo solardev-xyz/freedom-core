@@ -435,21 +435,80 @@ fn drive_until_exit(main: &mut Main, n: usize, play: Play) {
     panic!("no part asked")
 }
 
-/// D4: once main has answered the call, the body's route is gone, so a
-/// credit for it after that is a protocol error: the core ends.
+/// D4: once main has answered the call, the body's route is closed, so a
+/// credit for it after that is a protocol error: the core ends, whether
+/// the event loop routes it after the thread closed the route, or before
+/// (the credit right behind the answer, which the thread then refuses).
 #[test]
 fn a_bodys_credit_after_its_calls_answer_ends_the_connection() {
     let mut main = main_with(&[]);
     let seen = upload(&mut main, 1000, Play::Honest);
     assert!(seen.answer.clone().unwrap()["result"]["result_typed"].is_object());
     settled(&mut main);
-    let body = seen.body.unwrap();
     main.core.send_raw(&stream_frame(
         KIND_STREAM_CREDIT,
-        body,
+        seen.body.unwrap(),
         &1000u32.to_be_bytes(),
     ));
-    ended_with(&mut main, "stream_unknown");
+    ended_with(&mut main, "stream_closed");
+
+    // Right behind the answer.
+    let mut main = main_with(&[]);
+    main.request(&page(SITE), &publish(1000));
+    let mut seen = Seen::default();
+    let mut done = false;
+    loop {
+        match main.core.recv_wire() {
+            Wire::Message(message) if message["type"] == "request" => {
+                let id = message["id"].as_u64().unwrap();
+                let params = &message["params"];
+                match message["method"].as_str().unwrap() {
+                    "shell.swarm_ready" => main.answer(id, json!({ "ok": true })),
+                    "approval.recheck" => {
+                        main.answer(id, json!({ "live": true, "agent": false }));
+                    }
+                    "shell.swarm_api" if params["form"] == "stamps" => main.answer(
+                        id,
+                        json!({ "status": 200, "status_text": "OK", "headers": [],
+                            "body_base64": b64(STAMPS.as_bytes()) }),
+                    ),
+                    "shell.swarm_api" => {
+                        seen.call = Some(id);
+                        let body = main.id();
+                        seen.body = Some(body);
+                        main.core.send(&json!({
+                            "type": "request", "id": body, "method": "swarm.body",
+                            "params": { "for": id }, "context": { "caller": "shell" },
+                        }));
+                    }
+                    "shell.swarm_part" => {
+                        seen.part = Some(id);
+                        main.answer(id, json!({ "bytes": 1000 }));
+                        send_part(&mut main, &mut seen, 1000, Play::Honest, &mut done);
+                    }
+                    other => panic!("{other}"),
+                }
+            }
+            Wire::Stream {
+                kind: KIND_END, id, ..
+            } if Some(id) == seen.body => break,
+            _ => {}
+        }
+    }
+    let answer = json!({
+        "type": "response", "id": seen.call.unwrap(), "result": {
+            "status": 201, "status_text": "Created", "headers": [["swarm-tag", "41"]],
+            "body_base64": b64(format!(r#"{{"reference":"{REFERENCE}"}}"#).as_bytes()),
+        },
+    });
+    let mut both = common::frame(&answer);
+    both.extend_from_slice(&stream_frame(
+        KIND_STREAM_CREDIT,
+        seen.body.unwrap(),
+        &1000u32.to_be_bytes(),
+    ));
+    main.core.send_raw(&both);
+    ended_with(&mut main, "stream_closed");
 }
 
 /// A part the core cancelled that main never ends: at the idle bound

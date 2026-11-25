@@ -436,6 +436,7 @@ impl Thread {
     /// One stream frame from main, through the duplex, to the engine.
     fn frame(&mut self, now: Ms, parsed: StreamFrame<'_>) -> Result<(), Fault> {
         let terminal = matches!(parsed, StreamFrame::End { .. } | StreamFrame::Abort { .. });
+        let stream_id = parsed.id();
         let (credit, data) = match &parsed {
             StreamFrame::Credit { bytes, .. } => (Some(*bytes), None),
             StreamFrame::Data { bytes, .. } => (None, Some(*bytes)),
@@ -452,8 +453,9 @@ impl Thread {
                 let bytes = credit.map_or(0, |n| n as usize);
                 self.engine.body_credit(wire, now, id, bytes)
             }
-            // Crossed the body's terminal.
-            Received::Credited(Credited::Late) => Ok(()),
+            // Crossed the body's terminal: late, unless main had answered
+            // the body's call, or cancelled the body (D4).
+            Received::Credited(Credited::Late) => self.engine.late_credit(stream_id),
             Received::Arrived(Arrived::Data { id, .. }) => match data {
                 Some(bytes) => self.engine.stream_data(wire, now, id, bytes.to_vec()),
                 None => Ok(()),
@@ -912,7 +914,14 @@ impl Io for Wire {
     }
 
     fn forget(&mut self, key: StreamKey) {
-        self.routes.forget(key);
+        match key {
+            // No frame of the core's request's stream can come: a piece's
+            // route goes.
+            StreamKey::Piece(_) => self.routes.forget(key),
+            // Main sends no credit for the body any more: one that comes is
+            // a protocol error (D4).
+            StreamKey::Body(_) => self.routes.close(key),
+        }
     }
 
     fn hash(&mut self, id: u64, ask: AskId, job: Job) {

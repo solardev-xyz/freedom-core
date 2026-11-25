@@ -233,7 +233,9 @@ pub trait Io {
     fn body(&mut self, body: u64, out: BodyOut);
     /// `swarm.body` `body` refused: its one answer.
     fn body_refuse(&mut self, body: u64, error: ErrorBody);
-    /// No frame of stream `key` can come any more: its route goes (D4).
+    /// No frame of stream `key` can come any more: its route goes (D4). A
+    /// body's is closed: main's credit for it after this is main breaking
+    /// the protocol, which the event loop refuses.
     fn forget(&mut self, key: StreamKey);
     /// Work for the thread's hashing pool (D9): its result comes to
     /// [`Engine::hashed`] for request `id`'s ask `ask`.
@@ -579,6 +581,10 @@ pub struct Engine {
     /// Each call whose body main asked for, and that `swarm.body`, until
     /// the body has had its terminal.
     body_of: BTreeMap<(u64, AskId), u64>,
+    /// The bodies whose routes the thread closed last (D4), as the event
+    /// loop remembers them: a credit for one that was routed here before
+    /// its route closed is refused here too.
+    closed_bodies: VecDeque<u64>,
     /// The stand-in stores' last history row ([`Bounds::stub_writes`]).
     stub_rows: i64,
 }
@@ -614,6 +620,7 @@ impl Engine {
             retiring: BTreeMap::new(),
             bodies: BTreeMap::new(),
             body_of: BTreeMap::new(),
+            closed_bodies: VecDeque::new(),
             stub_rows: 0,
         }
     }
