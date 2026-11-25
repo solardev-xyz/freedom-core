@@ -783,6 +783,7 @@ impl Drop for TempDir {
 fn sql_value(bind: &Bind) -> rusqlite::types::Value {
     match bind {
         Bind::Null => rusqlite::types::Value::Null,
+        Bind::Integer(n) => rusqlite::types::Value::Integer(*n),
         Bind::Real(n) => rusqlite::types::Value::Real(*n),
         Bind::Text(t) => rusqlite::types::Value::Text(t.clone()),
     }
@@ -885,7 +886,7 @@ fn add_entry(conn: &rusqlite::Connection, entry: &JsValue, now_ms: u64) -> Resul
     let insert = history::add_entry(entry, now_ms)?;
     execute(conn, &insert);
     let rowid = conn.last_insert_rowid();
-    execute(conn, &history::trim());
+    execute(conn, &history::trim(Some(rowid)));
     let rows = query(conn, &history::by_rowid(rowid));
     Ok(history::entry(&rows[0]).unwrap())
 }
@@ -908,12 +909,7 @@ fn history_op(
             let rows = query(conn, &history::by_id(&arg(0))?);
             Ok(history::entry(&rows[0]).unwrap())
         }
-        "getEntries" => Ok(JsValue::Array(
-            query(conn, &history::get_entries())
-                .iter()
-                .map(|row| history::entry(row).unwrap())
-                .collect(),
-        )),
+        "getEntries" => Ok(history::entries(&query(conn, &history::get_entries())).unwrap()),
         "removeEntry" => Ok(JsValue::Bool(
             execute(conn, &history::remove_entry(&arg(0))?) > 0,
         )),
@@ -1056,4 +1052,77 @@ fn play_history_bound(case: &JsValue, dir: &Path) {
         .unwrap();
     let got = format!("{{\"n\":{n},\"first\":{first},\"last\":{last}}}");
     assert_eq!(got, field(field(case, "core"), "rows").stringify());
+}
+
+/// The bound never takes the row just inserted, even when a clock set back
+/// makes it the oldest, and still prefers finished rows as victims.
+#[test]
+fn history_bound_keeps_the_inserted_row() {
+    let entry = |status: &str| {
+        let mut e = JsValue::Object(Vec::new());
+        e.set("status", JsValue::string(status));
+        e
+    };
+    let ids = |conn: &rusqlite::Connection| -> (i64, i64, i64) {
+        conn.query_row(
+            "SELECT COUNT(*), MIN(id), MAX(id) FROM publishes",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    };
+    let has = |conn: &rusqlite::Connection, id: i64| -> bool {
+        conn.query_row("SELECT COUNT(*) FROM publishes WHERE id = ?", [id], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap()
+            == 1
+    };
+    // 10,000 finished rows, then a finished one with the clock set back.
+    let dir = TempDir::new("bound-clock-back");
+    let conn = open_history(&dir.0, 2_000);
+    for _ in 0..10_000 {
+        add_entry(&conn, &entry("completed"), 2_000).unwrap();
+    }
+    let added = add_entry(&conn, &entry("completed"), 1_000).unwrap();
+    assert_eq!(field(&added, "id"), &JsValue::Number(10_001.0));
+    assert_eq!(ids(&conn), (10_000, 2, 10_001), "the oldest other row went");
+    // 10,000 uploading rows, then an uploading one with the clock set back.
+    let dir = TempDir::new("bound-clock-back-live");
+    let conn = open_history(&dir.0, 2_000);
+    for _ in 0..10_000 {
+        add_entry(&conn, &entry("uploading"), 2_000).unwrap();
+    }
+    add_entry(&conn, &entry("uploading"), 1_000).unwrap();
+    assert_eq!(ids(&conn), (10_000, 2, 10_001));
+    // Mixed: a finished row is the victim before any live one, however new.
+    let dir = TempDir::new("bound-mixed");
+    let conn = open_history(&dir.0, 2_000);
+    for _ in 0..9_999 {
+        add_entry(&conn, &entry("uploading"), 2_000).unwrap();
+    }
+    add_entry(&conn, &entry("failed"), 3_000).unwrap();
+    add_entry(&conn, &entry("uploading"), 1_000).unwrap();
+    assert!(!has(&conn, 10_000), "the finished row went first");
+    assert!(has(&conn, 10_001) && has(&conn, 1));
+    assert_eq!(ids(&conn).0, 10_000);
+}
+
+/// A BLOB cell, which no writer makes, fails the read that meets it
+/// (deviation `history-blobs`), where the reference would answer a Buffer.
+#[test]
+fn history_blob_cell_fails_the_read() {
+    let dir = TempDir::new("blob-cell");
+    let conn = open_history(&dir.0, T0);
+    let mut e = JsValue::Object(Vec::new());
+    e.set("name", JsValue::string("a"));
+    add_entry(&conn, &e, T0).unwrap();
+    assert!(history::entries(&query(&conn, &history::get_entries())).is_ok());
+    conn.execute("UPDATE publishes SET name = X'61'", [])
+        .unwrap();
+    let rows = query(&conn, &history::get_entries());
+    assert_eq!(
+        history::entries(&rows),
+        Err(history::RowError::Blob("name"))
+    );
 }

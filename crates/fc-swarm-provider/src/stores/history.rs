@@ -128,10 +128,12 @@ pub const SWEEP_SQL: &str = "
     WHERE status = ?
   ";
 /// The bound's statement (deviation `history-bound`): the rows past
-/// [`MAX_ROWS`], finished ones first, each kind oldest first.
+/// [`MAX_ROWS`], finished ones first, each kind oldest first, never the row
+/// its parameter names (the one just inserted, which a clock set back would
+/// otherwise make the oldest; `NULL` at the open).
 pub const TRIM_SQL: &str = "
     DELETE FROM publishes WHERE id IN (
-      SELECT id FROM publishes
+      SELECT id FROM publishes WHERE id IS NOT ?
       ORDER BY CASE WHEN status IN ('completed', 'failed') THEN 0 ELSE 1 END,
         started_at, id
       LIMIT max((SELECT COUNT(*) FROM publishes) - 10000, 0)
@@ -147,6 +149,8 @@ const FINAL_STATUSES: [&str; 2] = ["completed", "failed"];
 #[derive(Debug, Clone, PartialEq)]
 pub enum Bind {
     Null,
+    /// A rowid the core binds itself.
+    Integer(i64),
     Real(f64),
     Text(String),
 }
@@ -225,7 +229,7 @@ pub fn open(legacy: Legacy<'_>, now_ms: u64) -> Open {
         import,
         legacy,
         sweep: sweep(now_ms),
-        trim: trim(),
+        trim: trim(None),
     }
 }
 
@@ -293,11 +297,12 @@ pub fn sweep(now_ms: u64) -> Statement {
     }
 }
 
-/// The bound's statement, after each insert and at the open.
-pub fn trim() -> Statement {
+/// The bound's statement, after each insert (keeping the inserted row,
+/// `keep`) and at the open (`None`).
+pub fn trim(keep: Option<i64>) -> Statement {
     Statement {
         sql: TRIM_SQL,
-        params: Vec::new(),
+        params: vec![keep.map_or(Bind::Null, Bind::Integer)],
     }
 }
 
@@ -310,8 +315,8 @@ pub fn add_entry_checks(entry: &JsValue) -> Result<(), Thrown> {
 
 /// `addEntry(entry)` up to its insert: the type and status defaulted
 /// (`data`, `uploading`), `completed_at` stamped for a final status. The
-/// caller runs [`trim`] after it, then reads the row back by its rowid
-/// ([`by_rowid`]) for [`entry`].
+/// caller runs [`trim`] after it with the new rowid, which the bound keeps,
+/// then reads the row back by that rowid ([`by_rowid`]) for [`entry`].
 pub fn add_entry(entry: &JsValue, now_ms: u64) -> Result<Statement, Thrown> {
     let status = or_falsy(Some(prop(entry, "status")?), text("uploading"));
     let started_at = super::time(now_ms);
@@ -416,7 +421,8 @@ pub enum RowError {
     #[error(transparent)]
     Thrown(Thrown),
     /// A BLOB cell, which the reference would answer as a `Buffer` and no
-    /// JSON answer holds. No statement here writes one.
+    /// JSON answer holds (deviation `history-blobs`): the read fails, as a
+    /// bad timestamp's does. No statement here writes one.
     #[error("column {0} holds a BLOB")]
     Blob(&'static str),
     /// Fewer cells than columns.
@@ -465,6 +471,16 @@ pub fn entry(row: &[Cell]) -> Result<JsValue, RowError> {
     );
     out.set("errorMessage", value(12)?);
     Ok(out)
+}
+
+/// `getEntries()`'s answer over [`get_entries`]'s rows: each row's record,
+/// or the first row's refusal, which fails the whole read as the
+/// reference's throw does (a bad timestamp; a BLOB cell, `history-blobs`).
+pub fn entries(rows: &[Vec<Cell>]) -> Result<JsValue, RowError> {
+    rows.iter()
+        .map(|row| entry(row))
+        .collect::<Result<Vec<_>, _>>()
+        .map(JsValue::Array)
 }
 
 /// `new Date(value).toISOString()` for a cell's value.
