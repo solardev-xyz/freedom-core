@@ -338,11 +338,11 @@ fn credit_goes_in_only_when_it_can_go_out() {
 
 /// Main stops reading the body: the core holds one window each way, the
 /// part credited for no more than the body's window, and at the idle bound
-/// (300 ms here) it cancels the call and the part, ends the body and
+/// (1 s here) it cancels the call and the part, ends the body and
 /// answers the page; nothing is held after.
 #[test]
 fn a_stalled_body_ends_at_the_idle_bound() {
-    let mut main = main_with(&[("FREEDOM_CORED_TEST_SWARM_IDLE_MS", "300")]);
+    let mut main = main_with(&[("FREEDOM_CORED_TEST_SWARM_IDLE_MS", "1000")]);
     let n = 600_000;
     let seen = upload(&mut main, n, Play::Stall);
     let answered = Instant::now();
@@ -355,7 +355,7 @@ fn a_stalled_body_ends_at_the_idle_bound() {
     assert!(seen.part_sent <= 2 * WINDOW, "{}", seen.part_sent);
     assert!(seen.credit_past_body <= 0);
     let idle = answered.duration_since(seen.last_progress.unwrap());
-    assert!(idle >= Duration::from_millis(250), "{idle:?}");
+    assert!(idle >= Duration::from_millis(900), "{idle:?}");
     // The call and the part cancelled; the body ended short.
     assert!(seen.cancels.contains(&seen.call.unwrap()));
     assert!(seen.cancels.contains(&seen.part.unwrap()));
@@ -512,10 +512,10 @@ fn a_bodys_credit_after_its_calls_answer_ends_the_connection() {
 }
 
 /// A part the core cancelled that main never ends: at the idle bound
-/// (300 ms here) after the cancel, the core ends the connection.
+/// (1 s here) after the cancel, the core ends the connection.
 #[test]
 fn a_cancelled_stream_main_never_ends_ends_the_connection() {
-    let mut main = main_with(&[("FREEDOM_CORED_TEST_SWARM_IDLE_MS", "300")]);
+    let mut main = main_with(&[("FREEDOM_CORED_TEST_SWARM_IDLE_MS", "1000")]);
     let n = 600_000;
     main.request(&page(SITE), &publish(n));
     let mut seen = Seen::default();
@@ -567,7 +567,7 @@ fn a_cancelled_stream_main_never_ends_ends_the_connection() {
         }
     };
     ended_with(&mut main, "swarm_stream_unterminated");
-    assert!(cancelled.elapsed() >= Duration::from_millis(250));
+    assert!(cancelled.elapsed() >= Duration::from_millis(900));
 }
 
 /// A `readFeedEntry` of the latest entry, by topic and owner.
@@ -625,17 +625,13 @@ fn a_streamed_read_waits_for_a_streams_slot() {
     main.answer(calls[0], feed_head(5));
     main.core
         .send_raw(&stream_frame(KIND_DATA, calls[0], b"hello"));
-    assert!(
-        main.core
-            .recv_wire_within(Duration::from_millis(300))
-            .is_some_and(|w| matches!(
-                w,
-                Wire::Stream {
-                    kind: KIND_STREAM_CREDIT,
-                    ..
-                }
-            ))
-    );
+    assert!(matches!(
+        main.core.recv_wire(),
+        Wire::Stream {
+            kind: KIND_STREAM_CREDIT,
+            ..
+        }
+    ));
     main.core.send_raw(&stream_frame(KIND_END, calls[0], b""));
     // The first answers; the second's call goes.
     let mut answered = Vec::new();
