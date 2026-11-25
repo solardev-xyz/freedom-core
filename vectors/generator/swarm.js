@@ -315,7 +315,8 @@ const NO_CASE = {
 };
 const DEVIATION_IDS = ['feed-entry-bound', 'tar-paths', 'feed-wrap-root', 'reference-check', 'read-data-verified', 'read-pieces',
   'index-probe', 'index-allocation', 'stamps-one-read', 'deadlines', 'busy', 'reply-bounds', 'reply-syntax', 'batch-depth', 'error-body-bound', 'session-transport',
-  'transport-error-text', 'subscribe-proxy', 'history-bound', 'store-writes'];
+  'transport-error-text', 'subscribe-proxy', 'history-bound', 'history-blobs', 'store-shapes', 'store-refusal', 'own-keys', 'legacy-dates',
+  'store-writes'];
 
 function deviationsOf(swarm) {
   const where = Object.fromEntries(DEVIATION_IDS.map((id) => [id, []]));
@@ -412,7 +413,16 @@ const SWARM_FORMATS = {
     + '(error-body-bound). mapping: the method cases that show nodeWriteError\'s and mapChunkReadError\'s mappings.',
   stores: 'feeds: feed-store.js\'s operations from a file\'s text, each result or error, and the files after (backups included); manifests: '
     + 'permission-manifests.js\'s check, decide, useIndividual, disconnect and get over scripted manifests, the grants and files after; history: '
-    + 'publish-history.js\'s operations, the schema, pragmas and rows.',
+    + 'publish-history.js\'s operations (after a first session\'s, `seeded`, with a BLOB cell written into one of its rows where `blob` says), the '
+    + 'schema, pragmas and rows (a BLOB cell as { blob: hex }). Local time is UTC (generate.js sets TZ). A case marked deviation records the '
+    + 'reference\'s outcome, and `core` the core\'s: index-allocation\'s as text, history-bound\'s row count, and for the others what the case '
+    + 'records, each answer in the form the case\'s own take: feeds `ops` (each operation\'s answer) and `files`; manifests `steps`, '
+    + '`grants_after` and `files`, or `load: unreadable` (the core reads neither the file nor a .bak copy: no step reads the store, and nothing is '
+    + 'written); history `ops` and `rows`, with `refused` { reason: blob, column } for a read the core refuses (history-blobs). Where the core\'s '
+    + 'answers are the reference\'s own over another input, that input is: for store-refusal, the operations but the refused one, whose answer '
+    + 'is the reference\'s refusal; for store-shapes, the feed store as the core holds it (`core_before`, each feed map rebuilt as '
+    + 'sanitizeV2OriginEntry does) or a manifest file that doesn\'t parse, beside the same .bak copy; for legacy-dates, the legacy file with each '
+    + 'timestamp the core doesn\'t take removed.',
 };
 
 module.exports = { buildSwarm, environment, loadPackages, BEE_JS, CORE_SDK };
