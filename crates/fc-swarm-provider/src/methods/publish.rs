@@ -41,7 +41,7 @@ use crate::machine::node::{Body, BodyAbort, Failed, INLINE_BODY};
 use crate::machine::params::{empty_options, require_params};
 use crate::machine::{
     AfterInsert, Approval, AskId, Capability, Closing, Cx, Effect, Event, Failure, Form, NodeCall,
-    Outcome, Protocol, ReadyCheck, Reply, Step, StoreWrite, World, fail,
+    Outcome, Protocol, ReadyCheck, Reply, RowEnd, Step, StoreWrite, World, fail,
 };
 use crate::replies::{self, ChunkUpload, NO_REFERENCE_MESSAGE, PageUpload};
 use crate::stamps::{SelectOptions, read_stamps, select_best_batch};
@@ -251,8 +251,11 @@ impl Publish {
             Outcome::Protocol(_) => Failure::internal_error().message,
         };
         match (self.row, &self.stage) {
-            (Some(row), _) => update(row, &failed_update(&text), self.now)
-                .map(|s| Closing::Write(StoreWrite::History(vec![s]))),
+            (Some(row), _) => Some(Closing::Row(RowEnd {
+                row,
+                text,
+                now: self.now,
+            })),
             (None, Stage::Insert(id)) => Some(Closing::AfterInsert(AfterInsert {
                 id: *id,
                 text,
@@ -680,14 +683,17 @@ impl Publish {
     }
 }
 
-/// An insert that answered after the request ended: the bound's trim
-/// keeping its row, then the row `failed` with the request's end.
-pub(crate) fn after_insert(rowid: i64, text: &JsString, now: u64) -> Option<StoreWrite> {
-    let failed = update(rowid, &failed_update(text), now)?;
-    Some(StoreWrite::History(vec![
-        history::trim(Some(rowid)),
-        failed,
-    ]))
+/// A row ended after the request's outcome: `failed` with `text` at `now`;
+/// with `trim`, the bound's trim keeping it first (its insert answered
+/// after the outcome).
+pub(crate) fn row_failed(row: i64, text: &JsString, now: u64, trim: bool) -> Option<StoreWrite> {
+    let failed = update(row, &failed_update(text), now)?;
+    let mut statements = Vec::with_capacity(2);
+    if trim {
+        statements.push(history::trim(Some(row)));
+    }
+    statements.push(failed);
+    Some(StoreWrite::History(statements))
 }
 
 /// Whether one file's body streams: a part, or (which main doesn't send)

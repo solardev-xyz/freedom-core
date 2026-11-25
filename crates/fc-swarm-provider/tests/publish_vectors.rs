@@ -1944,6 +1944,11 @@ fn an_insert_in_flight_still_ends_its_row() {
             !effects.iter().any(|e| matches!(e, Effect::Ask(_))),
             "{end}: nothing asked before the rowid: {effects:?}"
         );
+        // An answer of the wrong kind changes nothing: the insert still
+        // waits for its rowid.
+        request.answer(&mut world, insert.id, Event::Written(Ok(())));
+        assert!(request.take_effects().is_empty(), "{end}: the wrong kind");
+        assert_eq!(request.open_asks(), 1, "{end}: the insert stays open");
         request.answer(&mut world, insert.id, Event::Inserted(Ok(rowid)));
         let effects = request.take_effects();
         assert_eq!(effects.len(), 1, "{end}: {effects:?}");
@@ -2140,4 +2145,125 @@ fn a_body_asked_for_after_a_cancel_ends_cancelled() {
     request.answer(&mut world, write, Event::Written(Ok(())));
     assert_eq!(request.open_asks(), 0);
     assert_eq!(request.outcome(), Some(&Outcome::Cancelled));
+}
+
+/// `history-retry` after the outcome: the row's failed update, asked once
+/// the request ended (its row known, or its insert answering after the
+/// end), is followed once by the failed update with the write's error when
+/// it fails (the trim keeping the row again first, where it had one); a
+/// second failure is dropped, and the row stays `uploading`.
+#[test]
+fn a_failed_write_after_the_end_is_retried_once() {
+    for (path, failures) in [
+        ("known row", 1),
+        ("known row", 2),
+        ("insert in flight", 1),
+        ("insert in flight", 2),
+    ] {
+        let what = format!("{path}, {failures} failure(s)");
+        let mut world = site_world();
+        let db = HistoryDb::open(CLOCK);
+        let call = Call {
+            method: Value::str("swarm_publishChunk"),
+            params: Value::object([("data", bytes_value(b"x".to_vec()))]),
+            key: JsString::from(KEY),
+            approval: Some(Approval::User),
+        };
+        let mut request = Request::start(&call, &mut world).unwrap();
+        let Some(Effect::Ask(ready)) = request.take_effects().pop() else {
+            panic!("{what}")
+        };
+        request.answer(&mut world, ready.id, Event::Ready(Ok(())));
+        let Some(Effect::Ask(insert)) = request.take_effects().pop() else {
+            panic!("{what}")
+        };
+        let Need::Write(StoreWrite::HistoryInsert(statement)) = &insert.need else {
+            panic!("{what}")
+        };
+        let rowid = db.insert(statement);
+        let trimmed = path == "insert in flight";
+        let pending = if trimmed {
+            // Cancelled with the insert in flight; its rowid comes after.
+            request.cancel();
+            request.take_effects();
+            request.answer(&mut world, insert.id, Event::Inserted(Ok(rowid)));
+            request.take_effects()
+        } else {
+            // The row is known; cancelled while /stamps is open.
+            request.answer(&mut world, insert.id, Event::Inserted(Ok(rowid)));
+            let Some(Effect::Ask(trim)) = request.take_effects().pop() else {
+                panic!("{what}")
+            };
+            request.answer(&mut world, trim.id, Event::Written(Ok(())));
+            let Some(Effect::Ask(stamps)) = request.take_effects().pop() else {
+                panic!("{what}")
+            };
+            assert!(matches!(&stamps.need, Need::Node(c) if c.form == Form::Stamps));
+            request.cancel();
+            let effects = request.take_effects();
+            // The open call's own terminal, after the end, moves nothing
+            // the row waits for.
+            request.answer(&mut world, stamps.id, Event::Failed(Failed::Aborted));
+            assert!(request.take_effects().is_empty(), "{what}");
+            effects
+        };
+        let ask_of = |effects: Vec<Effect>| -> (AskId, Vec<Statement>) {
+            let asks: Vec<_> = effects
+                .into_iter()
+                .filter_map(|e| match e {
+                    Effect::Ask(ask) => Some(ask),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(asks.len(), 1, "one write: {asks:?}");
+            let Need::Write(StoreWrite::History(statements)) = &asks[0].need else {
+                panic!("{:?}", asks[0])
+            };
+            (asks[0].id, statements.clone())
+        };
+        let (first, statements) = ask_of(pending);
+        assert_eq!(statements.len(), 1 + usize::from(trimmed), "{what}");
+        // The store refuses it: nothing of it is made.
+        request.answer(
+            &mut world,
+            first,
+            Event::Written(Err(JsString::from("write failed 1"))),
+        );
+        let (second, statements) = ask_of(request.take_effects());
+        assert_eq!(
+            statements.len(),
+            1 + usize::from(trimmed),
+            "{what}: the retry"
+        );
+        if trimmed {
+            assert_eq!(
+                statements[0],
+                history::trim(Some(rowid)),
+                "{what}: the trim again"
+            );
+        }
+        if failures == 1 {
+            statements.iter().for_each(|s| {
+                db.run(s);
+            });
+            request.answer(&mut world, second, Event::Written(Ok(())));
+        } else {
+            request.answer(
+                &mut world,
+                second,
+                Event::Written(Err(JsString::from("write failed 2"))),
+            );
+        }
+        assert!(request.take_effects().is_empty(), "{what}: nothing more");
+        let rows = db.entries();
+        if failures == 1 {
+            assert!(rows.contains("\"status\":\"failed\""), "{what}: {rows}");
+            assert!(
+                rows.contains("\"errorMessage\":\"write failed 1\""),
+                "{what}: {rows}"
+            );
+        } else {
+            assert!(rows.contains("\"status\":\"uploading\""), "{what}: {rows}");
+        }
+    }
 }
