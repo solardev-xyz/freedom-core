@@ -223,6 +223,55 @@ impl Value {
         }
     }
 
+    /// What the value holds on the heap, as an allocator lays it out
+    /// ([`fc_json::allocation`]: an 8-byte header, 16-byte steps, 32 bytes
+    /// at least), not counting its own slot: what a made answer costs the
+    /// swarm thread, as [`JsValue::held`] counts a JSON value
+    /// (`memory-budgets`).
+    pub fn held(&self) -> usize {
+        let block = fc_json::allocation;
+        let text = |s: &JsString| {
+            s.allocations()
+                .iter()
+                .fold(0usize, |held, &size| held.saturating_add(block(size)))
+        };
+        // Iterative: a value can be as deep as its maker made it.
+        let mut held = 0usize;
+        let mut stack = vec![self];
+        while let Some(value) = stack.pop() {
+            match value {
+                Value::Undefined | Value::Null | Value::Bool(_) | Value::Number(_) => {}
+                Value::BigInt(digits) => held = held.saturating_add(block(digits.capacity())),
+                Value::String(s) => held = held.saturating_add(text(s)),
+                Value::Array(items) => {
+                    held = held.saturating_add(block(
+                        items
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<Option<Value>>()),
+                    ));
+                    stack.extend(items.iter().flatten());
+                }
+                Value::Object(members) => {
+                    held = held.saturating_add(block(
+                        members
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<(JsString, Value)>()),
+                    ));
+                    for (key, member) in members {
+                        held = held.saturating_add(text(key));
+                        stack.push(member);
+                    }
+                }
+                Value::Bytes(bytes) => {
+                    if let Source::Inline(data) = &bytes.source {
+                        held = held.saturating_add(block(data.capacity()));
+                    }
+                }
+            }
+        }
+        held
+    }
+
     /// `JSON.stringify(value)`: `None` where it throws (a BigInt) or gives
     /// `undefined` (the value itself is `undefined`). Bytes are written as
     /// a `Buffer`'s `toJSON` writes them.

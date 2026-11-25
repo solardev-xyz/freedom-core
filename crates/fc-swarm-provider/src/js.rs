@@ -7,7 +7,9 @@
 
 use fc_json::{JsString, JsValue, ToPrimitiveError};
 
+mod collate;
 mod sort;
+pub use collate::locale_compare;
 pub use sort::sort;
 
 /// `Response.text()`: UTF-8 with U+FFFD for each bad sequence (the WHATWG

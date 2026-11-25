@@ -36,9 +36,22 @@
 //!   (the reference then keeps the file's sites as they are): the core
 //!   never holds a feed map it can't read as one. No reference writer makes
 //!   one (deviation `store-shapes`, `feeds-load-feed-maps-kept`).
-//! - `getEthereumWalletIdentityReferences` isn't here: it orders origins
-//!   with `localeCompare`, ICU's collation, and its caller is the account
-//!   removal's wiring.
+//! - An identity kept under a key other than its own `id` is left out at
+//!   load (deviation `store-shapes`), so no two of a site's identities
+//!   share an id, and each feed names at most one of them. A site whose
+//!   active identity is left out is dropped, as the reference drops one
+//!   whose active identity is missing. No reference writer makes one.
+//! - `getEthereumWalletIdentityReferences` is built once, as the typed
+//!   answer, from each site's matching identities and one pass over its
+//!   feeds, and refused once what it holds would pass 1 MiB (deviation
+//!   `identity-references-bound`): the reference repeats a site's key in
+//!   every reference, so a store well within its own bound could make an
+//!   answer of any size.
+//! - `getEthereumWalletIdentityReferences` orders its sites with
+//!   `localeCompare`: ICU's root collation for printable ASCII, the text
+//!   permission keys are written in, and UTF-16 code-unit order for a key
+//!   with anything else (design 0015, SWM-4's D8; deviation `collation`,
+//!   [`crate::js::locale_compare`]).
 
 use fc_json::{JsString, JsValue};
 
@@ -48,6 +61,7 @@ use super::{
     object, or_falsy, or_nullish, parse_file, property_key, props, spread, strict_equals, template,
     text, time, truthy,
 };
+use crate::value::Value;
 
 /// The file's name at the Freedom root.
 pub const FILE_NAME: &str = "swarm-feeds.json";
@@ -524,6 +538,146 @@ impl FeedStore {
         active_of_decorated(entry.as_ref())
     }
 
+    /// `getEthereumWalletIdentityReferences(walletIndex)`: each site's
+    /// stored `ethereum-wallet` identity on that account (#89) that is
+    /// active or names a feed, as `{ origin, identityId, active, feedNames,
+    /// feedCount }`, the active ones first, then by site in `localeCompare`'s
+    /// order (deviation `collation` outside printable ASCII). The account
+    /// removal's references (`accounts.remove`'s `swarm_references`).
+    ///
+    /// The answer is built once, as the typed value the op answers with,
+    /// and bounded (deviation `identity-references-bound`; the reference
+    /// builds any size, a site's key once per matching identity): each
+    /// site's matching identities are found first, then its feeds are taken
+    /// in one pass, keeping only those that name one of them. Everything
+    /// the work holds (the matches and their lookup, each identity's feed
+    /// names, a sort's scratch, the references, their order and the answer)
+    /// is charged at its allocation, as [`fc_json::allocation`] lays it out,
+    /// before it is made: past [`MAX_REFERENCES_HELD`] it is refused,
+    /// [`REFERENCES_TOO_LARGE`]. No store Freedom writes comes near it.
+    pub fn ethereum_wallet_identity_references(
+        &self,
+        wallet_index: &JsValue,
+    ) -> Result<Value, Thrown> {
+        self.references_held(wallet_index).0
+    }
+
+    /// [`FeedStore::ethereum_wallet_identity_references`], and what it
+    /// held: at its peak, and at its end (the answer's own, or the
+    /// refusal's text, made only once the work has all been let go of).
+    fn references_held(&self, wallet_index: &JsValue) -> (Result<Value, Thrown>, Held) {
+        let mut held = Held::default();
+        match wallet_index {
+            JsValue::Number(n) if crate::js::is_integer(*n) && *n >= 0.0 => {}
+            _ => {
+                let thrown = Thrown::error("Wallet index must be a non-negative integer");
+                return (Err(thrown), held);
+            }
+        }
+        match self.references_within(wallet_index, &mut held) {
+            Ok(answer) => (Ok(answer), held),
+            Err(TooLarge) => {
+                // Everything the work held is freed as it returns; only
+                // then is the refusal's text made.
+                held.now = 0;
+                let thrown = Thrown::error(REFERENCES_TOO_LARGE);
+                held.now = fc_json::allocation(thrown.message.capacity());
+                held.peak = held.peak.max(held.now);
+                (Err(thrown), held)
+            }
+        }
+    }
+
+    /// The references, or [`TooLarge`] (which allocates nothing) at the
+    /// first charge past the bound.
+    fn references_within(
+        &self,
+        wallet_index: &JsValue,
+        held: &mut Held,
+    ) -> Result<Value, TooLarge> {
+        let mut references: Vec<(&JsString, bool, Option<Value>)> = Vec::new();
+        for (origin, entry) in props(self.origins()) {
+            let identities = field_or_undefined(entry, "identities");
+            if !is_plain_object(identities) {
+                continue;
+            }
+            // The site's identities on the account, in their order.
+            let mut matched: Vec<&JsValue> = Vec::new();
+            for (_, identity) in props(identities) {
+                if is_str(identity.get("mode"), ETHEREUM_WALLET)
+                    && strict_equals(
+                        identity.get("walletIndex").unwrap_or(&UNDEFINED),
+                        wallet_index,
+                    )
+                {
+                    push_held(held, &mut matched, identity)?;
+                }
+            }
+            if matched.is_empty() {
+                continue;
+            }
+            // `feed?.identityId === identity.id`: every id the store keeps
+            // is a string, its key's (the loader's rule), so a feed names
+            // an identity by a string, and at most one of the site's.
+            held.charge(vec_held::<(&JsString, usize)>(matched.len()))?;
+            let mut lookup: Vec<(&JsString, usize)> = Vec::with_capacity(matched.len());
+            for (at, identity) in matched.iter().enumerate() {
+                if let Some(JsValue::String(id)) = identity.get("id") {
+                    lookup.push((id, at));
+                }
+            }
+            lookup.sort_unstable_by(|a, b| a.0.cmp(b.0));
+            held.charge(vec_held::<Vec<&JsString>>(matched.len()))?;
+            let mut names: Vec<Vec<&JsString>> = Vec::with_capacity(matched.len());
+            names.resize_with(matched.len(), Vec::new);
+            let feeds = entry.get("feeds").filter(|feeds| is_plain_object(feeds));
+            for (name, feed) in feeds.map(props).unwrap_or(&[]) {
+                let Some(JsValue::String(id)) = feed.get("identityId") else {
+                    continue;
+                };
+                if let Ok(found) = lookup.binary_search_by(|(key, _)| (*key).cmp(id)) {
+                    push_held(held, &mut names[lookup[found].1], name)?;
+                }
+            }
+            for (identity, mut feed_names) in
+                matched.iter().zip(names.iter_mut().map(std::mem::take))
+            {
+                let id = identity.get("id").unwrap_or(&UNDEFINED);
+                let active = strict_equals(entry.get("activeIdentityId").unwrap_or(&UNDEFINED), id);
+                let names_held = vec_held::<&JsString>(feed_names.capacity());
+                if active || !feed_names.is_empty() {
+                    // `.sort()`: by UTF-16 code unit, the names being
+                    // strings.
+                    sort_held(held, &mut feed_names, |a, b| ordering_sign(a.cmp(b)))?;
+                    held.charge(reference_held(origin, id, &feed_names))?;
+                    let reference = reference_value(origin, id, active, &feed_names);
+                    push_held(held, &mut references, (origin, active, Some(reference)))?;
+                }
+                drop(feed_names);
+                held.release(names_held);
+            }
+            held.release(vec_held::<Vec<&JsString>>(names.capacity()));
+            held.release(vec_held::<(&JsString, usize)>(lookup.capacity()));
+            held.release(vec_held::<&JsValue>(matched.capacity()));
+        }
+        held.charge(vec_held::<usize>(references.len()))?;
+        let mut order: Vec<usize> = (0..references.len()).collect();
+        sort_held(held, &mut order, |a, b| {
+            let (a, b) = (&references[a], &references[b]);
+            if a.1 != b.1 {
+                return if a.1 { -1.0 } else { 1.0 };
+            }
+            ordering_sign(crate::js::locale_compare(a.0, b.0))
+        })?;
+        held.charge(vec_held::<Option<Value>>(order.len()))?;
+        let answer: Vec<Option<Value>> = order.iter().map(|&at| references[at].2.take()).collect();
+        held.release(vec_held::<usize>(order.capacity()));
+        held.release(vec_held::<(&JsString, bool, Option<Value>)>(
+            references.capacity(),
+        ));
+        Ok(Value::Array(answer))
+    }
+
     // --- changes -------------------------------------------------------------
 
     /// Runs `change` on a copy of the store, and keeps the copy only once
@@ -900,6 +1054,158 @@ impl FeedStore {
     }
 }
 
+/// The most [`FeedStore::ethereum_wallet_identity_references`] holds while
+/// it works, in [`fc_json::allocation`]'s bytes (deviation
+/// `identity-references-bound`).
+pub const MAX_REFERENCES_HELD: usize = 1024 * 1024;
+
+/// What a references answer past [`MAX_REFERENCES_HELD`] throws; a page
+/// would read it as -32603.
+pub const REFERENCES_TOO_LARGE: &str = "Swarm identity references are too large";
+
+/// The bytes a references answer holds, charged before each allocation is
+/// made and let go of once it is freed; the most it reached.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Held {
+    now: usize,
+    peak: usize,
+}
+
+/// A charge past [`MAX_REFERENCES_HELD`]: no allocation, so nothing is made
+/// on top of the work at its bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TooLarge;
+
+impl Held {
+    /// `bytes` more, refused past [`MAX_REFERENCES_HELD`].
+    fn charge(&mut self, bytes: usize) -> Result<(), TooLarge> {
+        let next = self.now.saturating_add(bytes);
+        if next > MAX_REFERENCES_HELD {
+            return Err(TooLarge);
+        }
+        self.now = next;
+        self.peak = self.peak.max(next);
+        Ok(())
+    }
+
+    fn release(&mut self, bytes: usize) {
+        self.now = self.now.saturating_sub(bytes);
+    }
+}
+
+/// What a vector's buffer of `capacity` items holds.
+fn vec_held<T>(capacity: usize) -> usize {
+    fc_json::allocation(capacity.saturating_mul(std::mem::size_of::<T>()))
+}
+
+/// What a string holds: its text, and its lone surrogates' list.
+fn string_held(text: &JsString) -> usize {
+    text.allocations().iter().fold(0usize, |held, &size| {
+        held.saturating_add(fc_json::allocation(size))
+    })
+}
+
+/// `item` pushed onto `items`: where the buffer is full, the larger one is
+/// charged before it is made (while the old one still lives), and the old
+/// one let go of once it is freed.
+fn push_held<T>(held: &mut Held, items: &mut Vec<T>, item: T) -> Result<(), TooLarge> {
+    if items.len() == items.capacity() {
+        let old = vec_held::<T>(items.capacity());
+        let wanted = items.capacity().saturating_mul(2).max(4);
+        held.charge(vec_held::<T>(wanted))?;
+        items.reserve_exact(wanted - items.len());
+        // A buffer larger than asked for is charged too.
+        let made = vec_held::<T>(items.capacity());
+        if made > vec_held::<T>(wanted) {
+            held.charge(made - vec_held::<T>(wanted))?;
+        }
+        held.release(old);
+    }
+    items.push(item);
+    Ok(())
+}
+
+/// The most V8's sort port holds beside its items: its pending runs (fewer
+/// than 64 for any length a `usize` counts, two words each).
+const SORT_RUNS_HELD: usize = 64 * 16;
+
+/// [`crate::js::sort`], its scratch charged while it runs: a merge's copy
+/// of at most every item, and the pending runs.
+fn sort_held<T: Copy>(
+    held: &mut Held,
+    items: &mut [T],
+    compare: impl FnMut(T, T) -> f64,
+) -> Result<(), TooLarge> {
+    let scratch = vec_held::<T>(items.len()).saturating_add(fc_json::allocation(SORT_RUNS_HELD));
+    held.charge(scratch)?;
+    crate::js::sort(items, compare);
+    held.release(scratch);
+    Ok(())
+}
+
+/// The members of a reference, in its order.
+const REFERENCE_KEYS: [&str; 5] = ["origin", "identityId", "active", "feedNames", "feedCount"];
+
+/// What one reference holds once made ([`reference_value`]): its object's
+/// buffer and keys, its site key, its id, and its feed names' array and
+/// strings.
+fn reference_held(origin: &JsString, id: &JsValue, feed_names: &[&JsString]) -> usize {
+    let keys = REFERENCE_KEYS.iter().fold(0usize, |held, key| {
+        held.saturating_add(fc_json::allocation(key.len()))
+    });
+    let id = match id {
+        JsValue::String(id) => string_held(id),
+        _ => 0,
+    };
+    feed_names.iter().fold(
+        vec_held::<(JsString, Value)>(REFERENCE_KEYS.len())
+            .saturating_add(keys)
+            .saturating_add(string_held(origin))
+            .saturating_add(id)
+            .saturating_add(vec_held::<Option<Value>>(feed_names.len())),
+        |held, name| held.saturating_add(string_held(name)),
+    )
+}
+
+/// `{ origin, identityId, active, feedNames, feedCount }`.
+fn reference_value(
+    origin: &JsString,
+    id: &JsValue,
+    active: bool,
+    feed_names: &[&JsString],
+) -> Value {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a count of a file's keys, far below 2^53"
+    )]
+    let count = feed_names.len() as f64;
+    let [origin_key, id_key, active_key, names_key, count_key] = REFERENCE_KEYS;
+    Value::Object(vec![
+        (JsString::from(origin_key), Value::String(origin.clone())),
+        (JsString::from(id_key), Value::from_js(id)),
+        (JsString::from(active_key), Value::Bool(active)),
+        (
+            JsString::from(names_key),
+            Value::Array(
+                feed_names
+                    .iter()
+                    .map(|name| Some(Value::String((*name).clone())))
+                    .collect(),
+            ),
+        ),
+        (JsString::from(count_key), Value::Number(count)),
+    ])
+}
+
+/// A comparator's number for an ordering.
+fn ordering_sign(ordering: std::cmp::Ordering) -> f64 {
+    match ordering {
+        std::cmp::Ordering::Less => -1.0,
+        std::cmp::Ordering::Equal => 0.0,
+        std::cmp::Ordering::Greater => 1.0,
+    }
+}
+
 /// `getActiveOriginIdentity(originEntry)` over a decorated entry.
 fn active_of_decorated(entry: Option<&JsValue>) -> Option<JsValue> {
     let entry = entry?;
@@ -1156,8 +1462,9 @@ fn migrate_v1_entry(entry: &JsValue, now_ms: u64) -> Result<JsValue, Thrown> {
     Ok(out)
 }
 
-/// `validateV2Store`, and the core's rebuild of a site's feed map that
-/// isn't an object of objects.
+/// `validateV2Store`, and the core's rebuilds (deviation `store-shapes`): a
+/// site's feed map that isn't an object of objects, and its identities
+/// kept under a key other than their own `id`, which are left out.
 fn validate_v2(mut store: JsValue) -> Result<JsValue, Unloadable> {
     if !is_plain_object(store.get("origins").unwrap_or(&UNDEFINED)) {
         return Err(Unloadable::Corrupt);
@@ -1167,17 +1474,18 @@ fn validate_v2(mut store: JsValue) -> Result<JsValue, Unloadable> {
         _ => return Err(Unloadable::Corrupt),
     }
     let entries = props(store.get("origins").unwrap_or(&UNDEFINED));
-    let sanitized: Vec<Option<JsValue>> = entries
+    let sanitized: Vec<Option<Sanitized>> = entries
         .iter()
         .map(|(_, entry)| sanitize_v2_entry(entry))
         .collect();
     // The reference replaces `origins` only when a site was dropped.
     let changed = sanitized.iter().any(Option::is_none);
     let unreadable = |entry: &JsValue| !feeds_readable(entry.get("feeds"));
-    let rebuild = entries
-        .iter()
-        .zip(&sanitized)
-        .any(|((_, entry), clean)| clean.is_some() && unreadable(entry));
+    let rebuild = entries.iter().zip(&sanitized).any(|((_, entry), clean)| {
+        clean
+            .as_ref()
+            .is_some_and(|clean| unreadable(entry) || clean.identities.is_some())
+    });
     if changed || rebuild {
         let mut origins = object();
         for ((origin, entry), clean) in entries.iter().zip(sanitized) {
@@ -1185,7 +1493,12 @@ fn validate_v2(mut store: JsValue) -> Result<JsValue, Unloadable> {
                 continue;
             };
             if changed || unreadable(entry) {
-                origins.set(origin.clone(), clean);
+                origins.set(origin.clone(), clean.entry);
+            } else if let Some(identities) = clean.identities {
+                // Only the identities left out: the rest as it was.
+                let mut kept = entry.clone();
+                kept.set("identities", identities);
+                origins.set(origin.clone(), kept);
             } else {
                 origins.set(origin.clone(), entry.clone());
             }
@@ -1204,33 +1517,67 @@ fn feeds_readable(feeds: Option<&JsValue>) -> bool {
     }
 }
 
-/// `sanitizeV2OriginEntry`: `None` for a site it throws on (dropped).
-fn sanitize_v2_entry(entry: &JsValue) -> Option<JsValue> {
+/// A site's entry as `sanitizeV2OriginEntry` returns it, and its
+/// identities where the core left one out.
+struct Sanitized {
+    entry: JsValue,
+    identities: Option<JsValue>,
+}
+
+/// The site's identities each kept under its own `id` (a string equal to
+/// its key), where one isn't: `None` when every one is. So no two of a
+/// site's identities share an id, and a feed names at most one of them
+/// (deviation `store-shapes`). No reference writer keeps an identity under
+/// another key.
+fn own_identities(entry: &JsValue) -> Option<JsValue> {
+    let identities = props(field_or_undefined(entry, "identities"));
+    let own = |(key, identity): &(JsString, JsValue)| matches!(identity.get("id"), Some(JsValue::String(id)) if id == key);
+    if identities.iter().all(own) {
+        return None;
+    }
+    Some(JsValue::Object(
+        identities.iter().filter(|p| own(p)).cloned().collect(),
+    ))
+}
+
+/// `sanitizeV2OriginEntry`: `None` for a site it throws on (dropped). The
+/// active identity is looked up among the identities the core keeps, so
+/// one left out reads as the reference's missing active identity.
+fn sanitize_v2_entry(entry: &JsValue) -> Option<Sanitized> {
     if !is_plain_object(entry)
         || !truthy(entry.get("activeIdentityId"))
         || !is_plain_object(field_or_undefined(entry, "identities"))
     {
         return None;
     }
-    let active = active_identity(entry)?;
+    let identities = own_identities(entry);
+    let mut checked = spread(entry);
+    if let Some(identities) = &identities {
+        checked.set("identities", identities.clone());
+    }
+    let active = active_identity(&checked)?;
     let mode = active.get("mode");
     if !(is_str(mode, BEE_WALLET) || is_str(mode, APP_SCOPED) || is_str(mode, ETHEREUM_WALLET)) {
         return None;
     }
-    let mut feeds = object();
-    match entry.get("feeds") {
-        Some(map) if !matches!(map, JsValue::Undefined) && !is_plain_object(map) => {}
-        map => {
-            for (name, feed) in props(map.unwrap_or(&UNDEFINED)) {
-                if is_plain_object(feed) {
-                    feeds.set(name.clone(), feed.clone());
-                }
-            }
-        }
-    }
-    let mut out = spread(entry);
-    out.set("feeds", feeds);
-    Some(out)
+    // The map's keys are already distinct (`JSON.parse` keeps one of
+    // each), so the kept feeds are collected in their order, not set one
+    // by one (each set looks the key up).
+    let feeds = match entry.get("feeds") {
+        Some(map) if !matches!(map, JsValue::Undefined) && !is_plain_object(map) => object(),
+        map => JsValue::Object(
+            props(map.unwrap_or(&UNDEFINED))
+                .iter()
+                .filter(|(_, feed)| is_plain_object(feed))
+                .cloned()
+                .collect(),
+        ),
+    };
+    checked.set("feeds", feeds);
+    Some(Sanitized {
+        entry: checked,
+        identities,
+    })
 }
 
 // --- identities ------------------------------------------------------------------
@@ -1758,7 +2105,7 @@ mod tests {
 
     #[test]
     fn a_feed_map_the_core_cant_hold_is_rebuilt() {
-        let text = "{\"version\":2,\"nextPublisherKeyIndex\":0,\"origins\":{\"a\":{\"activeIdentityId\":\"bee-wallet\",\"identities\":{\"bee-wallet\":{\"mode\":\"bee-wallet\"}},\"feeds\":[{\"topic\":\"t\"}]},\"b\":{\"activeIdentityId\":\"bee-wallet\",\"identities\":{\"bee-wallet\":{\"mode\":\"bee-wallet\"}}}}}";
+        let text = "{\"version\":2,\"nextPublisherKeyIndex\":0,\"origins\":{\"a\":{\"activeIdentityId\":\"bee-wallet\",\"identities\":{\"bee-wallet\":{\"id\":\"bee-wallet\",\"mode\":\"bee-wallet\"}},\"feeds\":[{\"topic\":\"t\"}]},\"b\":{\"activeIdentityId\":\"bee-wallet\",\"identities\":{\"bee-wallet\":{\"id\":\"bee-wallet\",\"mode\":\"bee-wallet\"}}}}}";
         let loaded = FeedStore::load(Some(text.as_bytes()), NOW, |_| false);
         assert!(loaded.writes.is_empty());
         let saved = loaded.store.text().unwrap();
@@ -1777,6 +2124,248 @@ mod tests {
                 .and_then(|b| b.get("feeds"))
                 .is_none()
         );
+    }
+
+    /// An identity kept under another key than its own `id` is left out at
+    /// load (deviation `store-shapes`): 10,000 such identities of one id,
+    /// with 10,000 feeds of that id, load as one identity, and the
+    /// references answer each feed once, not 10^8 names.
+    #[test]
+    fn identities_under_another_key_are_left_out() {
+        let n = 10_000;
+        let mut identities =
+            String::from(r#""x":{"id":"x","mode":"ethereum-wallet","walletIndex":0}"#);
+        let mut feeds = String::new();
+        for i in 0..n {
+            identities.push_str(&format!(
+                r#","k{i}":{{"id":"x","mode":"ethereum-wallet","walletIndex":0}}"#
+            ));
+            if i > 0 {
+                feeds.push(',');
+            }
+            feeds.push_str(&format!(r#""f{i}":{{"identityId":"x"}}"#));
+        }
+        let text = format!(
+            r#"{{"version":2,"nextPublisherKeyIndex":0,"origins":{{"a":{{"activeIdentityId":"x","identities":{{{identities}}},"feeds":{{{feeds}}}}},"b":{{"activeIdentityId":"app-scoped:0","identities":{{"app-scoped:0":{{"id":"app-scoped:1","mode":"app-scoped","publisherKeyIndex":0}}}}}},"c":{{"activeIdentityId":"bee-wallet","identities":{{"bee-wallet":{{"id":"bee-wallet","mode":"bee-wallet"}},"n":null,"m":{{"mode":"app-scoped","publisherKeyIndex":3}}}},"grantedAt":1}}}}}}"#
+        );
+        assert!(text.len() < 1024 * 1024);
+        let loaded = FeedStore::load(Some(text.as_bytes()), NOW, |_| false);
+        assert!(loaded.writes.is_empty());
+        let store = loaded.store;
+        let origins = store.root.get("origins").unwrap();
+        // `a` keeps the identity under its own id; `b`, whose active one
+        // is under another key, is dropped as one missing its active
+        // identity, so every site is the sanitizer's (`feeds` added).
+        assert_eq!(
+            props(origins)
+                .iter()
+                .map(|(k, _)| k.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "c"]
+        );
+        let a = origins.get("a").unwrap();
+        assert_eq!(key_count(a.get("identities").unwrap()), 1);
+        assert_eq!(
+            origins.get("c").unwrap().stringify(),
+            r#"{"activeIdentityId":"bee-wallet","identities":{"bee-wallet":{"id":"bee-wallet","mode":"bee-wallet"}},"grantedAt":1,"feeds":{}}"#
+        );
+        // With no site dropped, only the identities change.
+        let only = r#"{"version":2,"nextPublisherKeyIndex":0,"origins":{"c":{"activeIdentityId":"bee-wallet","identities":{"n":null,"bee-wallet":{"id":"bee-wallet","mode":"bee-wallet"},"m":{"id":"n","mode":"app-scoped","publisherKeyIndex":3}},"grantedAt":1}}}"#;
+        let kept = FeedStore::load(Some(only.as_bytes()), NOW, |_| false).store;
+        assert_eq!(
+            kept.text().unwrap(),
+            js(r#"{"version":2,"nextPublisherKeyIndex":0,"origins":{"c":{"activeIdentityId":"bee-wallet","identities":{"bee-wallet":{"id":"bee-wallet","mode":"bee-wallet"}},"grantedAt":1}}}"#)
+                .stringify_pretty()
+        );
+        // The counter past index 3 isn't held: the identity is gone.
+        assert_eq!(kept.next_publisher_key_index(), 0.0);
+        let references = store
+            .ethereum_wallet_identity_references(&JsValue::Number(0.0))
+            .unwrap();
+        let references = items(&references);
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].get("feedCount"), &Value::Number(f64::from(n)));
+        // And the store answers the same once written and read again.
+        let again = FeedStore::load(Some(store.text().unwrap().as_bytes()), NOW, |_| false);
+        assert!(again.writes.is_empty());
+        assert_eq!(again.store, store);
+    }
+
+    /// An array answer's items.
+    fn items(value: &Value) -> Vec<&Value> {
+        match value {
+            Value::Array(items) => items.iter().flatten().collect(),
+            other => panic!("not an array: {other:?}"),
+        }
+    }
+
+    /// A store's text: a site whose identities are each under their own
+    /// id, `n` of them on wallet 0 (the first `with_feed` naming one feed
+    /// each), a key of `key_len` bytes, and `other_feeds` feeds naming
+    /// `other` (its Bee wallet, or ids no identity has).
+    fn many_identities_text(
+        key_len: usize,
+        n: usize,
+        with_feed: usize,
+        other_feeds: usize,
+        other: impl Fn(usize) -> String,
+    ) -> String {
+        let key = "k".repeat(key_len);
+        let mut identities =
+            String::from(r#""bee-wallet":{"id":"bee-wallet","mode":"bee-wallet"}"#);
+        let mut feeds = Vec::new();
+        for i in 0..n {
+            identities.push_str(&format!(
+                r#","ethereum-wallet:{i}":{{"id":"ethereum-wallet:{i}","mode":"ethereum-wallet","walletIndex":0}}"#
+            ));
+            if i < with_feed {
+                feeds.push(format!(r#""f{i}":{{"identityId":"ethereum-wallet:{i}"}}"#));
+            }
+        }
+        for i in 0..other_feeds {
+            feeds.push(format!(r#""b{i}":{{"identityId":"{}"}}"#, other(i)));
+        }
+        format!(
+            r#"{{"version":2,"nextPublisherKeyIndex":0,"origins":{{"{key}":{{"activeIdentityId":"bee-wallet","identities":{{{identities}}},"feeds":{{{}}}}}}}}}"#,
+            feeds.join(",")
+        )
+    }
+
+    fn many_identities(
+        key_len: usize,
+        n: usize,
+        with_feed: usize,
+        other_feeds: usize,
+    ) -> FeedStore {
+        let text = many_identities_text(key_len, n, with_feed, other_feeds, |_| {
+            "bee-wallet".to_owned()
+        });
+        let loaded = FeedStore::load(Some(text.as_bytes()), NOW, |_| false);
+        assert!(loaded.writes.is_empty());
+        loaded.store
+    }
+
+    fn wallet_zero() -> JsValue {
+        JsValue::Number(0.0)
+    }
+
+    /// The references past 1 MiB held are refused (deviation
+    /// `identity-references-bound`), and the work holds no more than the
+    /// bound on the way: Codex's shape (a 100,000-byte key, 5,000
+    /// identities of wallet 0 each naming a feed, under 800 KB of store,
+    /// which would repeat the key 5,000 times); 10,000 short ones (1 MB of
+    /// JSON, but 8 MB held as a structured value); one identity whose feed
+    /// names alone pass the bound.
+    #[test]
+    fn references_past_the_bound_are_refused() {
+        let codex = many_identities(100_000, 5_000, 5_000, 0);
+        assert!(codex.root.stringify().len() < 800_000);
+        let short = many_identities(1, 10_000, 10_000, 0);
+        let feeds: Vec<String> = (0..2_000)
+            .map(|i| {
+                format!(
+                    r#""{}{i}":{{"identityId":"ethereum-wallet:0"}}"#,
+                    "n".repeat(600)
+                )
+            })
+            .collect();
+        let text = format!(
+            r#"{{"version":2,"nextPublisherKeyIndex":0,"origins":{{"k":{{"activeIdentityId":"ethereum-wallet:0","identities":{{"ethereum-wallet:0":{{"id":"ethereum-wallet:0","mode":"ethereum-wallet","walletIndex":0}}}},"feeds":{{{}}}}}}}}}"#,
+            feeds.join(",")
+        );
+        let named = FeedStore::load(Some(text.as_bytes()), NOW, |_| false).store;
+        // Codex's edge: a first site whose key brings the work to exactly
+        // the bound, and a second whose reference is one byte too many.
+        let site = |key: &str| {
+            format!(
+                r#""{key}":{{"activeIdentityId":"bee-wallet","identities":{{"bee-wallet":{{"id":"bee-wallet","mode":"bee-wallet"}},"ethereum-wallet:0":{{"id":"ethereum-wallet:0","mode":"ethereum-wallet","walletIndex":0}}}},"feeds":{{"f":{{"identityId":"ethereum-wallet:0"}}}}}}"#
+            )
+        };
+        let text = format!(
+            r#"{{"version":2,"nextPublisherKeyIndex":0,"origins":{{{},{}}}}}"#,
+            site(&"k".repeat(1_047_548)),
+            site("z")
+        );
+        let edge = FeedStore::load(Some(text.as_bytes()), NOW, |_| false).store;
+        let mut peaks = Vec::new();
+        for store in [codex, short, named, edge] {
+            let (answer, held) = store.references_held(&wallet_zero());
+            assert_eq!(answer, Err(Thrown::error(REFERENCES_TOO_LARGE)));
+            // Refused at the bound, or before a reference past it is
+            // made; the refusal's text made only once the work is freed.
+            assert!(held.peak <= MAX_REFERENCES_HELD, "{held:?}");
+            assert_eq!(
+                held.now,
+                fc_json::allocation(REFERENCES_TOO_LARGE.len()),
+                "{held:?}"
+            );
+            peaks.push(held.peak);
+        }
+        assert_eq!(peaks[3], MAX_REFERENCES_HELD, "the edge reaches the bound");
+    }
+
+    /// What the answer holds is what was counted: once made, the count is
+    /// exactly the answer's own held size (everything else let go of), and
+    /// it never passed the bound on the way. No slack: every allocation is
+    /// charged from its real capacity before it is made, and the sort's
+    /// run stack at its bound.
+    #[test]
+    fn references_hold_what_they_count() {
+        for store in [
+            many_identities(100_000, 7, 7, 0),
+            many_identities(1, 1_000, 1_000, 0),
+            many_identities(10, 3_000, 400, 1_000),
+        ] {
+            let (answer, held) = store.references_held(&wallet_zero());
+            let answer = answer.unwrap();
+            assert_eq!(held.now, answer.held(), "{held:?}");
+            assert!(held.peak <= MAX_REFERENCES_HELD, "{held:?}");
+        }
+        let store = many_identities(1, 1_000, 1_000, 0);
+        let (answer, _) = store.references_held(&wallet_zero());
+        let answer = answer.unwrap();
+        assert_eq!(items(&answer).len(), 1_000);
+        assert_eq!(
+            items(&answer)[0].stringify().as_deref(),
+            Some(
+                r#"{"origin":"k","identityId":"ethereum-wallet:0","active":false,"feedNames":["f0"],"feedCount":1}"#
+            )
+        );
+    }
+
+    /// One identity on the account, and 100,000 feeds naming ids no
+    /// identity has: none of them is indexed or kept, so the work holds a
+    /// few hundred bytes.
+    #[test]
+    fn unrelated_feeds_take_nothing() {
+        let text = many_identities_text(1, 1, 1, 100_000, |i| format!("u{i}"));
+        let store = FeedStore::load(Some(text.as_bytes()), NOW, |_| false).store;
+        let (answer, held) = store.references_held(&wallet_zero());
+        assert_eq!(items(&answer.unwrap()).len(), 1);
+        assert!(held.peak < 4096, "{held:?}");
+    }
+
+    /// A long feed map loads, and the references are answered, in work
+    /// linear in the store: 200,000 feeds and 10,000 identities on the
+    /// account, loaded and read on a thread that must finish within 60 s.
+    /// Building the sanitized feed map one key at a time (a lookup each),
+    /// or scanning every feed for each identity (2 x 10^9 comparisons),
+    /// doesn't.
+    #[test]
+    fn a_long_feed_map_loads_and_answers_in_one_pass() {
+        let text = many_identities_text(1, 10_000, 100, 200_000, |_| "bee-wallet".to_owned());
+        assert!(text.len() < MAX_FILE_BYTES);
+        let (done, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let loaded = FeedStore::load(Some(text.as_bytes()), NOW, |_| false);
+            let _ = done.send(loaded.store.references_held(&wallet_zero()));
+        });
+        let (references, held) = answer
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("loaded and answered within 60 s");
+        // The identities without a feed are neither active nor named.
+        assert_eq!(items(&references.unwrap()).len(), 100);
+        assert!(held.peak <= MAX_REFERENCES_HELD, "{held:?}");
     }
 
     #[test]
