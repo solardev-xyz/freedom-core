@@ -563,8 +563,9 @@ struct Thread<'k> {
     bodies: BTreeMap<usize, Vec<u8>>,
     answers: Vec<(Ticket, Result<ChangeAnswer, ChangeError>)>,
     cancels_after_outcome: usize,
-    /// Node calls asked and not yet answered, and the most at once.
-    open_calls: usize,
+    /// Node calls asked and not yet answered with their terminal, counted
+    /// as the request emits them, and the most at once.
+    open_calls: BTreeSet<AskId>,
     most_open: usize,
 }
 
@@ -597,7 +598,7 @@ impl<'k> Thread<'k> {
             bodies: BTreeMap::new(),
             answers: Vec::new(),
             cancels_after_outcome: 0,
-            open_calls: 0,
+            open_calls: BTreeSet::new(),
             most_open: 0,
         }
     }
@@ -611,7 +612,7 @@ impl<'k> Thread<'k> {
         self.vault.signed.clear();
         self.node.soc_posts = 0;
         self.cancels_after_outcome = 0;
-        self.open_calls = 0;
+        self.open_calls.clear();
         self.most_open = 0;
         self.cancelled.clear();
         self.parts.clear();
@@ -641,8 +642,16 @@ impl<'k> Thread<'k> {
 
     fn start(&mut self, call: &Call) {
         let mut request = Request::start(call, &mut self.world).expect("a method this part brings");
-        self.queue.extend(request.take_effects());
+        let effects = request.take_effects();
+        self.take(effects);
         self.request = Some(request);
+    }
+
+    /// The request's effects, queued, each node call it asks counted as
+    /// open from then until main's terminal answer to it.
+    fn take(&mut self, effects: Vec<Effect>) {
+        track_calls(&effects, &mut self.open_calls, &mut self.most_open);
+        self.queue.extend(effects);
     }
 
     fn outcome(&self) -> Option<&Outcome> {
@@ -654,9 +663,18 @@ impl<'k> Thread<'k> {
             return;
         };
         let done = request.outcome().is_some();
+        let terminal = matches!(
+            event,
+            Event::Reply(_) | Event::Failed(_) | Event::End | Event::Abort(_) | Event::Refused(_)
+        );
         request.answer(&mut self.world, id, event);
-        self.queue.extend(request.take_effects());
-        if !done && request.outcome().is_some() {
+        let effects = request.take_effects();
+        let ended = !done && request.outcome().is_some();
+        if terminal {
+            self.open_calls.remove(&id);
+        }
+        self.take(effects);
+        if ended {
             self.end_holds();
         }
     }
@@ -674,7 +692,8 @@ impl<'k> Thread<'k> {
     fn cancel(&mut self) {
         if let Some(request) = self.request.as_mut() {
             request.cancel();
-            self.queue.extend(request.take_effects());
+            let effects = request.take_effects();
+            self.take(effects);
         }
         self.end_holds();
     }
@@ -852,8 +871,6 @@ impl<'k> Thread<'k> {
                 self.give(ask.id, Event::PartHead(len));
             }
             Need::Node(call) => {
-                self.open_calls += 1;
-                self.most_open = self.most_open.max(self.open_calls);
                 if let Some(Body::Stream { .. }) = call.body {
                     assert_eq!(ask.charge, whole_charge(call.form));
                     self.uploads
@@ -884,7 +901,6 @@ impl<'k> Thread<'k> {
                 for event in events {
                     self.give(ask.id, event);
                 }
-                self.open_calls -= 1;
             }
             other => panic!("an ask these machines don't make: {other:?}"),
         }
@@ -913,7 +929,6 @@ impl<'k> Thread<'k> {
         for event in events {
             self.give(id, event);
         }
-        self.open_calls -= 1;
     }
 
     fn world_change(&mut self, change: Option<WorldChange>) {
@@ -975,6 +990,29 @@ fn query(conn: &rusqlite::Connection, statement: &Statement) -> Vec<Vec<Cell>> {
         )
         .unwrap();
     rows.collect::<Result<_, _>>().unwrap()
+}
+
+/// Counts each node call in `effects` open as the request emits it, and
+/// the most open at once; [`Thread::give`] closes one on main's terminal
+/// answer (a reply, a failure, a refusal, a stream's end or abort).
+fn track_calls(effects: &[Effect], open: &mut BTreeSet<AskId>, most: &mut usize) {
+    for effect in effects {
+        if let Effect::Ask(Ask {
+            id,
+            need: Need::Node(_),
+            ..
+        }) = effect
+        {
+            open.insert(*id);
+            *most = (*most).max(open.len());
+        }
+    }
+}
+
+/// The grammar's "one call at a time per parent" (design 0015, "The
+/// rules"): no write's row has `readData`'s eight.
+fn assert_one_call_at_a_time(id: &str, most_open: usize) {
+    assert!(most_open <= 1, "{id}: {most_open} node calls open at once");
 }
 
 // ---------------------------------------------------------------------------
@@ -1544,7 +1582,7 @@ fn feed_and_soc_writes() {
                 cancels_after_outcome: thread.cancels_after_outcome,
                 most_open: thread.most_open,
             };
-            assert!(thread.most_open <= 1, "{sid}: one call at a time");
+            assert_one_call_at_a_time(&sid, thread.most_open);
             check_row_shape(&sid, grammar, row, &shape);
             check_binds(&sid, row, &handoff.key, &handoff.params, &outcome, &thread);
             // The core's own error ends the request where the reference
@@ -2610,4 +2648,46 @@ fn a_failed_last_update_ends_the_row_failed() {
         assert_eq!(row.get("status").and_then(JsValue::as_str), Some(status));
         assert_eq!(row.get("errorMessage").and_then(JsValue::as_str), message);
     }
+}
+
+/// The one-call check counts a node call open from the effect that asks
+/// it to its terminal answer: a machine that asked `bytes_up` and `soc_up`
+/// together would show two open, and fail the check.
+#[test]
+#[should_panic(expected = "2 node calls open at once")]
+fn two_node_calls_at_once_fail_the_check() {
+    let ask = |id: u64, form: Form, path: &str| {
+        Effect::Ask(Ask {
+            id: AskId(id),
+            need: Need::Node(NodeCall {
+                form,
+                path: path.to_owned(),
+                query: Vec::new(),
+                headers: Vec::new(),
+                body: None,
+                max_bytes: 65_536,
+                feed: None,
+                tree: None,
+            }),
+            charge: whole_charge(form),
+        })
+    };
+    let mut open = BTreeSet::new();
+    let mut most = 0;
+    track_calls(&[ask(1, Form::BytesUp, "/bytes")], &mut open, &mut most);
+    // Answered before the next: one at a time.
+    open.remove(&AskId(1));
+    track_calls(&[ask(2, Form::SocUp, "/soc/o/id")], &mut open, &mut most);
+    assert_one_call_at_a_time("in turn", most);
+    open.remove(&AskId(2));
+    // Two asked together.
+    track_calls(
+        &[
+            ask(3, Form::BytesUp, "/bytes"),
+            ask(4, Form::SocUp, "/soc/o/id"),
+        ],
+        &mut open,
+        &mut most,
+    );
+    assert_one_call_at_a_time("together", most);
 }
