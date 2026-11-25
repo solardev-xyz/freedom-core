@@ -19,19 +19,21 @@
 //! (design 0015, Budgets): a change whose text would pass the bound is
 //! refused ([`StoreError::Full`], `store_full`), and nothing changes.
 //!
-//! **Where JavaScript's semantics end** (no `vectors/swarm.json` case
-//! reaches these; the design says nothing of them):
+//! **Where JavaScript's semantics end:**
 //! - every key is an own property: a name on `Object.prototype`
 //!   (`toString`, `constructor`, `__proto__`, …) is never read through the
 //!   prototype or assigned through its setter, where the reference would
-//!   read a function for it or set the object's prototype;
+//!   read a function for it or set the object's prototype (deviation
+//!   `own-keys`, freedom-browser#1327; `vectors/swarm.json`'s
+//!   `feeds-own-key-*` cases);
 //! - the keys are the permission keys main attests (0011), which main
 //!   normalizes, as in 0012's stores: the core doesn't normalize them again
-//!   (`normalizeOrigin`).
+//!   (`normalizeOrigin`). No vector case reaches this.
 //!
 //! **A change is all or nothing:** a refused change leaves the store as it
 //! was, where the reference can keep part of it in its cache (a refused
-//! label after the index was taken). A change that answers a text to write
+//! label after the index was taken: deviation `store-refusal`,
+//! `feeds-refused-label-keeps-index`). A change that answers a text to write
 //! is applied in memory; the daemon keeps a copy from before it, and puts
 //! it back if the write fails (0013: memory changes only after the durable
 //! write).

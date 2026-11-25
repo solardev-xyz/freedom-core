@@ -650,6 +650,10 @@ function buildRadicle({ meta, derivation: d, formats: f }, existing) {
 }
 
 async function main() {
+  // Local time is UTC for every reference, set before any thread starts (the
+  // swarm vectors' thread reads it too): the swarm vectors' legacy-dates and
+  // history-blobs cases read a time without an offset as local time.
+  process.env.TZ = 'UTC';
   const args = process.argv.slice(2);
   assert.ok(args.length === 13 && ['generate', 'check'].includes(args[0]) && args[1] === '--freedom-browser'
     && args[3] === '--radicle-browser' && args[5] === '--approvals-browser' && args[7] === '--stores-browser'
