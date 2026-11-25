@@ -1,0 +1,278 @@
+{
+ "empty_object_batch": {
+  "reply": "7b227374616d7073223a5b7b7d5d7d",
+  "error": {
+   "name": "ZodError",
+   "message": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"batchID\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"utilization\"\n    ],\n    \"message\": \"Invalid input: expected number, received undefined\"\n  },\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"usable\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received undefined\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"label\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"depth\"\n    ],\n    \"message\": \"Invalid input: expected number, received undefined\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"amount\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"bucketDepth\"\n    ],\n    \"message\": \"Invalid input: expected number, received undefined\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"blockNumber\"\n    ],\n    \"message\": \"Invalid input: expected number, received undefined\"\n  },\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"immutableFlag\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received undefined\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"batchTTL\"\n    ],\n    \"message\": \"Invalid input: expected number, received undefined\"\n  }\n]"
+  }
+ },
+ "non_objects": {
+  "reply": "7b227374616d7073223a5b312c2278222c6e756c6c2c5b5d2c747275652c7b2262617463684944223a2261316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131222c227574696c697a6174696f6e223a302c22757361626c65223a747275652c226c6162656c223a2266726565646f6d222c226465707468223a32322c22616d6f756e74223a22313030303030303030303030222c226275636b65744465707468223a31362c22626c6f636b4e756d626572223a313030302c22696d6d757461626c65466c6167223a747275652c22626174636854544c223a3836343030307d5d7d",
+  "error": {
+   "name": "ZodError",
+   "message": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      0\n    ],\n    \"message\": \"Invalid input: expected object, received number\"\n  },\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      1\n    ],\n    \"message\": \"Invalid input: expected object, received string\"\n  },\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      2\n    ],\n    \"message\": \"Invalid input: expected object, received null\"\n  },\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      3\n    ],\n    \"message\": \"Invalid input: expected object, received array\"\n  },\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      4\n    ],\n    \"message\": \"Invalid input: expected object, received boolean\"\n  }\n]"
+  }
+ },
+ "stamps_object": {
+  "reply": "7b227374616d7073223a7b7d7d",
+  "error": {
+   "name": "ZodError",
+   "message": "[\n  {\n    \"expected\": \"array\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\"\n    ],\n    \"message\": \"Invalid input: expected array, received object\"\n  }\n]"
+  }
+ },
+ "no_stamps": {
+  "reply": "7b7d",
+  "error": {
+   "name": "ZodError",
+   "message": "[\n  {\n    \"expected\": \"array\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\"\n    ],\n    \"message\": \"Invalid input: expected array, received undefined\"\n  }\n]"
+  }
+ },
+ "root_array": {
+  "reply": "5b5d",
+  "error": {
+   "name": "ZodError",
+   "message": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received array\"\n  }\n]"
+  }
+ },
+ "root_null": {
+  "reply": "6e756c6c",
+  "error": {
+   "name": "ZodError",
+   "message": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received null\"\n  }\n]"
+  }
+ },
+ "root_string": {
+  "reply": "2273747222",
+  "error": {
+   "name": "ZodError",
+   "message": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received string\"\n  }\n]"
+  }
+ },
+ "stamps_repeated": {
+  "reply": "7b227374616d7073223a5b7b2262617463684944223a2261316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131222c227574696c697a6174696f6e223a302c22757361626c65223a747275652c226c6162656c223a2266726565646f6d222c226465707468223a32322c22616d6f756e74223a22313030303030303030303030222c226275636b65744465707468223a31362c22626c6f636b4e756d626572223a313030302c22696d6d757461626c65466c6167223a747275652c22626174636854544c223a3836343030307d5d2c227374616d7073223a357d",
+  "error": {
+   "name": "ZodError",
+   "message": "[\n  {\n    \"expected\": \"array\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\"\n    ],\n    \"message\": \"Invalid input: expected array, received number\"\n  }\n]"
+  }
+ },
+ "wrong_types": {
+  "reply": "7b227374616d7073223a5b7b2262617463684944223a372c227574696c697a6174696f6e223a2230222c227574696c697a6174696f6e526174696f223a6e756c6c2c22757361626c65223a22796573222c226c6162656c223a7b7d2c226465707468223a31653430302c22616d6f756e74223a352c226275636b65744465707468223a2d31653430302c22626c6f636b4e756d626572223a5b5d2c22696d6d757461626c65466c6167223a302c22626174636854544c223a747275657d5d7d",
+  "error": {
+   "name": "ZodError",
+   "message": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"batchID\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"utilization\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"utilizationRatio\"\n    ],\n    \"message\": \"Invalid input: expected number, received null\"\n  },\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"usable\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"label\"\n    ],\n    \"message\": \"Invalid input: expected string, received object\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"received\": \"Infinity\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"depth\"\n    ],\n    \"message\": \"Invalid input: expected number, received Infinity\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"amount\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"received\": \"-Infinity\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"bucketDepth\"\n    ],\n    \"message\": \"Invalid input: expected number, received -Infinity\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"blockNumber\"\n    ],\n    \"message\": \"Invalid input: expected number, received array\"\n  },\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"immutableFlag\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  },\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stamps\",\n      0,\n      \"batchTTL\"\n    ],\n    \"message\": \"Invalid input: expected number, received boolean\"\n  }\n]"
+  }
+ },
+ "escapes": {
+  "reply": "7b227374616d7073223a5b7b2262617463684944223a2261316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131222c227574696c697a6174696f6e223a302c22757361626c65223a747275652c226c6162656c223a225c7564383030785c7530306539222c226465707468223a32322c22616d6f756e74223a225c75303033315c7530303332222c226275636b65744465707468223a31362c22626c6f636b4e756d626572223a313030302c22696d6d757461626c65466c6167223a747275652c22626174636854544c223a3836343030307d5d7d",
+  "mapped": [
+   {
+    "batchID": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "label": "\"\\ud800xé\"",
+    "amount": "12",
+    "usage": "0",
+    "usageText": "0%",
+    "size": "7070000000",
+    "remainingSize": "7070000000",
+    "theoreticalSize": "17179869184",
+    "duration": 864000
+   }
+  ]
+ },
+ "upper_0x": {
+  "reply": "7b227374616d7073223a5b7b2262617463684944223a22305841424142414241424142414241424142414241424142414241424142414241424142414241424142414241424142414241424142414241424142414241424142222c227574696c697a6174696f6e223a302c22757361626c65223a747275652c226c6162656c223a2266726565646f6d222c226465707468223a32322c22616d6f756e74223a22313030303030303030303030222c226275636b65744465707468223a31362c22626c6f636b4e756d626572223a313030302c22696d6d757461626c65466c6167223a747275652c22626174636854544c223a3836343030307d5d7d",
+  "mapped": [
+   {
+    "batchID": "abababababababababababababababababababababababababababababababab",
+    "label": "\"freedom\"",
+    "amount": "100000000000",
+    "usage": "0",
+    "usageText": "0%",
+    "size": "7070000000",
+    "remainingSize": "7070000000",
+    "theoreticalSize": "17179869184",
+    "duration": 864000
+   }
+  ]
+ },
+ "empty_id": {
+  "reply": "7b227374616d7073223a5b7b2262617463684944223a22222c227574696c697a6174696f6e223a302c22757361626c65223a747275652c226c6162656c223a2266726565646f6d222c226465707468223a32322c22616d6f756e74223a22313030303030303030303030222c226275636b65744465707468223a31362c22626c6f636b4e756d626572223a313030302c22696d6d757461626c65466c6167223a747275652c22626174636854544c223a3836343030307d5d7d",
+  "error": {
+   "name": "Error",
+   "message": "Bytes#constructor: constructor parameter is falsy: "
+  }
+ },
+ "short_id": {
+  "reply": "7b227374616d7073223a5b7b2262617463684944223a226162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162222c227574696c697a6174696f6e223a302c22757361626c65223a747275652c226c6162656c223a2266726565646f6d222c226465707468223a32322c22616d6f756e74223a22313030303030303030303030222c226275636b65744465707468223a31362c22626c6f636b4e756d626572223a313030302c22696d6d757461626c65466c6167223a747275652c22626174636854544c223a3836343030307d5d7d",
+  "error": {
+   "name": "Error",
+   "message": "Bytes#checkByteLength: bytes length is 31 but expected 32"
+  }
+ },
+ "odd_id": {
+  "reply": "7b227374616d7073223a5b7b2262617463684944223a22616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c227574696c697a6174696f6e223a302c22757361626c65223a747275652c226c6162656c223a2266726565646f6d222c226465707468223a32322c22616d6f756e74223a22313030303030303030303030222c226275636b65744465707468223a31362c22626c6f636b4e756d626572223a313030302c22696d6d757461626c65466c6167223a747275652c22626174636854544c223a3836343030307d5d7d",
+  "error": {
+   "name": "Error",
+   "message": "Bytes#constructor: invalid hex string: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+ },
+ "bad_amount": {
+  "reply": "7b227374616d7073223a5b7b2262617463684944223a2261316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131222c227574696c697a6174696f6e223a302c22757361626c65223a747275652c226c6162656c223a2266726565646f6d222c226465707468223a32322c22616d6f756e74223a22312e35222c226275636b65744465707468223a31362c22626c6f636b4e756d626572223a313030302c22696d6d757461626c65466c6167223a747275652c22626174636854544c223a3836343030307d5d7d",
+  "error": {
+   "name": "TypeError",
+   "message": "value is not a valid integer string, got: 1.5"
+  }
+ },
+ "overfull": {
+  "reply": "7b227374616d7073223a5b7b2262617463684944223a2261316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131222c227574696c697a6174696f6e223a3130302c22757361626c65223a747275652c226c6162656c223a2266726565646f6d222c226465707468223a31372c22616d6f756e74223a22313030303030303030303030222c226275636b65744465707468223a31362c22626c6f636b4e756d626572223a313030302c22696d6d757461626c65466c6167223a747275652c22626174636854544c223a3836343030307d5d7d",
+  "error": {
+   "name": "Error",
+   "message": "Size must be at least 0"
+  }
+ },
+ "deep_40": {
+  "reply": "7b227374616d7073223a5b7b2262617463684944223a2261316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131222c227574696c697a6174696f6e223a302c22757361626c65223a747275652c226c6162656c223a2266726565646f6d222c226465707468223a34302c22616d6f756e74223a22313030303030303030303030222c226275636b65744465707468223a31362c22626c6f636b4e756d626572223a313030302c22696d6d757461626c65466c6167223a747275652c22626174636854544c223a3836343030307d5d7d",
+  "mapped": [
+   {
+    "batchID": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "label": "\"freedom\"",
+    "amount": "100000000000",
+    "usage": "0",
+    "usageText": "0%",
+    "size": "4053239664633447",
+    "remainingSize": "4053239664633447",
+    "theoreticalSize": "4503599627370496",
+    "duration": 864000
+   }
+  ]
+ },
+ "depth_huge": {
+  "reply": "7b227374616d7073223a5b7b2262617463684944223a2261316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131222c227574696c697a6174696f6e223a312c22757361626c65223a747275652c226c6162656c223a2266726565646f6d222c226465707468223a323030302c22616d6f756e74223a22313030303030303030303030222c226275636b65744465707468223a302c22626c6f636b4e756d626572223a313030302c22696d6d757461626c65466c6167223a747275652c22626174636854544c223a3836343030307d5d7d",
+  "mapped": [
+   {
+    "batchID": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "label": "\"freedom\"",
+    "amount": "100000000000",
+    "usage": "0",
+    "usageText": "0%",
+    "size": "Infinity",
+    "remainingSize": "Infinity",
+    "theoreticalSize": "Infinity",
+    "duration": 864000
+   }
+  ]
+ },
+ "usage_nan": {
+  "reply": "7b227374616d7073223a5b7b2262617463684944223a2261316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131222c227574696c697a6174696f6e223a302c22757361626c65223a747275652c226c6162656c223a2266726565646f6d222c226465707468223a302c22616d6f756e74223a22313030303030303030303030222c226275636b65744465707468223a323030302c22626c6f636b4e756d626572223a313030302c22696d6d757461626c65466c6167223a747275652c22626174636854544c223a3836343030307d5d7d",
+  "mapped": [
+   {
+    "batchID": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "label": "\"freedom\"",
+    "amount": "100000000000",
+    "usage": "NaN",
+    "usageText": "NaN%",
+    "size": "0",
+    "remainingSize": "NaN",
+    "theoreticalSize": "4096",
+    "duration": 864000
+   }
+  ]
+ },
+ "ttl_capped": {
+  "reply": "7b227374616d7073223a5b7b2262617463684944223a2261316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131222c227574696c697a6174696f6e223a302c22757361626c65223a747275652c226c6162656c223a2266726565646f6d222c226465707468223a32322c22616d6f756e74223a22313030303030303030303030222c226275636b65744465707468223a31362c22626c6f636b4e756d626572223a313030302c22696d6d757461626c65466c6167223a747275652c22626174636854544c223a333135353639353230317d5d7d",
+  "mapped": [
+   {
+    "batchID": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "label": "\"freedom\"",
+    "amount": "100000000000",
+    "usage": "0",
+    "usageText": "0%",
+    "size": "7070000000",
+    "remainingSize": "7070000000",
+    "theoreticalSize": "17179869184",
+    "duration": 3155695200
+   }
+  ]
+ },
+ "ttl_negative": {
+  "reply": "7b227374616d7073223a5b7b2262617463684944223a2261316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131222c227574696c697a6174696f6e223a302c22757361626c65223a747275652c226c6162656c223a2266726565646f6d222c226465707468223a32322c22616d6f756e74223a22313030303030303030303030222c226275636b65744465707468223a31362c22626c6f636b4e756d626572223a313030302c22696d6d757461626c65466c6167223a747275652c22626174636854544c223a2d357d5d7d",
+  "mapped": [
+   {
+    "batchID": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "label": "\"freedom\"",
+    "amount": "100000000000",
+    "usage": "0",
+    "usageText": "0%",
+    "size": "7070000000",
+    "remainingSize": "7070000000",
+    "theoreticalSize": "17179869184",
+    "duration": 1
+   }
+  ]
+ },
+ "ratio_third": {
+  "reply": "7b227374616d7073223a5b7b2262617463684944223a2261316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131222c227574696c697a6174696f6e223a302c22757361626c65223a747275652c226c6162656c223a2266726565646f6d222c226465707468223a32322c22616d6f756e74223a22313030303030303030303030222c226275636b65744465707468223a31362c22626c6f636b4e756d626572223a313030302c22696d6d757461626c65466c6167223a747275652c22626174636854544c223a3836343030302c227574696c697a6174696f6e526174696f223a302e333333333333333333333333333333337d5d7d",
+  "mapped": [
+   {
+    "batchID": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "label": "\"freedom\"",
+    "amount": "100000000000",
+    "usage": "0.3333333333333333",
+    "usageText": "33%",
+    "size": "7070000000",
+    "remainingSize": "4713333334",
+    "theoreticalSize": "17179869184",
+    "duration": 864000
+   }
+  ]
+ },
+ "ratio_tiny_negative": {
+  "reply": "7b227374616d7073223a5b7b2262617463684944223a2261316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131222c227574696c697a6174696f6e223a302c22757361626c65223a747275652c226c6162656c223a2266726565646f6d222c226465707468223a32322c22616d6f756e74223a22313030303030303030303030222c226275636b65744465707468223a31362c22626c6f636b4e756d626572223a313030302c22696d6d757461626c65466c6167223a747275652c22626174636854544c223a3836343030302c227574696c697a6174696f6e526174696f223a2d302e303030303030317d5d7d",
+  "mapped": [
+   {
+    "batchID": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "label": "\"freedom\"",
+    "amount": "100000000000",
+    "usage": "-1e-7",
+    "usageText": "0%",
+    "size": "7070000000",
+    "remainingSize": "7070000707",
+    "theoreticalSize": "17179869184",
+    "duration": 864000
+   }
+  ]
+ },
+ "bad_utf8_label": {
+  "reply": "7b227374616d7073223a5b7b2262617463684944223a2261316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131613161316131222c227574696c697a6174696f6e223a302c22757361626c65223a747275652c226c6162656c223a2261ff62e282222c226465707468223a32322c22616d6f756e74223a22313030303030303030303030222c226275636b65744465707468223a31362c22626c6f636b4e756d626572223a313030302c22696d6d757461626c65466c6167223a747275652c22626174636854544c223a3836343030307d5d7d",
+  "mapped": [
+   {
+    "batchID": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "label": "\"a�b�\"",
+    "amount": "100000000000",
+    "usage": "0",
+    "usageText": "0%",
+    "size": "7070000000",
+    "remainingSize": "7070000000",
+    "theoreticalSize": "17179869184",
+    "duration": 864000
+   }
+  ]
+ },
+ "bom": {
+  "reply": "efbbbf7b227374616d7073223a5b5d7d",
+  "mapped": []
+ },
+ "empty_reply": {
+  "reply": "",
+  "error": {
+   "name": "ZodError",
+   "message": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received null\"\n  }\n]"
+  }
+ },
+ "bom_only": {
+  "reply": "efbbbf",
+  "error": {
+   "name": "ZodError",
+   "message": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received null\"\n  }\n]"
+  }
+ }
+}
