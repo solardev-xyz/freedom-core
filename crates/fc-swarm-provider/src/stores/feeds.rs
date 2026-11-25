@@ -102,7 +102,10 @@ pub enum LoadWrite {
     /// `fs.copyFileSync(file, name)`: the file as it was read, kept aside
     /// under `name` in the same directory.
     Backup { name: String },
-    /// The migrated store's text, written over the file.
+    /// The migrated store's text, written over the file. Where that write
+    /// fails, the reference keeps the file aside again as one that doesn't
+    /// load (`swarm-feeds.corrupt.json`, [`backup_name`]) and starts empty
+    /// ([`FeedStore::empty`]); the daemon does the same.
     Write(String),
 }
 
