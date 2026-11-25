@@ -1403,6 +1403,8 @@ fn sw1_holds_the_identity_changes_it_covers() {
         let mut op = world.op(ops::IDENTITIES, &op, caller);
         let step = op.start(&mut world.stores(T0));
         assert_eq!(step, Step::Wait(Waiting::Change));
+        // Another hold's end doesn't move it: the keeper answers it.
+        assert_eq!(op.retry(&mut world.stores(T0)), Step::Wait(Waiting::Change));
         held.push(op);
     }
     assert_eq!(world.keeper.deferred(), 4);

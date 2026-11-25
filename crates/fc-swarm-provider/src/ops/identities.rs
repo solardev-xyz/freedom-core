@@ -497,6 +497,16 @@ impl Run {
         self.owners(cx, stores)
     }
 
+    /// What it waits for: a hold's end doesn't move it (its change, if
+    /// deferred, comes back through [`Run::changed`]).
+    pub(crate) fn waiting(&self) -> Step {
+        match self.phase {
+            Phase::Start => Step::Ended,
+            Phase::Change => Step::Wait(Waiting::Change),
+            Phase::Owners { .. } => Step::Wait(Waiting::Answers),
+        }
+    }
+
     pub(crate) fn changed(
         &mut self,
         cx: &mut Cx<'_>,

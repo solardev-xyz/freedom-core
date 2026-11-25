@@ -341,7 +341,8 @@ impl Op {
         };
         let step = match &mut self.run {
             Run::Manifest(run) => run.retry(&mut cx, stores),
-            Run::Identities(_) | Run::History(_) => Step::Ended,
+            Run::Identities(run) => run.waiting(),
+            Run::History(_) => Step::Ended,
         };
         self.settle(step)
     }
