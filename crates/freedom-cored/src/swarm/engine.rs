@@ -57,7 +57,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use fc_approval::stores::{SwarmFlag, SwarmStore};
-use fc_eip1193::names::Binding;
+use fc_eip1193::names::{Binding, Document};
 use fc_json::JsString;
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::message::PageContext;
@@ -73,6 +73,7 @@ use fc_swarm_provider::stores::feeds::FeedStore;
 use fc_swarm_provider::value::Value;
 
 use super::memory::{self, Pool};
+use crate::eip1193::Bindings;
 use super::wire::{self, Params, Refusal};
 
 /// Milliseconds on the thread's monotonic clock.
@@ -94,6 +95,14 @@ const SMALL_REPLY: usize = 16 * 1024;
 /// the reply's room in the swarm thread's memory (design 0015, "The swarm
 /// thread's memory").
 const ENVELOPE: usize = 16 * 1024;
+
+/// The live facts when the page's name no longer serves its key: every
+/// guard reads the name first, so the rest isn't asked.
+const MOVED: Live = Live {
+    name: false,
+    live: false,
+    agent: false,
+};
 
 /// The engine's bounds; the tests use smaller ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,20 +180,24 @@ pub trait Io {
 }
 
 /// What the swarm thread holds that every request reads (design 0015, "In
-/// the core"): the Swarm grants, shared with the event loop (D2), the feed
-/// store (read only until PR 7 serves it), the read budgets and the tags'
-/// owners.
+/// the core"): the Swarm grants, shared with the event loop (D2), the
+/// ended name bindings, shared with it too (D1), the feed store (read only
+/// until PR 7 serves it), the read budgets and the tags' owners.
 pub struct Shared {
     pub grants: Arc<Mutex<SwarmStore>>,
+    /// The documents whose name binding has ended, shared with the event
+    /// loop's page requests (D1): one record for every method family.
+    pub bindings: Bindings,
     pub feeds: FeedStore,
     pub budgets: ReadBudgets,
     pub tags: TagOwners,
 }
 
 impl Shared {
-    pub fn new(grants: Arc<Mutex<SwarmStore>>) -> Self {
+    pub fn new(grants: Arc<Mutex<SwarmStore>>, bindings: Bindings) -> Self {
         Shared {
             grants,
+            bindings,
             feeds: FeedStore::empty(),
             budgets: ReadBudgets::new(),
             tags: TagOwners::new(),
@@ -361,8 +374,9 @@ struct Slot {
     page: PageContext,
     /// The `PageContext` as JSON, for `approval.recheck`.
     page_json: String,
-    /// The page's name binding (D1), when its transport key binds its key.
-    binding: Option<Binding>,
+    /// The page's name binding (D1), when its transport key binds its key,
+    /// and the document it binds.
+    binding: Option<(Binding, Document)>,
     deadline: Ms,
     asks: BTreeMap<AskId, Ask>,
     /// It holds a place among the running.
@@ -610,7 +624,15 @@ impl Engine {
         let total = Deadline::Swarm
             .total_ms(params.deadline_ms)
             .unwrap_or(fc_swarm_provider::machine::shell::SWARM_DEADLINE_MS);
-        let binding = Binding::of(&page.origin, page.transport_key.as_deref());
+        let binding = Binding::of(&page.origin, page.transport_key.as_deref()).map(|binding| {
+            let document = Document::new(
+                &page.origin,
+                page.transport_key.as_deref().unwrap_or(""),
+                page.frame,
+                page.navigation,
+            );
+            (binding, document)
+        });
         let page_json = serde_json::to_string(&page).unwrap_or_else(|_| "{}".to_owned());
         self.slots.insert(
             id,
@@ -674,6 +696,10 @@ impl Engine {
         if ask.api {
             self.api_open = self.api_open.saturating_sub(1);
         }
+        let ended = slot
+            .binding
+            .as_ref()
+            .is_some_and(|(_, document)| self.shared.bindings.has(document));
         let event = match outcome {
             Ok(text) => Some(decode(&ask.need, text).ok_or(Fault("swarm_reply"))?),
             Err(text) => match (wire::refusal(text), &ask.need) {
@@ -689,6 +715,16 @@ impl Engine {
                 })),
                 _ => return Err(Fault("swarm_reply")),
             },
+        };
+        // Main's recheck answers for the document; its binding is read
+        // again as the answer comes: another check may have ended it while
+        // the recheck was out.
+        let event = match event {
+            Some(Event::Live(live)) if ended => Some(Event::Live(Live {
+                name: false,
+                ..live
+            })),
+            other => other,
         };
         if let Some(event) = event {
             self.deliver(io, now, id, ask_id, event)?;
@@ -717,25 +753,29 @@ impl Engine {
         let Some(ask) = slot.asks.get_mut(&ask_id) else {
             return Ok(());
         };
+        let document = slot.binding.as_ref().map(|(_, document)| document);
         match verdict {
-            Verdict::Holds => {
+            // Main's recheck next, unless another check, of any family,
+            // ended the binding while this one's answer waited: a lookup
+            // that holds can't revive it.
+            Verdict::Holds if !document.is_some_and(|d| self.shared.bindings.has(d)) => {
                 ask.stage = Stage::Outbox;
                 self.outbox.push_back((id, ask_id));
             }
-            // Every guard reads the name first: no recheck to make.
-            Verdict::Fails => {
+            // The name no longer serves the key: the binding ends for the
+            // document, for every later check of either family. Every guard
+            // reads the name first: no recheck to make.
+            Verdict::Holds | Verdict::Fails => {
+                if verdict == Verdict::Fails
+                    && let Some(document) = document
+                {
+                    self.shared.bindings.end(document);
+                }
                 slot.asks.remove(&ask_id);
-                self.ready.push_back((
-                    id,
-                    ask_id,
-                    Event::Live(Live {
-                        name: false,
-                        live: false,
-                        agent: false,
-                    }),
-                ));
+                self.ready.push_back((id, ask_id, Event::Live(MOVED)));
             }
-            // The request's time ran out on naming's clock: its deadline.
+            // The request's time ran out on naming's clock: its deadline,
+            // which ends no binding.
             Verdict::Deadline => {
                 slot.asks.remove(&ask_id);
                 if let Phase::Running(request) = &mut slot.phase {
@@ -758,6 +798,13 @@ impl Engine {
     pub fn written(&mut self, io: &mut impl Io, now: Ms, id: u64) -> Result<(), Fault> {
         if let Some(slot) = self.slots.get_mut(&id) {
             slot.written = true;
+            // Answered and written: its base goes, though a cancelled ask
+            // of its own still waits for main's terminal answer, holding its
+            // own charge and its slot (D13).
+            if slot.answered {
+                let base = std::mem::take(&mut slot.base);
+                self.release(base);
+            }
         } else if let Some(base) = self.unwritten.remove(&id) {
             self.release(base);
         }
@@ -1043,8 +1090,8 @@ impl Engine {
         Ok(())
     }
 
-    /// The request has ended and nothing of it is open: it goes, and its
-    /// base once its answer has been written.
+    /// The request has ended and nothing of it is open: it goes, and the
+    /// base it still holds, if any, once its answer has been written.
     fn retire(&mut self, id: u64) {
         let Some(slot) = self.slots.remove(&id) else {
             return;
@@ -1099,7 +1146,16 @@ impl Engine {
             Need::Node(call) if !call.stream() => Stage::Memory,
             Need::Upload => Stage::Memory,
             Need::Live => match slot.binding.clone() {
-                Some(binding) => {
+                // A binding already ended, by any family's check, or a
+                // transport key that isn't `ipns://<key>`: the name fails,
+                // with nothing resolved.
+                Some((binding, document))
+                    if !binding.resolvable() || self.shared.bindings.has(&document) =>
+                {
+                    self.ready.push_back((id, ask_id, Event::Live(MOVED)));
+                    return;
+                }
+                Some((binding, _)) => {
                     self.next_tag += 1;
                     let tag = NAME_TAG | self.next_tag;
                     io.name_check(tag, binding, slot.deadline.saturating_sub(now));

@@ -15,7 +15,9 @@
 //! - **Its cancels** are watched (D13): the gate names one main hasn't
 //!   answered within 60 s, and the event loop ends the connection.
 //! - **Its name checks** (D1) go to the naming thread under a tag of its
-//!   own; the verdict comes back through the event loop.
+//!   own; the verdict comes back through the event loop. A failed check
+//!   ends the document's binding in the record the loop's page requests
+//!   share ([`crate::eip1193::Bindings`]), for both families.
 //! - **Its shares of the writer** are two, as the chain thread's: its
 //!   requests, cancels and small answers within
 //!   [`transport::MAX_QUEUED_SWARM_CONTROL_BYTES`], ahead of its large
@@ -157,6 +159,9 @@ pub struct Spawn {
     /// have moved (`grant_moved: swarm`).
     pub grants: Arc<Mutex<SwarmStore>>,
     pub grants_moved: bool,
+    /// The ended name bindings, shared with the event loop's page requests
+    /// (D1).
+    pub bindings: crate::eip1193::Bindings,
 }
 
 /// Starts the swarm thread. It writes to `out`, sends its requests through
@@ -179,6 +184,7 @@ pub fn spawn(start: Spawn) -> std::io::Result<Handle> {
         naming,
         grants,
         grants_moved,
+        bindings,
     } = start;
     std::thread::Builder::new()
         .name("swarm".into())
@@ -200,7 +206,7 @@ pub fn spawn(start: Spawn) -> std::io::Result<Handle> {
             let thread = Thread {
                 engine: Engine::new(
                     crate::testhooks::swarm_bounds(Bounds::default()),
-                    Shared::new(grants),
+                    Shared::new(grants, bindings),
                     grants_moved,
                 ),
                 wire,

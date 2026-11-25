@@ -80,7 +80,7 @@ fn grants() -> Arc<Mutex<SwarmStore>> {
 }
 
 fn engine(bounds: Bounds) -> Engine {
-    Engine::new(bounds, Shared::new(grants()), true)
+    Engine::new(bounds, Shared::new(grants(), Bindings::default()), true)
 }
 
 fn page(transport_key: Option<&str>) -> PageContext {
@@ -201,7 +201,7 @@ fn a_read_runs_and_frees_each_charge_at_its_point() {
 fn the_door_answers_what_the_core_doesnt_run() {
     let mut io = Fake::default();
     // The Swarm grants haven't moved.
-    let mut unmoved = Engine::new(Bounds::default(), Shared::new(grants()), false);
+    let mut unmoved = Engine::new(Bounds::default(), Shared::new(grants(), Bindings::default()), false);
     let (_, reference) = chunk();
     unmoved
         .request(
@@ -323,7 +323,7 @@ fn admission_queues_then_answers_busy() {
             waiting: 0,
             ..Bounds::default()
         },
-        Shared::new(grants()),
+        Shared::new(grants(), Bindings::default()),
         true,
     );
     let mut other = Fake::default();
@@ -368,9 +368,10 @@ fn the_deadline_cancels_and_main_s_answer_frees_the_call() {
         // The page's timer: `cancelled`, and the call cancelled at main.
         assert_eq!(io.answer_of(1), cancelled());
         assert_eq!(io.cancels, vec![call]);
-        // The call keeps its charge until main's terminal answer (D13).
+        // Answered and written: the base goes. The call keeps its charge
+        // until main's terminal answer (D13), and the request its record.
         engine.written(&mut io, 1000, 1).unwrap();
-        assert_eq!(engine.memory_used(), BASE + call_charge());
+        assert_eq!(engine.memory_used(), call_charge());
         assert_eq!(engine.requests(), 1);
         let terminal = terminal
             .as_ref()
@@ -380,6 +381,59 @@ fn the_deadline_cancels_and_main_s_answer_frees_the_call() {
         assert_eq!((engine.memory_used(), engine.requests()), (0, 0));
         assert!(io.answers.is_empty(), "one answer");
     }
+}
+
+/// A request ended at its deadline, its answer written, while main still
+/// owes its cancelled call's answer: its base is another request's to take
+/// meanwhile; the call's charge goes only with main's late answer.
+#[test]
+fn an_ended_request_s_base_goes_before_its_cancelled_call_s_answer() {
+    // One base and one call.
+    let mut engine = engine(Bounds {
+        memory: BASE + call_charge(),
+        ..Bounds::default()
+    });
+    let mut io = Fake::default();
+    let call = to_node_call(&mut engine, &mut io, 1, Some(1000));
+    engine.tick(&mut io, 1000).unwrap();
+    assert_eq!(io.answer_of(1), cancelled());
+    // A second request finds no room for its base while the first's is
+    // held.
+    let (_, reference) = chunk();
+    engine
+        .request(
+            &mut io,
+            1000,
+            2,
+            read_chunk(&reference, None),
+            Some(page(None)),
+        )
+        .unwrap();
+    assert_eq!(io.sent.len(), 2, "the second waits for its base");
+    // The first's answer written: its base goes to the second, which
+    // starts before main's late answer to the cancelled call.
+    engine.written(&mut io, 1001, 1).unwrap();
+    let (ready, method, params) = io.last();
+    assert_eq!((method, params["for"].as_u64()), ("shell.swarm_ready", Some(2)));
+    assert_eq!(engine.memory_used(), BASE + call_charge());
+    assert_eq!(engine.requests(), 2);
+    // The late answer frees the call's charge and the first's record.
+    engine
+        .response(
+            &mut io,
+            1002,
+            call,
+            Err(r#"{"code":"cancelled","message":"Cancelled"}"#),
+        )
+        .unwrap();
+    assert_eq!(engine.memory_used(), BASE);
+    assert_eq!(engine.requests(), 1);
+    // The second runs on: its call takes the freed charge.
+    engine
+        .response(&mut io, 1003, ready, Ok(ok_ready()))
+        .unwrap();
+    assert_eq!(io.last().1, "shell.swarm_api");
+    assert_eq!(engine.memory_used(), BASE + call_charge());
 }
 
 #[test]
@@ -697,8 +751,9 @@ fn the_live_facts_check_the_name_then_ask_main() {
     assert!(text.contains("no_address"), "{text}");
     engine.written(&mut io, 22, 5).unwrap();
 
-    // Cancelled while its name is checked: the check is withdrawn.
-    upload_status(&mut engine, &mut io, 4, Some("ipns://k51abc"));
+    // Cancelled while its name is checked: the check is withdrawn. (Another
+    // document: the moved name above ended this one's binding.)
+    upload_status(&mut engine, &mut io, 4, Some("ipns://k51def"));
     let (tag, _, _) = io.checks.pop().unwrap();
     engine.cancel(&mut io, 30, 4).unwrap();
     assert_eq!(io.name_cancels, vec![tag]);
@@ -711,6 +766,124 @@ fn the_live_facts_check_the_name_then_ask_main() {
         engine.written(&mut io, 40, id).unwrap();
     }
     assert_eq!((engine.memory_used(), engine.requests()), (0, 0));
+}
+
+/// The page's document, as the ended-binding record names it.
+fn document() -> Document {
+    Document::new(SITE, "ipns://k51abc", 1, 1)
+}
+
+/// A failed check ends the document's binding for good, for every later
+/// check of either family (D1): a lookup that holds afterwards, a late one
+/// among them, can't revive it; a binding the loop's EIP-1193 check ended
+/// refuses with nothing resolved; a failure here is the loop's to read.
+#[test]
+fn a_failed_name_check_ends_the_binding_for_every_family() {
+    let bindings = Bindings::default();
+    let mut engine = Engine::new(
+        Bounds::default(),
+        Shared::new(grants(), bindings.clone()),
+        true,
+    );
+    let mut io = Fake::default();
+    // Two requests of one document, each with its lookup out.
+    upload_status(&mut engine, &mut io, 1, Some("ipns://k51abc"));
+    upload_status(&mut engine, &mut io, 2, Some("ipns://k51abc"));
+    let (late, _, _) = io.checks.pop().unwrap();
+    let (first, _, _) = io.checks.pop().unwrap();
+    let sent = io.sent.len();
+    engine
+        .named(&mut io, 20, first, crate::eip1193::Verdict::Fails)
+        .unwrap();
+    // The loop's EIP-1193 checks read the ended binding.
+    assert!(bindings.has(&document()));
+    // The late lookup holds: the binding stays ended, and no recheck goes.
+    engine
+        .named(&mut io, 21, late, crate::eip1193::Verdict::Holds)
+        .unwrap();
+    assert_eq!(io.sent.len(), sent, "no recheck");
+    for id in [1, 2] {
+        let Answer::Result(text) = io.answer_of(id) else {
+            panic!()
+        };
+        assert!(text.contains("no_address"), "{id}: {text}");
+    }
+    // The document's next request resolves nothing.
+    upload_status(&mut engine, &mut io, 3, Some("ipns://k51abc"));
+    assert!(io.checks.is_empty(), "nothing resolved");
+    assert_eq!(io.sent.len(), sent + 1, "its tag read only");
+    let Answer::Result(text) = io.answer_of(3) else {
+        panic!()
+    };
+    assert!(text.contains("no_address"), "{text}");
+    // A new document of the same page binds again.
+    assert!(!bindings.has(&Document::new(SITE, "ipns://k51abc", 1, 2)));
+
+    // A binding the loop ended (an EIP-1193 check that failed): the swarm
+    // thread's check fails with nothing resolved.
+    let bindings = Bindings::default();
+    bindings.end(&document());
+    let mut engine = Engine::new(
+        Bounds::default(),
+        Shared::new(grants(), bindings.clone()),
+        true,
+    );
+    let mut io = Fake::default();
+    upload_status(&mut engine, &mut io, 1, Some("ipns://k51abc"));
+    assert!(io.checks.is_empty());
+    let Answer::Result(text) = io.answer_of(1) else {
+        panic!()
+    };
+    assert!(text.contains("no_address"), "{text}");
+
+    // Ended while main's recheck is out: read again as its answer comes.
+    let bindings = Bindings::default();
+    let mut engine = Engine::new(
+        Bounds::default(),
+        Shared::new(grants(), bindings.clone()),
+        true,
+    );
+    let mut io = Fake::default();
+    upload_status(&mut engine, &mut io, 1, Some("ipns://k51abc"));
+    let (tag, _, _) = io.checks.pop().unwrap();
+    engine
+        .named(&mut io, 20, tag, crate::eip1193::Verdict::Holds)
+        .unwrap();
+    let (recheck, method, _) = io.last();
+    assert_eq!(method, "approval.recheck");
+    bindings.end(&document());
+    engine
+        .response(&mut io, 21, recheck, Ok(r#"{"live":true,"agent":false}"#))
+        .unwrap();
+    let Answer::Result(text) = io.answer_of(1) else {
+        panic!()
+    };
+    assert!(text.contains("no_address"), "{text}");
+
+    // The request's deadline on naming's clock ends no binding; a
+    // transport key that isn't `ipns://<key>` fails with nothing resolved,
+    // and ends none either.
+    let bindings = Bindings::default();
+    let mut engine = Engine::new(
+        Bounds::default(),
+        Shared::new(grants(), bindings.clone()),
+        true,
+    );
+    let mut io = Fake::default();
+    upload_status(&mut engine, &mut io, 1, Some("ipns://k51abc"));
+    let (tag, _, _) = io.checks.pop().unwrap();
+    engine
+        .named(&mut io, 20, tag, crate::eip1193::Verdict::Deadline)
+        .unwrap();
+    assert_eq!(io.answer_of(1), cancelled());
+    assert!(!bindings.has(&document()));
+    upload_status(&mut engine, &mut io, 2, Some("ipns://k5_1"));
+    assert!(io.checks.is_empty());
+    let Answer::Result(text) = io.answer_of(2) else {
+        panic!()
+    };
+    assert!(text.contains("no_address"), "{text}");
+    assert!(!bindings.has(&Document::new(SITE, "ipns://k5_1", 1, 1)));
 }
 
 /// A PSS subscription to its open: the subscribe check, the guard's live

@@ -2096,6 +2096,7 @@ impl Core {
                 naming: self.naming.clone(),
                 grants,
                 grants_moved,
+                bindings: self.connects.bindings(),
             }
         };
         match dweb::spawn(start.out, start.events, Arc::clone(&self.requests)) {

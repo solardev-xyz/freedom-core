@@ -12,7 +12,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, dead_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use base64::Engine as _;
 use fc_json::JsString;
@@ -30,6 +30,76 @@ use crate::common::{Core, dirs, spawn_env};
 pub mod logic;
 
 use logic::{Logged, Node, TestWorld};
+
+/// A name-keyed document's name: a DNS name served over IPNS.
+pub const NAME: &str = "docs.example.org";
+/// The IPNS key the name serves.
+pub const IPNS_KEY: &str = "k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8";
+/// `IPNS_KEY`'s contenthash, as ENS stores it.
+const IPNS_CONTENTHASH: &str =
+    "e5010172002408011220e4680b2f8c8d21090e6aa327f1bb342ab8e7d9238f1e35831a54d6a8f5c91124";
+/// Another IPNS key's contenthash: the name moved.
+const OTHER_CONTENTHASH: &str =
+    "e5010172002408011220000000000000000000000000000000000000000000000000000000000000beef";
+
+/// What main's node answers for one name check.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Name {
+    /// The name serves the document's IPNS key.
+    Serves,
+    /// The name moved to another IPNS key.
+    Moved,
+    /// The node fails the call.
+    Fails,
+}
+
+/// Main's naming node, for a name-keyed document's checks (design 0012,
+/// APR-5f; 0015's D1): naming reads Direct from `n1`, uncached, so each
+/// check is one `eth_call`, answered as scripted.
+pub struct Naming {
+    pub names: VecDeque<Name>,
+    /// The `eth_call`s the core made.
+    pub checks: usize,
+    recorded: BTreeMap<String, String>,
+}
+
+impl Naming {
+    pub fn new() -> Naming {
+        Naming {
+            names: VecDeque::new(),
+            checks: 0,
+            recorded: crate::common::naming_recorded(),
+        }
+    }
+}
+
+/// The `resolve` answer, ABI-encoded `(bytes, address)`, for `contenthash`.
+fn resolve_body(contenthash: &str) -> String {
+    let bytes = contenthash.len() / 2;
+    let padded = bytes.div_ceil(32) * 32;
+    let word = |n: usize| format!("{n:064x}");
+    let inner = format!(
+        "{}{}{contenthash}{}",
+        word(32),
+        word(bytes),
+        "00".repeat(padded - bytes)
+    );
+    let result = format!(
+        "0x{}{}{}{inner}",
+        word(0x40),
+        format_args!("{:0>64}", "2".repeat(40)),
+        word(inner.len() / 2)
+    );
+    json!({ "jsonrpc": "2.0", "id": 1, "result": result }).to_string()
+}
+
+/// A name-keyed document's `PageContext`: `navigation` numbers it.
+pub fn named_page(navigation: u64) -> Value {
+    json!({
+        "origin": NAME, "top_origin": NAME, "frame": 1, "navigation": navigation,
+        "agent": false, "transport_key": format!("ipns://{IPNS_KEY}"),
+    })
+}
 
 /// The id main gives every subscription it opens: the reference's.
 pub const SUBSCRIPTION_ID: &str = "59820d1a24fddf7bceaad40b518018f0";
@@ -124,6 +194,8 @@ pub struct Script {
     /// The key the step's request came under, for a node rule's world
     /// change.
     pub key: JsString,
+    /// Main's naming node, for a name-keyed document.
+    pub naming: Option<Naming>,
 }
 
 impl Main {
@@ -156,6 +228,58 @@ impl Main {
         self.core
             .send_raw(&crate::common::raw_frame(0x01, frame.as_bytes()));
         id
+    }
+
+    /// Naming reads Direct from `n1` (APR-5f's test setup).
+    pub fn configure_naming(&mut self) {
+        let id = self.id();
+        let configured = self.core.call(
+            id,
+            "naming.configure",
+            json!({
+                "reset": "none",
+                "rpc": [{ "endpoint": "n1" }],
+                "direct": { "endpoint": "n1", "user_configured": true },
+                "prover": null,
+                "policy": { "order": ["direct"], "prefer_verified": false },
+                "quorum": { "k": 3, "m": 2, "timeout_ms": 5000, "anchor": "latest", "anchor_ttl_ms": 30000 },
+                "myotis_enabled": false,
+                "tezos": ["t1", "t2", "t3"],
+            }),
+        );
+        assert!(configured["result"].is_object(), "{configured}");
+    }
+
+    /// Main's answer to naming's `shell.rpc`: a name check's `eth_call` as
+    /// scripted, naming's other reads as the naming replay recorded them.
+    pub fn serve_rpc(&mut self, naming: &mut Naming, message: &Value) {
+        let params = &message["params"];
+        assert_eq!(params["endpoint"], "n1", "{message}");
+        let body: Value = serde_json::from_str(params["body"].as_str().unwrap()).unwrap();
+        let text = match body["method"].as_str().unwrap() {
+            "eth_call" => {
+                naming.checks += 1;
+                match naming
+                    .names
+                    .pop_front()
+                    .unwrap_or_else(|| panic!("an unscripted name check: {message}"))
+                {
+                    Name::Serves => resolve_body(IPNS_CONTENTHASH),
+                    Name::Moved => resolve_body(OTHER_CONTENTHASH),
+                    Name::Fails => json!({ "jsonrpc": "2.0", "id": 1,
+                        "error": { "code": -32000, "message": "header not found" } })
+                    .to_string(),
+                }
+            }
+            method => naming.recorded[method].clone(),
+        };
+        let mut answer: Value = serde_json::from_str(&text).unwrap();
+        answer["id"] = body["id"].clone();
+        let result = json!({
+            "status": 200,
+            "body": base64::engine::general_purpose::STANDARD.encode(answer.to_string()),
+        });
+        self.answer(message["id"].as_u64().unwrap(), result);
     }
 
     /// Main's answer to the core's request `id`.
@@ -243,6 +367,13 @@ impl Main {
         let params = &message["params"];
         assert_eq!(message["context"]["caller"], "shell");
         match message["method"].as_str().unwrap() {
+            "shell.rpc" => {
+                let mut naming = script.naming.take().expect("a name-keyed document");
+                self.serve_rpc(&mut naming, message);
+                script.naming = Some(naming);
+            }
+            // Main prefetches an agreed answer on its own timer.
+            "shell.prefetch" => {}
             "shell.swarm_ready" => {
                 assert_eq!(params["for"], request);
                 let check = match params["check"].as_str().unwrap() {

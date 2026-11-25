@@ -31,7 +31,7 @@ use std::time::Duration;
 use fc_json::index::{Index, Kind};
 use serde_json::json;
 use swarm_world::logic::{self, Want};
-use swarm_world::{Main, Script, grants_json, page, wire_typed};
+use swarm_world::{Main, Name, Naming, Script, grants_json, named_page, page, wire_typed};
 
 /// The methods whose cases this step plays.
 const PLAYED: [&str; 8] = [
@@ -200,6 +200,7 @@ fn whole_calls_play_every_case() {
             readiness: logic::publish_readiness(case),
             subscribe_check,
             key: origin.clone(),
+            naming: None,
         };
         main.world(json!({
             "reset": true,
@@ -524,4 +525,139 @@ fn a_malformed_answer_ends_the_core() {
 fn base64_of(bytes: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// A name-keyed document's page request, `eip1193.request` `eth_accounts`,
+/// answered while main serves naming's lookups: its answer.
+fn accounts(main: &mut Main, naming: &mut Naming, navigation: u64) -> serde_json::Value {
+    let id = main.id();
+    let world: serde_json::Value = serde_json::from_str(ACCOUNTS_WORLD).unwrap();
+    main.core.send(&json!({
+        "type": "request", "id": id, "method": "eip1193.request",
+        "params": { "method": "eth_accounts", "params": [], "world": world },
+        "context": { "caller": "page", "page": named_page(navigation) },
+    }));
+    loop {
+        let message = main.core.recv();
+        match (message["type"].as_str(), message["method"].as_str()) {
+            (Some("request"), Some("shell.rpc")) => main.serve_rpc(naming, &message),
+            (Some("request"), Some("shell.prefetch")) | (Some("cancel"), _) => {}
+            // The page's answer: `{ result }` or `{ error }`.
+            (Some("response"), _) if message["id"] == id => {
+                return message["result"]["result"].clone();
+            }
+            _ => panic!("{message}"),
+        }
+    }
+}
+
+/// eip1193.json's `name-accounts-honest` world: the Identity & Wallet
+/// switch on, the abandon wallet first.
+const ACCOUNTS_WORLD: &str = r#"{"enabled":true,"chain":null,"window_chain":null,"wallets":[{"index":0,"name":"Main Wallet","address":"0x9858EfFD232B4033E47d90003D41EC34EcaEda94","type":"mnemonic"}],"networks":{"1":{"name":"Ethereum","available":true},"100":{"name":"Gnosis","available":true}},"active":0}"#;
+
+/// `getUploadStatus` of a tag the site doesn't own: refused once the live
+/// facts are read, `tag_ownership_mismatch` while the name holds and the
+/// document is live, `NO_ADDRESS` once the name doesn't serve its key.
+const UNOWNED_STATUS: &str = r#"{"method":{"string":"swarm_getUploadStatus"},"params":{"object":[["tagUid",{"number":"7"}]]}}"#;
+
+fn reason(outcome: &fc_swarm_provider::machine::Outcome) -> String {
+    let fc_swarm_provider::machine::Outcome::Error(failure) = outcome else {
+        panic!("{outcome:?}")
+    };
+    failure
+        .data
+        .as_ref()
+        .unwrap()
+        .get("reason")
+        .as_js_string()
+        .unwrap()
+        .as_str()
+        .to_owned()
+}
+
+/// A name-keyed document (D1, through the pipe): the swarm thread checks
+/// the name with the core's own naming before main's recheck; a check that
+/// fails ends the document's binding for good, for every later check of
+/// either family: a later Swarm check resolves nothing, an EIP-1193
+/// failure refuses a Swarm check, and a Swarm failure an EIP-1193 one. A
+/// new document binds again.
+#[test]
+fn a_failed_name_ends_the_binding_for_swarm_and_ethereum() {
+    let mut main = swarm_world::main_with(
+        &["swarm"],
+        &[("FREEDOM_CORED_TEST_EIP1193_NAMES_UNCACHED", "1")],
+    );
+    main.configure_naming();
+    // The dApp grant main still writes: a holding name reveals the account.
+    let dapp = json!({ swarm_world::NAME: {
+        "origin": swarm_world::NAME, "connectedAt": 1, "lastUsed": 1, "walletIndex": 0,
+        "chainId": 100, "autoApprove": { "signing": false, "transactions": [] },
+    } });
+    std::fs::write(
+        main.core.grant_root.join("dapp-permissions.json"),
+        dapp.to_string(),
+    )
+    .unwrap();
+    main.world(json!({
+        "reset": true,
+        "clock": 1_767_225_600_123u64,
+        "grants": { swarm_world::NAME: {
+            "origin": swarm_world::NAME, "connectedAt": 1, "lastUsed": 1,
+            "autoApprove": { "publish": false, "feeds": false, "signing": false, "messaging": false },
+        } },
+    }));
+    let mut script = Script {
+        world: logic::TestWorld::new(1_767_225_600_123),
+        node: logic::Node::new(),
+        readiness: Ok(()),
+        subscribe_check: None,
+        key: fc_json::JsString::from(swarm_world::NAME),
+        naming: Some(Naming::new()),
+    };
+    let names = |script: &mut Script, names: &[Name]| {
+        script.naming.as_mut().unwrap().names.extend(names);
+    };
+    let checks = |script: &Script| script.naming.as_ref().unwrap().checks;
+
+    // The name holds: main's recheck, then the method's own refusal.
+    names(&mut script, &[Name::Serves]);
+    let ran = main.play(&mut script, &named_page(1), UNOWNED_STATUS);
+    assert_eq!((checks(&script), ran.rechecks), (1, 1));
+    assert_eq!(reason(&ran.outcome), "tag_ownership_mismatch");
+
+    // It fails: NO_ADDRESS, no recheck; and the document's next request
+    // resolves nothing, whatever the name would answer now.
+    names(&mut script, &[Name::Fails]);
+    let ran = main.play(&mut script, &named_page(1), UNOWNED_STATUS);
+    assert_eq!((checks(&script), ran.rechecks), (2, 0));
+    assert_eq!(reason(&ran.outcome), "no_address");
+    let ran = main.play(&mut script, &named_page(1), UNOWNED_STATUS);
+    assert_eq!((checks(&script), ran.rechecks), (2, 0));
+    assert_eq!(reason(&ran.outcome), "no_address");
+    // ...and the document's EIP-1193 checks read it too: no account, and
+    // nothing resolved.
+    let mut naming = script.naming.take().unwrap();
+    assert_eq!(accounts(&mut main, &mut naming, 1), json!([]));
+    assert_eq!(naming.checks, 2);
+
+    // An EIP-1193 check that finds the name moved ends a new document's
+    // binding: its Swarm check resolves nothing.
+    naming.names.extend([Name::Moved]);
+    assert_eq!(accounts(&mut main, &mut naming, 2), json!([]));
+    assert_eq!(naming.checks, 3);
+    script.naming = Some(naming);
+    let ran = main.play(&mut script, &named_page(2), UNOWNED_STATUS);
+    assert_eq!((checks(&script), ran.rechecks), (3, 0));
+    assert_eq!(reason(&ran.outcome), "no_address");
+
+    // A document whose name holds reveals the account through both of its
+    // EIP-1193 checks, and binds on.
+    let mut naming = script.naming.take().unwrap();
+    naming.names.extend([Name::Serves, Name::Serves]);
+    assert_eq!(
+        accounts(&mut main, &mut naming, 3),
+        json!(["0x9858EfFD232B4033E47d90003D41EC34EcaEda94"])
+    );
+    assert_eq!(naming.checks, 5);
+    script.naming = Some(naming);
 }
