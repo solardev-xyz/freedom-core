@@ -702,6 +702,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fc-swarm-provider"
+version = "0.28.0"
+dependencies = [
+ "base64",
+ "fc-json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "fc-sys"
 version = "0.28.0"
 dependencies = [
