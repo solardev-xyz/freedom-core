@@ -127,7 +127,12 @@ pub const UPLOAD_CHARGE: usize = 300 * 1024;
 pub const STREAMING_UPLOADS: usize = 4;
 
 /// How main approved a request (`approval`): its prompt, or a standing
-/// rule.
+/// rule. A request a rule approved has no admission check at its start:
+/// every method's effect guard reads Agent custody and the rule again
+/// where the reference does (page-swarm.js's `guardEffect`), so custody
+/// taken or the rule turned off between main's check and the hand-off
+/// answer `agent_custody` or `not_auto_approved` there (design 0015,
+/// "Methods main calls").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Approval {
     User,

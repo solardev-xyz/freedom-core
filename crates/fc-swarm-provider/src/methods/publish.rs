@@ -137,7 +137,6 @@ impl Publish {
         approval: Option<Approval>,
     ) -> Result<Self, Outcome> {
         permitted(cx)?;
-        admit(cx, approval)?;
         let (method, name, size, upload) = match method {
             "swarm_publishData" => publish_data(params)?,
             "swarm_publishFiles" => publish_files(params)?,
@@ -717,23 +716,6 @@ fn file_streams(data: &Piece) -> bool {
 /// The core's text for a node that answered a chunk upload with another
 /// reference than the chunk's (deviation `reference-check`).
 pub const OTHER_REFERENCE_MESSAGE: &str = "The Swarm node returned another reference";
-
-/// The admission of a request a site's rule approved (design 0015,
-/// "Methods main calls": `approval`): the agent mustn't hold the tab, and
-/// the rule must stand; otherwise `agent_custody`, or `no_rule`, which only
-/// a main bug reaches.
-fn admit<W: World>(cx: &Cx<'_, W>, approval: Option<Approval>) -> Result<(), Outcome> {
-    if approval != Some(Approval::Auto) {
-        return Ok(());
-    }
-    if cx.agent() {
-        return Err(Failure::not_authorized("agent_custody").into());
-    }
-    if !cx.auto_approve(Capability::Publish) {
-        return Err(Failure::not_authorized("no_rule").into());
-    }
-    Ok(())
-}
 
 /// The effect's guard (page-swarm.js's `guardEffect`, then the provider's
 /// `whileGranted`), after the upload's last wait, in its order: the name

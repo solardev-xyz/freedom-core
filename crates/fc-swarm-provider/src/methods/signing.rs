@@ -6,7 +6,7 @@
 use fc_json::JsValue;
 
 use super::permitted;
-use super::writes::{admit, feed_not_granted, guard, owner, signer_key};
+use super::writes::{feed_not_granted, guard, owner, signer_key};
 use crate::machine::{
     Approval, AskId, Cx, Event, Failure, Outcome, SignKey, Step, World, done, fail,
 };
@@ -29,7 +29,6 @@ impl Signing {
         approval: Option<Approval>,
     ) -> Result<Self, Outcome> {
         permitted(cx)?;
-        admit(cx, approval, Capability::Signing)?;
         if !cx.world.feeds().has_feed_grant(cx.origin) {
             return Err(feed_not_granted().into());
         }

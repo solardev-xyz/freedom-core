@@ -224,27 +224,6 @@ pub(crate) fn feed_not_granted() -> Failure {
     Failure::not_authorized("feed_not_granted")
 }
 
-/// The admission of a request a site's rule approved (design 0015,
-/// "Methods main calls": `approval`): the agent mustn't hold the tab, and
-/// the rule must stand; otherwise `agent_custody`, or `no_rule`, which only
-/// a main bug reaches.
-pub(crate) fn admit<W: World>(
-    cx: &Cx<'_, W>,
-    approval: Option<Approval>,
-    capability: Capability,
-) -> Result<(), Outcome> {
-    if approval != Some(Approval::Auto) {
-        return Ok(());
-    }
-    if cx.agent() {
-        return Err(Failure::not_authorized("agent_custody").into());
-    }
-    if !cx.auto_approve(capability) {
-        return Err(Failure::not_authorized("no_rule").into());
-    }
-    Ok(())
-}
-
 /// The effect's guard (page-swarm.js's `guardEffect`, then the provider's
 /// `whileGranted` with the feed grant), in the step that makes the effect,
 /// after its last wait, in the reference's order: the page's name still
