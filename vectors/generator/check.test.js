@@ -1139,16 +1139,14 @@ test('check takes the window.swarm vectors from their own reference, at its pinn
   }
 });
 
-test('check rejects a changed bee-js file the swarm vectors load, at the same version', () => {
-  // The swarm reference cloned at its commit, its install the shared one but
-  // for bee-js, copied, with one file the run loads changed and the version
-  // left at 13.2.0: dist/cjs/api/pss.js, which the hand-picked digest list
-  // left out. The change keeps the behaviour, so only the digest sees it.
+/**
+ * check, over the swarm reference cloned at its commit, its install the
+ * shared one but for one package, copied, and changed by `change(dir)` with
+ * its version left as it is.
+ */
+function swarmCheckWithChangedPackage(name, change) {
   const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: SWARM_REFERENCE, encoding: 'utf8' }).stdout.trim();
-  const { meta } = JSON.parse(fs.readFileSync(path.join(SOURCE, 'swarm.json'), 'utf8'));
-  assert.ok(meta.files['@ethersphere/bee-js@13.2.0/dist/cjs/api/pss.js'], 'pss.js is among the files the vectors load');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-swarm-install-'));
-  let result;
   try {
     const checkout = path.join(root, 'swarm-reference');
     const git = (args, cwd) => {
@@ -1159,24 +1157,55 @@ test('check rejects a changed bee-js file the swarm vectors load, at the same ve
     git(['-c', 'advice.detachedHead=false', 'checkout', '--quiet', '--detach', commit], checkout);
     const installed = fs.realpathSync(path.join(SWARM_REFERENCE, 'node_modules'));
     const modules = path.join(checkout, 'node_modules');
-    fs.mkdirSync(path.join(modules, '@ethersphere'), { recursive: true });
-    for (const name of fs.readdirSync(installed)) {
-      if (name !== '@ethersphere') fs.symlinkSync(path.join(installed, name), path.join(modules, name));
+    const [scope, base] = name.startsWith('@') ? name.split('/') : [null, name];
+    fs.mkdirSync(path.join(modules, ...(scope ? [scope] : [])), { recursive: true });
+    for (const entry of fs.readdirSync(installed)) {
+      if (entry !== scope && entry !== base) fs.symlinkSync(path.join(installed, entry), path.join(modules, entry));
     }
-    for (const name of fs.readdirSync(path.join(installed, '@ethersphere'))) {
-      const from = path.join(installed, '@ethersphere', name);
-      const to = path.join(modules, '@ethersphere', name);
-      if (name === 'bee-js') fs.cpSync(from, to, { recursive: true, dereference: true });
-      else fs.symlinkSync(from, to);
+    if (scope) {
+      for (const entry of fs.readdirSync(path.join(installed, scope))) {
+        if (entry !== base) fs.symlinkSync(path.join(installed, scope, entry), path.join(modules, scope, entry));
+      }
     }
-    const beeJs = path.join(modules, '@ethersphere', 'bee-js');
-    assert.equal(JSON.parse(fs.readFileSync(path.join(beeJs, 'package.json'), 'utf8')).version, '13.2.0');
-    fs.appendFileSync(path.join(beeJs, 'dist', 'cjs', 'api', 'pss.js'), '\n// The same code, one comment longer.\n');
-    result = spawnSync(process.execPath, checkArgs(path.join(SOURCE, 'generator/generate.js'), { swarm: checkout }),
+    const dir = path.join(modules, name);
+    fs.cpSync(path.join(installed, name), dir, { recursive: true, dereference: true });
+    const version = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')).version;
+    change(dir);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')).version, version);
+    return spawnSync(process.execPath, checkArgs(path.join(SOURCE, 'generator/generate.js'), { swarm: checkout }),
       { encoding: 'utf8', timeout: CHECK_TIMEOUT });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+}
+
+test('check rejects a changed bee-js file the swarm vectors load, at the same version', () => {
+  // dist/cjs/api/pss.js, which the hand-picked digest list left out. The
+  // change keeps the behaviour, so only the digest sees it.
+  const { meta } = JSON.parse(fs.readFileSync(path.join(SOURCE, 'swarm.json'), 'utf8'));
+  assert.ok(meta.files['@ethersphere/bee-js@13.2.0/dist/cjs/api/pss.js'], 'pss.js is among the files the vectors load');
+  const result = swarmCheckWithChangedPackage('@ethersphere/bee-js', (dir) => {
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')).version, '13.2.0');
+    fs.appendFileSync(path.join(dir, 'dist', 'cjs', 'api', 'pss.js'), '\n// The same code, one comment longer.\n');
+  });
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /Byte mismatch: swarm\.json/);
+});
+
+test('check rejects a changed better-sqlite3 addon the swarm vectors load, at the same version', () => {
+  // The prebuild this machine loads for the publish-history cases, one byte
+  // longer at its end, which the loader ignores: only the digest sees it.
+  // Every platform's prebuild is in meta.files, so the list is the same on
+  // any machine.
+  const { meta } = JSON.parse(fs.readFileSync(path.join(SOURCE, 'swarm.json'), 'utf8'));
+  const addons = Object.keys(meta.files).filter((key) => /^better-sqlite3@[^/]+\/prebuilds\/.+\.node$/.test(key));
+  assert.ok(addons.length >= 8, `every shipped prebuild is digested: ${addons.join(', ')}`);
+  const result = swarmCheckWithChangedPackage('better-sqlite3', (dir) => {
+    const loaded = require(path.join(dir, 'lib', 'binding.js')).getPrebuildPath();
+    assert.ok(loaded, 'this machine loads a prebuild');
+    fs.appendFileSync(loaded, Buffer.from([0]));
+  });
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stderr, /Byte mismatch: swarm\.json/);

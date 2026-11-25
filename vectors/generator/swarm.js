@@ -70,10 +70,11 @@ function loadPackages(checkout) {
  * thread's and the GSOC workers' (`also`), and each such package's
  * package.json. Keyed `<name>@<version>/<path in the package>`, so the key
  * is the same in any install of that version, wherever it lives (CI links
- * the Radicle reference's). A native addon (better-sqlite3's prebuild) is a
- * platform's build, so it is left out; the JavaScript that loads it is in.
- * A changed file fails `check` even at the same version, and so does a file
- * the run starts or stops loading.
+ * the Radicle reference's). A package whose native addon the run loaded
+ * (better-sqlite3's prebuild for this platform) has every addon it ships
+ * digested, each platform's, so the list is the same on any machine and the
+ * addon this one ran is in it. A changed file fails `check` even at the
+ * same version, and so does a file the run starts or stops loading.
  */
 function loadedPackageFiles(also = []) {
   const out = new Map();
@@ -82,17 +83,34 @@ function loadedPackageFiles(also = []) {
     out.set(key, digest);
   };
   for (const file of new Set([...Object.keys(require.cache), ...also])) {
-    if (!/\.(c|m)?js$|\.json$/.test(file)) continue;
+    const native = file.endsWith('.node');
+    if (!native && !/\.(c|m)?js$|\.json$/.test(file)) continue;
     const parts = file.split(path.sep);
     const at = parts.lastIndexOf('node_modules');
     if (at < 0) continue;
     const root = parts.slice(0, at + (parts[at + 1]?.startsWith('@') ? 3 : 2)).join(path.sep);
     const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
     const key = `${manifest.name}@${manifest.version}`;
+    const digest = (each) => add(`${key}/${path.relative(root, each).split(path.sep).join('/')}`, sha256(fs.readFileSync(each)));
     add(`${key}/package.json`, sha256(fs.readFileSync(path.join(root, 'package.json'))));
-    add(`${key}/${path.relative(root, file).split(path.sep).join('/')}`, sha256(fs.readFileSync(file)));
+    if (native) shippedAddons(root).forEach(digest);
+    else digest(file);
   }
   return Object.fromEntries([...out].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+}
+
+/** Every native addon a package ships (each `.node` file in it, outside its own node_modules). */
+function shippedAddons(root) {
+  const out = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const at = path.join(dir, entry.name);
+      if (entry.isDirectory() && entry.name !== 'node_modules') walk(at);
+      else if (entry.isFile() && entry.name.endsWith('.node')) out.push(at);
+    }
+  };
+  walk(root);
+  return out;
 }
 
 /** The environment every section shares. */
@@ -316,8 +334,8 @@ const SWARM_FORMATS = {
   reference: 'freedom-browser at meta.freedomBrowserCommit (integration/rust-core, with #1057 and #1062), its main-process modules loaded whole, '
     + 'over meta.packages: bee-js 13.2.0 and core-sdk 0.2.2 exactly. meta.files is every installed package file the run loaded (Node\'s require '
     + 'cache, the GSOC workers\' included: bee-js, core-sdk, cafe-utility, ethers, better-sqlite3\'s JavaScript, isomorphic-ws and the rest) and each '
-    + 'such package\'s package.json, keyed <name>@<version>/<path>, by SHA-256; a native addon (better-sqlite3\'s prebuild) is a platform\'s build '
-    + 'and is left out. Electron, the identity core (core/vault-backend.js), identity-manager.js\'s own lower modules (profile paths, the node '
+    + 'such package\'s package.json, keyed <name>@<version>/<path>, by SHA-256; a package whose native addon the run loaded has every addon it '
+    + 'ships digested (better-sqlite3\'s prebuilds, each platform\'s), so the list is the same on any machine. Electron, the identity core (core/vault-backend.js), identity-manager.js\'s own lower modules (profile paths, the node '
     + 'identity guard, the Radicle gate, private files), the grant mirror, the service registry, the publish setup service and the vault timer are '
     + 'the world each case scripts (generator/swarm-world.js); identity-manager.js itself is the reference\'s, so its texts (a locked vault\'s, a '
     + 'bad publisher index\'s) are its own.',

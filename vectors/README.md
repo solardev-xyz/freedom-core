@@ -134,7 +134,9 @@ the name holding unless the case moves it). The packages are the checkout's inst
 `@ethersphere/bee-js` 13.2.0 and `@ethersphere/core-sdk` 0.2.2 exactly (any other version is
 refused before anything is built), with its ethers and better-sqlite3; `meta.files` digests
 every installed package file the run loads (Node's require cache, the GSOC workers'
-included), so a changed file fails `check` at the same version. The reference's lockfile pins
+included), and every native addon a package ships once the run loads one of them
+(better-sqlite3's prebuilds, each platform's), so a changed file fails `check` at the same
+version. The reference's lockfile pins
 every package at the Radicle reference's version and integrity (it only drops
 `@corpus-core/colibri-stateless`), so CI links `swarm-reference/node_modules` to the Radicle
 reference's install, as for the colibri reference. The vectors run in a worker thread of
