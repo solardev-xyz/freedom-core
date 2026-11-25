@@ -857,11 +857,18 @@ impl Running {
 
 /// A method's last write after the request's outcome.
 pub(crate) enum Closing {
-    /// The write, now.
+    /// The write, now, with no retry: a store's write other than a history
+    /// row's end (which is [`Closing::Row`]).
+    #[allow(
+        dead_code,
+        reason = "the feed and SOC writes' closing writes (part 3c)"
+    )]
     Write(StoreWrite),
     /// The history insert `id` is in flight: its rowid is awaited, then
     /// the row is trimmed around and ended `failed` with `text`, at `now`.
     AfterInsert(AfterInsert),
+    /// The history row is known: it ends `failed`, now.
+    Row(RowEnd),
 }
 
 /// The row an in-flight history insert makes, to end once it answers.
@@ -871,15 +878,38 @@ pub(crate) struct AfterInsert {
     pub now: u64,
 }
 
+/// A history row to end `failed` with `text`, at `now`.
+pub(crate) struct RowEnd {
+    pub row: i64,
+    pub text: JsString,
+    pub now: u64,
+}
+
+/// What the request still waits for after its outcome, for its history
+/// row: one thing at a time.
+enum After {
+    /// The insert in flight: its rowid.
+    Insert(AfterInsert),
+    /// The row's failed update `id` (after the trim keeping the row, for a
+    /// row whose insert was in flight), and, until it has been retried,
+    /// the row to retry it on: a failed write is followed once by the
+    /// failed update with the write's error (`history-retry`), the trim
+    /// again first where it had one. A second failure is dropped.
+    Write {
+        id: AskId,
+        retry: Option<(i64, u64, bool)>,
+    },
+}
+
 /// One `swarm.request`.
 pub struct Request {
     origin: JsString,
     running: Option<Running>,
     asks: Asks,
     outcome: Option<Outcome>,
-    /// After the outcome, a history insert still in flight whose row must
-    /// end `failed` when it answers.
-    after: Option<AfterInsert>,
+    /// After the outcome, what the history row still waits for: an insert
+    /// in flight, or its failed update and that update's one retry.
+    after: Option<After>,
 }
 
 impl Request {
@@ -983,11 +1013,8 @@ impl Request {
                     out: BodyOut::Abort(BodyAbort::Cancelled),
                 });
             }
-            if let Some(after) = self.after.take_if(|a| a.id == id)
-                && let Event::Inserted(Ok(rowid)) = event
-                && let Some(write) = methods::publish::after_insert(rowid, &after.text, after.now)
-            {
-                self.asks.push(Need::Write(write), 0);
+            if admitted.is_ok() {
+                self.after_answer(id, event);
             }
             return;
         }
@@ -1052,10 +1079,49 @@ impl Request {
             Some(Closing::Write(write)) => {
                 self.asks.push(Need::Write(write), 0);
             }
-            Some(Closing::AfterInsert(after)) => self.after = Some(after),
+            Some(Closing::AfterInsert(after)) => self.after = Some(After::Insert(after)),
+            Some(Closing::Row(end)) => self.end_row(end, false),
             None => {}
         }
         self.outcome = Some(outcome);
+    }
+
+    /// Ends a history row `failed` after the outcome (after the trim
+    /// keeping it, with `trim`), keeping what its one retry needs.
+    fn end_row(&mut self, end: RowEnd, trim: bool) {
+        if let Some(write) = methods::publish::row_failed(end.row, &end.text, end.now, trim) {
+            let id = self.asks.push(Need::Write(write), 0);
+            self.after = Some(After::Write {
+                id,
+                retry: Some((end.row, end.now, trim)),
+            });
+        }
+    }
+
+    /// An admitted answer after the outcome, for what the history row
+    /// waits for: only its own terminal moves it on.
+    fn after_answer(&mut self, id: AskId, event: Event) {
+        match (self.after.take(), event) {
+            (Some(After::Insert(insert)), Event::Inserted(Ok(row))) if insert.id == id => {
+                let end = RowEnd {
+                    row,
+                    text: insert.text,
+                    now: insert.now,
+                };
+                self.end_row(end, true);
+            }
+            // No row was made.
+            (Some(After::Insert(insert)), Event::Inserted(Err(_))) if insert.id == id => {}
+            (Some(After::Write { id: write, retry }), Event::Written(result)) if write == id => {
+                if let (Err(error), Some((row, now, trim))) = (result, retry)
+                    && let Some(again) = methods::publish::row_failed(row, &error, now, trim)
+                {
+                    let id = self.asks.push(Need::Write(again), 0);
+                    self.after = Some(After::Write { id, retry: None });
+                }
+            }
+            (other, _) => self.after = other,
+        }
     }
 
     /// The effects since the last call, in order.
