@@ -559,7 +559,9 @@ fn an_idle_upload_ends_at_its_bound() {
     };
     assert!(text.starts_with(r#"{"error_typed":"#), "{text}");
     engine.written(&mut io, 0, 1).unwrap();
-    // Main's answers to what was cancelled let the rest go.
+    // Main's answers to what was cancelled let the rest go: the call's
+    // closes the body's route at once (D4), though the request still waits
+    // for the part's terminal.
     engine
         .response(
             &mut io,
@@ -568,9 +570,11 @@ fn an_idle_upload_ends_at_its_bound() {
             Err(r#"{"code":"cancelled","message":"Cancelled"}"#),
         )
         .unwrap();
+    assert_eq!(engine.requests(), 1);
+    assert_eq!(io.forgotten.last(), Some(&StreamKey::Body(BODY)));
+    assert_eq!(engine.late_credit(BODY), Err(Fault("stream_closed")));
     engine.stream_retired(&mut io, 1020, part).unwrap();
     nothing_held(&engine);
-    assert!(io.forgotten.contains(&StreamKey::Body(BODY)));
 }
 
 #[test]
