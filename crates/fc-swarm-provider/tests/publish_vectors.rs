@@ -1031,23 +1031,14 @@ fn publish_methods() {
             }
             // One live check at the effect's guard the reference ran, one
             // before a collection's tag owner (`afterEffect`), and one
-            // before getUploadStatus's answer.
+            // after getUploadStatus's handler, whatever it answered.
             let effects = step.get("events").map_or(0, |e| {
                 e.children().filter(|e| e.get("effect").is_some()).count()
             });
             let tagged = name == "swarm_publishFiles"
                 && matches!(&played.ran.outcome, Outcome::Result(r)
                     if matches!(r.get("tagUid"), Value::Number(_)));
-            let status = name == "swarm_getUploadStatus"
-                && match &played.ran.outcome {
-                    Outcome::Result(_) => true,
-                    Outcome::Error(f) => f.data.as_ref().is_some_and(|d| {
-                        d.get("reason")
-                            .as_js_string()
-                            .is_some_and(|r| r.as_str() == "no_address")
-                    }),
-                    _ => false,
-                };
+            let status = name == "swarm_getUploadStatus";
             let checks = effects + usize::from(tagged) + usize::from(status);
             if deviation.is_none() {
                 assert_eq!(played.live, checks, "{sid}: live checks");

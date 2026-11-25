@@ -5,8 +5,13 @@
 //! and at most 4,096 owners are held at once, the oldest forgotten first
 //! (deviation `tag-owners-bound`).
 //! As page-swarm.js's `uploadStatus` does, the name must still bind the
-//! key and the document still hold it when the answer goes: the live facts
-//! are asked after the call (design 0015's D1), custody left out.
+//! key and the document still hold it when the answer goes, whatever the
+//! handler answered: the live facts are asked after it (design 0015's D1),
+//! custody left out, and a name that moved answers `NO_ADDRESS` before the
+//! handler's own answer. That holds for every answer `executeSwarmMethod`
+//! gives this method: the connection's refusal, the params' and the tag's
+//! (`tag_ownership_mismatch`, a tag forgotten past the bound among them,
+//! with no `tag` call), the read's failure, and the status.
 
 use std::collections::BTreeMap;
 
@@ -17,7 +22,7 @@ use crate::ReplyError;
 use crate::errors::{self, Site};
 use crate::machine::node::{Failed, transport_text};
 use crate::machine::params::require_params;
-use crate::machine::{AskId, Cx, Event, Failure, NodeCall, Outcome, Step, World, done, fail};
+use crate::machine::{AskId, Cx, Event, Failure, NodeCall, Outcome, Step, World, fail};
 use crate::replies::{normalize_tag, read_tag};
 use crate::value::Value;
 
@@ -97,15 +102,35 @@ pub(crate) struct UploadStatus {
 enum Stage {
     Call(AskId),
     /// The live facts, then `normalizeTag`'s object.
+    /// The live facts, then the handler's answer.
     Live {
         id: AskId,
-        status: Value,
+        answer: Outcome,
     },
     Gone,
 }
 
 impl UploadStatus {
+    /// `handleGetUploadStatus` up to its `tag` call; a refusal before it
+    /// waits for the live facts too.
     pub(crate) fn start<W: World>(cx: &mut Cx<'_, W>, params: &Value) -> Result<Self, Outcome> {
+        let stage = match Self::checks(cx, params) {
+            Ok((uid, call)) => {
+                return Ok(UploadStatus {
+                    uid,
+                    stage: Stage::Call(call),
+                });
+            }
+            Err(answer) => Stage::Live {
+                id: cx.live(),
+                answer,
+            },
+        };
+        Ok(UploadStatus { uid: 0, stage })
+    }
+
+    /// The handler's checks, in its order, then the `tag` call.
+    fn checks<W: World>(cx: &mut Cx<'_, W>, params: &Value) -> Result<(u64, AskId), Outcome> {
         permitted(cx)?;
         require_params(params)?;
         // `typeof tagUid !== 'number' || !Number.isInteger(tagUid) ||
@@ -130,18 +155,21 @@ impl UploadStatus {
         let Some(uid) = owned else {
             return Err(Failure::not_authorized("tag_ownership_mismatch").into());
         };
-        let call = cx.whole(NodeCall::tag(uid));
-        Ok(UploadStatus {
-            uid,
-            stage: Stage::Call(call),
-        })
+        Ok((uid, cx.whole(NodeCall::tag(uid))))
     }
 
     pub(crate) fn on<W: World>(&mut self, cx: &mut Cx<'_, W>, id: AskId, event: Event) -> Step {
         match std::mem::replace(&mut self.stage, Stage::Gone) {
-            Stage::Call(call) if call == id => self.tag(cx, event),
-            Stage::Live { id: asked, status } if asked == id => match live_of(&event) {
-                Some(live) if live.holds() => done(status),
+            Stage::Call(call) if call == id => {
+                let answer = self.tag(cx, event);
+                self.stage = Stage::Live {
+                    id: cx.live(),
+                    answer,
+                };
+                Step::Wait
+            }
+            Stage::Live { id: asked, answer } if asked == id => match live_of(&event) {
+                Some(live) if live.holds() => Step::Done(answer),
                 Some(_) => fail(no_address()),
                 None => fail(Failure::internal_error()),
             },
@@ -149,34 +177,32 @@ impl UploadStatus {
         }
     }
 
-    /// The `tag` call's answer, then the live facts.
-    fn tag<W: World>(&mut self, cx: &mut Cx<'_, W>, event: Event) -> Step {
+    /// The handler's answer from the `tag` call's: the status, or the
+    /// read's failure through the provider's catch.
+    fn tag<W: World>(&mut self, cx: &mut Cx<'_, W>, event: Event) -> Outcome {
         let reply = match event {
             Event::Reply(reply) => reply,
-            Event::Failed(failed) => return fail(call_failed(failed)),
-            _ => return fail(Failure::internal_error()),
+            Event::Failed(failed) => return call_failed(failed).into(),
+            _ => return Failure::internal_error().into(),
         };
         if !reply.ok() {
-            return fail(match reply.error(Site::BeeJs) {
+            return match reply.error(Site::BeeJs) {
                 Ok(err) => Failure::internal(err.message),
                 Err(class) => call_failed(class),
-            });
+            }
+            .into();
         }
         let tag = match read_tag(&reply.body) {
             Ok(Ok(tag)) => tag,
-            Ok(Err(zod)) => return fail(Failure::internal(zod)),
-            Err(err) => return fail(reply_failed(err)),
+            Ok(Err(zod)) => return Failure::internal(zod).into(),
+            Err(err) => return reply_failed(err).into(),
         };
         let (status, finished) = normalize_tag(&tag);
         // Clean up completed tags to prevent unbounded map growth.
         if finished {
             cx.world.tags().remove(self.uid);
         }
-        self.stage = Stage::Live {
-            id: cx.live(),
-            status,
-        };
-        Step::Wait
+        Outcome::Result(status)
     }
 }
 

@@ -973,6 +973,118 @@ fn an_answer_under_the_key_waits_for_them() {
     assert_eq!(points, 2);
 }
 
+/// page-swarm.js's `uploadStatus` asks the name after `executeSwarmMethod`
+/// whatever it answered: a name that moved (or a key gone) answers
+/// `NO_ADDRESS` before a failed tag read, a tag that isn't the site's
+/// (another site's, or its own forgotten past the bound), a refused
+/// `tagUid` or the connection's refusal; with the name holding, each keeps
+/// its own answer. Each asks the live facts once, and a refused tag makes
+/// no `tag` call.
+#[test]
+fn upload_status_answers_no_address_first_whatever_its_handler_said() {
+    fn read_fails(main: &mut Main) {
+        main.node.rules.insert(
+            0,
+            Rule {
+                method: Some("GET".to_owned()),
+                path: Some(format!("/tags/{FIRST_TAG}")),
+                prefix: None,
+                reply: ReplySpec {
+                    status: 500,
+                    status_text: "Internal Server Error".to_owned(),
+                    body: br#"{"code":500,"message":"Internal Server Error"}"#.to_vec(),
+                    ..ReplySpec::ok(Vec::new(), "application/json; charset=utf-8")
+                },
+                world: Vec::new(),
+            },
+        );
+    }
+    fn another_sites(main: &mut Main) {
+        main.world
+            .tags
+            .set(FIRST_TAG, JsString::from("https://other.example"));
+    }
+    fn forgotten(main: &mut Main) {
+        // tag-owners-bound: 4,096 newer tags forget the site's.
+        for tag in 1..=4096 {
+            main.world
+                .tags
+                .set(FIRST_TAG + tag, JsString::from("https://other.example"));
+        }
+        assert_eq!(main.world.tags.get(FIRST_TAG), None);
+    }
+    fn disconnected(main: &mut Main) {
+        main.world.grants.remove(&key());
+    }
+    let status = upload_status(None);
+    let zero = call(
+        "swarm_getUploadStatus",
+        Value::object([("tagUid", Value::Number(0.0))]),
+        None,
+    );
+    /// What, the world before it, the call, the answer while the name
+    /// holds, and whether the tag is read.
+    type Case<'c> = (&'static str, fn(&mut Main), &'c Call, &'static str, bool);
+    let cases: [Case<'_>; 6] = [
+        ("the status", no_setup, &status, "result", true),
+        (
+            "a failed tag read",
+            read_fails,
+            &status,
+            "Internal Server Error",
+            true,
+        ),
+        (
+            "another site's tag",
+            another_sites,
+            &status,
+            "tag_ownership_mismatch",
+            false,
+        ),
+        (
+            "its tag forgotten past the bound",
+            forgotten,
+            &status,
+            "tag_ownership_mismatch",
+            false,
+        ),
+        ("a refused tagUid", no_setup, &zero, "invalid_params", false),
+        (
+            "no connection",
+            disconnected,
+            &status,
+            "not_connected",
+            false,
+        ),
+    ];
+    for (what, setup, call, holding, reads) in cases {
+        for (facts_now, want) in [
+            (facts(true, true, true), holding),
+            (facts(false, true, false), "no_address"),
+            (facts(true, false, false), "no_address"),
+        ] {
+            let mut main = Main::new();
+            a_tag(&mut main);
+            setup(&mut main);
+            let outcome = main.play(call, &mut |_, _| facts_now);
+            let got = answered(&outcome);
+            let label = format!("{what}, {facts_now:?}");
+            assert!(got.starts_with(want), "{label}: {got}");
+            assert_eq!(main.lives(), 1, "{label}: one live check");
+            assert_eq!(
+                main.log.contains(&Asked::Effectful),
+                reads,
+                "{label}: the tag call"
+            );
+            assert_eq!(
+                main.log.last(),
+                Some(&Asked::Live),
+                "{label}: the live facts last"
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The ask under the framework's rules.
 
