@@ -539,7 +539,7 @@ impl Engine {
     }
 
     /// The mining lane, for the test hooks (D11).
-    #[cfg(any(test, feature = "testhooks"))]
+    #[cfg(feature = "testhooks")]
     pub fn mining_mut(&mut self) -> &mut Mining {
         &mut self.mining
     }
