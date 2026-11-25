@@ -41,8 +41,8 @@ pub mod page;
 pub(crate) mod params;
 
 pub use node::{
-    Abort, Body, CHUNK_REPLY_CAP, Failed, FeedRef, Form, Head, NodeCall, Reply, Rule, TreeRef,
-    stream_charge, whole_charge,
+    Abort, Body, CHUNK_REPLY_CAP, Failed, FeedRef, Form, Head, MAX_FRAME, NodeCall, Reply, Rule,
+    TreeRef, stream_charge, whole_charge,
 };
 pub use page::Failure;
 
@@ -766,4 +766,193 @@ pub(crate) fn fail(failure: Failure) -> Step {
 /// A step's outcome from a result.
 pub(crate) fn done(value: Value) -> Step {
     Step::Done(Outcome::Result(value))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+
+    use super::*;
+    use crate::stores::feeds::FeedStore;
+    use crate::stores::manifests::Capability;
+
+    struct Plain {
+        budgets: ReadBudgets,
+        feeds: FeedStore,
+    }
+
+    impl Reads for Plain {
+        fn connected(&self, _key: &JsString) -> bool {
+            true
+        }
+        fn messaging(&self, _key: &JsString) -> bool {
+            false
+        }
+        fn auto_approve(&self, _key: &JsString, _capability: Capability) -> bool {
+            false
+        }
+        fn feeds(&self) -> &FeedStore {
+            &self.feeds
+        }
+    }
+
+    impl World for Plain {
+        fn now(&self) -> u64 {
+            1000
+        }
+        fn budgets(&mut self) -> &mut ReadBudgets {
+            &mut self.budgets
+        }
+    }
+
+    fn world() -> Plain {
+        Plain {
+            budgets: ReadBudgets::new(),
+            feeds: FeedStore::empty(),
+        }
+    }
+
+    fn call(method: &str, params: Value) -> Call {
+        Call {
+            method: Value::str(method),
+            params,
+            key: JsString::from("https://a.example"),
+            approval: None,
+        }
+    }
+
+    /// `readFeedEntry` of the latest entry, past its readiness check: the
+    /// request and its `feed_latest` ask.
+    fn latest(w: &mut Plain) -> (Request, AskId) {
+        let params = Value::object([
+            ("topic", Value::str(&"ab".repeat(32))),
+            ("owner", Value::str(&"cd".repeat(20))),
+        ]);
+        let mut r = Request::start(&call("swarm_readFeedEntry", params), w).unwrap();
+        let Some(Effect::Ask(ready)) = r.take_effects().pop() else {
+            panic!("the ready check")
+        };
+        assert_eq!(ready.need, Need::Ready(ReadyCheck::Reachable));
+        r.answer(w, ready.id, Event::Ready(Ok(())));
+        let Some(Effect::Ask(ask)) = r.take_effects().pop() else {
+            panic!("the stream")
+        };
+        let Need::Node(node) = &ask.need else {
+            panic!("a node call")
+        };
+        assert_eq!(node.form, Form::FeedLatest);
+        assert_eq!(node.max_bytes, 5 * 1024 * 1024);
+        assert_eq!(ask.charge, stream_charge(5 * 1024 * 1024));
+        (r, ask.id)
+    }
+
+    fn head() -> Event {
+        Event::Head(Head {
+            status: 200,
+            status_text: "OK".into(),
+            headers: vec![
+                ("swarm-feed-index".into(), "0000000000000001".into()),
+                ("swarm-feed-index-next".into(), "0000000000000002".into()),
+            ],
+        })
+    }
+
+    #[test]
+    fn answers_are_read_strictly() {
+        let mut w = world();
+        let (mut r, id) = latest(&mut w);
+        r.answer(&mut w, AskId(99), Event::End);
+        assert_eq!(r.outcome(), Some(&Outcome::Protocol(Protocol::UnknownAsk)));
+
+        let (mut r, id2) = latest(&mut w);
+        assert_eq!(id, id2);
+        r.answer(&mut w, id, Event::Data(vec![1]));
+        assert_eq!(r.outcome(), Some(&Outcome::Protocol(Protocol::BeforeHead)));
+
+        let (mut r, _) = latest(&mut w);
+        r.answer(&mut w, id, head());
+        r.answer(&mut w, id, Event::Data(vec![0; MAX_FRAME + 1]));
+        assert_eq!(r.outcome(), Some(&Outcome::Protocol(Protocol::Frame)));
+
+        let (mut r, _) = latest(&mut w);
+        r.answer(&mut w, id, Event::Ready(Ok(())));
+        assert_eq!(r.outcome(), Some(&Outcome::Protocol(Protocol::WrongKind)));
+    }
+
+    #[test]
+    fn credit_follows_what_the_machine_takes() {
+        let mut w = world();
+        let (mut r, id) = latest(&mut w);
+        r.answer(&mut w, id, head());
+        // Past the first window (two frames): each frame credited back as
+        // the machine takes it.
+        for _ in 0..3 {
+            r.answer(&mut w, id, Event::Data(vec![7; MAX_FRAME]));
+            assert_eq!(
+                r.take_effects(),
+                vec![Effect::Credit {
+                    id,
+                    bytes: MAX_FRAME
+                }]
+            );
+        }
+        r.answer(&mut w, id, Event::End);
+        let Some(Outcome::Result(value)) = r.outcome() else {
+            panic!("{:?}", r.outcome())
+        };
+        assert_eq!(value.get("index"), &Value::int(1));
+        assert_eq!(value.get("nextIndex"), &Value::int(2));
+    }
+
+    #[test]
+    fn a_cancel_ends_it_and_drops_what_comes_after() {
+        let mut w = world();
+        let (mut r, id) = latest(&mut w);
+        r.cancel();
+        assert_eq!(r.take_effects(), vec![Effect::Cancel(id)]);
+        assert_eq!(r.outcome(), Some(&Outcome::Cancelled));
+        r.answer(&mut w, id, head());
+        r.answer(&mut w, id, Event::End);
+        assert_eq!(r.outcome(), Some(&Outcome::Cancelled));
+        assert!(r.take_effects().is_empty());
+        r.busy();
+        assert_eq!(r.outcome(), Some(&Outcome::Cancelled));
+
+        let (mut r, _) = latest(&mut w);
+        r.busy();
+        assert_eq!(r.outcome(), Some(&Outcome::Error(Failure::busy())));
+    }
+
+    #[test]
+    fn a_refused_call_is_an_internal_error() {
+        let mut w = world();
+        let (mut r, id) = latest(&mut w);
+        r.answer(&mut w, id, Event::Refused(Rule::Value));
+        assert_eq!(
+            r.outcome(),
+            Some(&Outcome::Error(Failure::internal_error()))
+        );
+    }
+
+    #[test]
+    fn the_method_comes_first() {
+        let mut w = world();
+        let r = Request::start(&call("", Value::Undefined), &mut w).unwrap();
+        assert_eq!(
+            r.outcome(),
+            Some(&Outcome::Error(Failure::bare(-32602, "Method is required")))
+        );
+        let r = Request::start(&call("toString", Value::Undefined), &mut w).unwrap();
+        assert_eq!(
+            r.outcome(),
+            Some(&Outcome::Error(Failure::bare(
+                4200,
+                "Unknown method: toString"
+            )))
+        );
+        assert_eq!(
+            Request::start(&call("swarm_publishData", Value::Undefined), &mut w).err(),
+            Some(NotBuilt("swarm_publishData".into()))
+        );
+    }
 }
