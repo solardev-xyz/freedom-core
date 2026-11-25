@@ -454,6 +454,7 @@ impl FeedWrite {
                         self.write(cx)
                     }
                     Next::Error(message) => self.end(cx, Err(Fail::text(message))),
+                    Next::Node(err) => self.end(cx, Err(Fail::text(err.message))),
                     Next::Failed(failed) => self.end(cx, Err(Fail::transport(failed))),
                     // A write's lookup never answers a read's head.
                     Next::Head(_) => self.end(cx, Err(Fail::internal())),

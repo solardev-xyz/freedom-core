@@ -1999,7 +1999,10 @@ fn a_feed_read_answers_the_latest_index() {
         (
             500,
             3,
-            error(r#"Internal Server Error: {"code":500,"message":"boom"}"#),
+            ShellOutcome::Error(ShellError {
+                status: Some(500),
+                ..ShellError::new(r#"Internal Server Error: {"code":500,"message":"boom"}"#)
+            }),
             0,
         ),
     ] {
@@ -2127,7 +2130,12 @@ fn feed_answers_and_errors_as_the_reference_gives_them() {
         (
             Form::FeedHead,
             json_reply(503, Vec::new(), r#"{"message":"down"}"#),
-            error(r#"Service Unavailable: {"message":"down"}"#),
+            // bee-js's BeeResponseError, whose status updateFeed's callers
+            // read.
+            ShellOutcome::Error(ShellError {
+                status: Some(503),
+                ..ShellError::new(r#"Service Unavailable: {"message":"down"}"#)
+            }),
         ),
         (
             Form::FeedHead,

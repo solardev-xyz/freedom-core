@@ -77,9 +77,11 @@ pub enum Next {
     /// A read's answer ([`NextIndex::head`]): the feed's latest index, or
     /// `None` when no update was found.
     Head(Option<u64>),
-    /// The lookup failed: a node's error answer or a header's text, as the
-    /// reference throws it.
+    /// The lookup failed with a header's text, as the reference throws it.
     Error(JsString),
+    /// The lookup failed with a node's error answer (the lookup's, or a
+    /// probe's), bee-js's `BeeResponseError`, whose status its callers read.
+    Node(crate::errors::NodeError),
     /// The call failed before any reply.
     Failed(Failed),
 }
@@ -167,7 +169,7 @@ impl NextIndex {
             return match reply.error(Site::BeeJs) {
                 Err(failed) => self.end(Next::Failed(failed)),
                 Ok(err) if probes(&err) => self.probe(0, State::Zero),
-                Ok(err) => self.end(Next::Error(err.message)),
+                Ok(err) => self.end(Next::Node(err)),
             };
         }
         let text = |name: &str| {
@@ -240,20 +242,20 @@ fn exists(reply: &Reply) -> Result<bool, Ended> {
     match reply.error(Site::BeeJs) {
         Err(failed) => Err(Ended::Failed(failed)),
         Ok(_) if reply.status == 404 => Ok(false),
-        Ok(err) => Err(Ended::Error(err.message)),
+        Ok(err) => Err(Ended::Node(err)),
     }
 }
 
 /// Why a probe read ends the lookup.
 enum Ended {
-    Error(JsString),
+    Node(crate::errors::NodeError),
     Failed(Failed),
 }
 
 impl From<Ended> for Next {
     fn from(ended: Ended) -> Self {
         match ended {
-            Ended::Error(message) => Next::Error(message),
+            Ended::Node(err) => Next::Node(err),
             Ended::Failed(failed) => Next::Failed(failed),
         }
     }

@@ -628,8 +628,10 @@ fn index_runs() {
         match (run.get("next_index"), run.get("error")) {
             (Some(n), None) => assert_eq!(outcome, Next::Index(number(n) as u64), "{id}"),
             (None, Some(e)) => {
-                let Next::Error(message) = outcome else {
-                    panic!("{id}: {outcome:?}")
+                let message = match outcome {
+                    Next::Error(message) => message,
+                    Next::Node(err) => err.message,
+                    other => panic!("{id}: {other:?}"),
                 };
                 assert_eq!(message, js(get(e, "message")), "{id}");
             }

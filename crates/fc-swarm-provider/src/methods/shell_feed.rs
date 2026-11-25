@@ -161,6 +161,7 @@ impl ShellFeed {
                     }
                     Next::Index(index) => self.sign(cx, index),
                     Next::Error(message) => ShellStep::Done(shell::error(message)),
+                    Next::Node(err) => ShellStep::Done(ShellOutcome::Error(ShellError::node(&err))),
                     Next::Failed(class) => ShellStep::Done(shell::failed(class)),
                     Next::Head(_) => ShellStep::Done(shell::internal()),
                 }
@@ -184,6 +185,7 @@ impl ShellFeed {
                     }
                     Next::Head(head) => ShellStep::Done(ShellOutcome::Result(feed_state(head))),
                     Next::Error(message) => ShellStep::Done(shell::error(message)),
+                    Next::Node(err) => ShellStep::Done(ShellOutcome::Error(ShellError::node(&err))),
                     Next::Failed(class) => ShellStep::Done(shell::failed(class)),
                     Next::Index(_) => ShellStep::Done(shell::internal()),
                 }
