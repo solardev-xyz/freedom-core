@@ -42,7 +42,8 @@ pub enum Value {
     /// An object's own enumerable string keys and their values, in
     /// `Object.keys` order.
     Object(Vec<(JsString, Value)>),
-    /// Bytes (an object to `typeof`).
+    /// Bytes (an object to `typeof`), or a string where a method reads
+    /// data, as its UTF-8 (a string to `typeof`).
     Bytes(Bytes),
 }
 
@@ -131,6 +132,11 @@ impl Value {
             Value::Number(_) => "number",
             Value::BigInt(_) => "bigint",
             Value::String(_) => "string",
+            // A string where a method reads data, carried as its UTF-8.
+            Value::Bytes(Bytes {
+                kind: BytesKind::String,
+                ..
+            }) => "string",
             Value::Null | Value::Array(_) | Value::Object(_) | Value::Bytes(_) => "object",
         }
     }
@@ -148,6 +154,11 @@ impl Value {
             Value::Number(n) => *n != 0.0 && !n.is_nan(),
             Value::BigInt(text) => text != "0",
             Value::String(s) => !s.is_empty(),
+            Value::Bytes(Bytes {
+                kind: BytesKind::String,
+                len,
+                ..
+            }) => *len > 0,
             Value::Array(_) | Value::Object(_) | Value::Bytes(_) => true,
         }
     }
@@ -176,13 +187,18 @@ impl Value {
     }
 
     /// `Object.keys(value)[0]` for an object (`typeof` `object`, not an
-    /// array): its first own key. Bytes' own keys are their indices.
+    /// array): its first own key. A `Buffer`'s and a `Uint8Array`'s own
+    /// keys are their indices; an `ArrayBuffer` has none, whatever its
+    /// length; `{ type: 'Buffer', data }` has `type` first.
     pub fn first_key(&self) -> Option<JsString> {
         match self {
             Value::Object(members) => members.first().map(|(k, _)| k.clone()),
             Value::Bytes(bytes) => match bytes.kind {
                 BytesKind::BufferJson => Some(JsString::from("type")),
-                _ if bytes.len > 0 => Some(JsString::from("0")),
+                BytesKind::ArrayBuffer => None,
+                BytesKind::Buffer | BytesKind::Uint8Array if bytes.len > 0 => {
+                    Some(JsString::from("0"))
+                }
                 _ => None,
             },
             _ => None,

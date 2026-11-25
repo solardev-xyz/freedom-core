@@ -216,13 +216,17 @@ struct MainSide<'a> {
 
 fn play(world: &mut TestWorld, main: &MainSide<'_>, call: &Call, sid: &str) -> Played {
     let mut request = Request::start(call, world).expect("a method this piece brings");
-    let mut queue: VecDeque<Effect> = request.take_effects().into();
+    let mut open_calls = BTreeSet::new();
+    let mut most_open = 0usize;
+    let mut queue: VecDeque<Effect> =
+        take_effects(&mut request, &mut open_calls, &mut most_open).into();
     let mut played = Played {
         ran: Ran {
             outcome: Outcome::Cancelled,
             ready: Vec::new(),
             calls: Vec::new(),
             cancels_after_outcome: 0,
+            most_open: 0,
         },
         sent: Vec::new(),
         dialed: Vec::new(),
@@ -244,8 +248,20 @@ fn play(world: &mut TestWorld, main: &MainSide<'_>, call: &Call, sid: &str) -> P
 
     macro_rules! give {
         ($id:expr, $event:expr) => {{
-            request.answer(world, $id, $event);
-            queue.extend(request.take_effects());
+            let event = $event;
+            let terminal = matches!(
+                event,
+                Event::Reply(_)
+                    | Event::Failed(_)
+                    | Event::End
+                    | Event::Abort(_)
+                    | Event::Refused(_)
+            );
+            request.answer(world, $id, event);
+            if terminal {
+                open_calls.remove(&$id);
+            }
+            queue.extend(take_effects(&mut request, &mut open_calls, &mut most_open));
         }};
     }
 
@@ -527,6 +543,7 @@ fn play(world: &mut TestWorld, main: &MainSide<'_>, call: &Call, sid: &str) -> P
         }
     }
     played.ran.outcome = request.outcome().unwrap().clone();
+    played.ran.most_open = most_open;
     played
 }
 
@@ -2045,4 +2062,82 @@ fn a_failed_last_update_is_retried_once() {
         }
         assert_eq!(played.closing, 0, "{what}");
     }
+}
+
+/// A body main asks for after the request ended (a cancel racing main's
+/// `swarm.body`) still gets its one terminal, `cancelled`; main's own
+/// terminal for the call then closes it.
+#[test]
+fn a_body_asked_for_after_a_cancel_ends_cancelled() {
+    let node = Node {
+        stamps: Some(usable_stamps()),
+        ..Node::new()
+    };
+    let mut world = site_world();
+    let db = HistoryDb::open(CLOCK);
+    let call = Call {
+        method: Value::str("swarm_publishFiles"),
+        params: Value::object([(
+            "files",
+            Value::Array(vec![Some(Value::object([
+                ("path", Value::str("a.txt")),
+                ("bytes", bytes_value(b"a".to_vec())),
+            ]))]),
+        )]),
+        key: JsString::from(KEY),
+        approval: Some(Approval::User),
+    };
+    let mut request = Request::start(&call, &mut world).unwrap();
+    let mut queue: VecDeque<Effect> = request.take_effects().into();
+    let upload = loop {
+        let Some(Effect::Ask(ask)) = queue.pop_front() else {
+            continue;
+        };
+        let event = match ask.need {
+            Need::Ready(_) => Event::Ready(Ok(())),
+            Need::Write(StoreWrite::HistoryInsert(s)) => Event::Inserted(Ok(db.insert(&s))),
+            Need::Write(StoreWrite::History(statements)) => {
+                statements.iter().for_each(|s| {
+                    db.run(s);
+                });
+                Event::Written(Ok(()))
+            }
+            Need::Node(call) if call.form == Form::Stamps => {
+                forward(&node.reply("GET", "/stamps"), &call).1.remove(0)
+            }
+            Need::Upload => Event::Turn,
+            Need::Node(_) => break ask.id,
+            other => panic!("{other:?}"),
+        };
+        request.answer(&mut world, ask.id, event);
+        queue.extend(request.take_effects());
+    };
+    request.cancel();
+    let effects = request.take_effects();
+    assert!(effects.contains(&Effect::Cancel(upload)));
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Body { .. })),
+        "no terminal for a body main hasn't asked for: {effects:?}"
+    );
+    request.answer(&mut world, upload, Event::BodyOpen);
+    assert_eq!(
+        request.take_effects(),
+        vec![Effect::Body {
+            id: upload,
+            out: BodyOut::Abort(fc_swarm_provider::machine::node::BodyAbort::Cancelled)
+        }]
+    );
+    request.answer(&mut world, upload, Event::Failed(Failed::Aborted));
+    // Only the row's last update is still open, until it is written.
+    let write = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::Ask(ask) => Some(ask.id),
+            _ => None,
+        })
+        .expect("the row's update");
+    assert_eq!(request.open_asks(), 1);
+    request.answer(&mut world, write, Event::Written(Ok(())));
+    assert_eq!(request.open_asks(), 0);
+    assert_eq!(request.outcome(), Some(&Outcome::Cancelled));
 }

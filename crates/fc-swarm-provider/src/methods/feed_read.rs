@@ -16,6 +16,9 @@
 //! on the head; without one, each data frame main sends is reserved as it
 //! comes (deviation `read-pieces`: #1057 reserves per network read). Past
 //! `maxBytes` or past what is left of the window, the stream is cancelled.
+//! Its memory charge is for `maxBytes`, all it may hold: the budget's
+//! window can roll during the read, and then its frames are reserved in
+//! the next window, so what is left of the first one doesn't bound it.
 
 use fc_json::{JsString, number_to_string};
 use fc_swarm::verify::feed_update_address;
@@ -217,15 +220,19 @@ impl ReadFeed {
                         };
                     }
                     None => {
+                        // Charged for all it may hold: its `max_bytes`, the
+                        // site's `maxBytes`. The room left in this window
+                        // isn't a bound: the window can roll during the
+                        // read, and the frames after it are reserved in the
+                        // next one, as the reference reserves them.
                         let max = cx.max_bytes();
-                        let room = cx.room();
                         let call = NodeCall::feed_latest(
                             &owner,
                             &self.topic,
                             usize::try_from(max).unwrap_or(usize::MAX),
                         );
                         self.stage = Stage::Latest {
-                            id: cx.stream(call, room),
+                            id: cx.stream(call, max),
                             max,
                             head: None,
                             data: Vec::new(),
