@@ -100,8 +100,8 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::Range;
-use std::sync::Arc;
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use fc_eip1193::connect::{self, Ask, Connected, Decided, Grant};
@@ -144,6 +144,35 @@ pub struct NameCheck {
     pub deadline_ms: u64,
 }
 
+/// The documents whose name binding has ended (APR-5f), one record for
+/// every method family (design 0015's D1): a name check that fails, a
+/// page's EIP-1193 one or its Swarm one, ends the document's binding for
+/// both, and a later lookup that holds doesn't revive it. The event loop's
+/// page requests and the swarm thread each hold a handle, and lock it for
+/// one look or one write.
+#[derive(Clone, Default)]
+pub struct Bindings(Arc<Mutex<Ended>>);
+
+impl Bindings {
+    fn ended(&self) -> std::sync::MutexGuard<'_, Ended> {
+        // A poisoned lock still holds a whole record: each change is one
+        // insertion.
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether `document`'s binding has ended.
+    pub fn has(&self, document: &Document) -> bool {
+        self.ended().has(document)
+    }
+
+    /// `document`'s binding ends.
+    pub fn end(&self, document: &Document) {
+        self.ended().end(document);
+    }
+}
+
 /// The naming thread's verdict on a [`NameCheck`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -174,8 +203,9 @@ pub struct Connects {
     queued: VecDeque<u64>,
     /// `approval.request`s open at main.
     prompting: usize,
-    /// The documents whose name binding has ended (APR-5f).
-    ended: Ended,
+    /// The documents whose name binding has ended (APR-5f), shared with
+    /// the swarm thread (design 0015's D1).
+    ended: Bindings,
     /// A send's chain reads, by tag: its page request, which read, and
     /// whether its deadline is all the request's time left, so that its
     /// timeout is the request's deadline.
@@ -455,7 +485,7 @@ impl Connects {
             asked: BTreeMap::new(),
             queued: VecDeque::new(),
             prompting: 0,
-            ended: Ended::new(),
+            ended: Bindings::default(),
             reads: BTreeMap::new(),
             next_tag: 1,
         }
@@ -1230,6 +1260,11 @@ impl Connects {
             }
         }
         None
+    }
+
+    /// The ended-binding record, for the swarm thread (design 0015's D1).
+    pub fn bindings(&self) -> Bindings {
+        self.ended.clone()
     }
 
     /// Sends what waits for room, in order, while there is room.

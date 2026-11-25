@@ -31,6 +31,14 @@
 //!   their pieces below main's 256, so a test that pins one of those
 //!   bounds lifts the ones in front of it. 64 bodies' windows are the
 //!   writer's 8 MiB, so a test that presses on that cap runs more.
+//! - `FREEDOM_CORED_TEST_SWARM_MEMORY_BYTES` replaces the swarm thread's
+//!   64 MiB pool, `FREEDOM_CORED_TEST_SWARM_RUNNING` its 64 running
+//!   requests and `FREEDOM_CORED_TEST_SWARM_WAITING` the 256 that wait
+//!   (design 0015, "Budgets"), so a test reaches `busy` with a few
+//!   requests. With `FREEDOM_CORED_TEST_METHODS`, `test.swarm_world` sets
+//!   the swarm thread's world between the cases one core plays (D11): its
+//!   read budgets and tags' owners afresh, its `Date.now()`, the Swarm
+//!   grants in memory and tags' owners.
 //! - `FREEDOM_CORED_TEST_DWEB_WRITER_MARKER` names a file the dweb thread
 //!   rewrites with the most verified-body bytes its writer has held queued
 //!   at once (the duplex sender's `held`, capped at 0009's 8 MiB), each
@@ -514,6 +522,21 @@ pub fn dweb_bounds(mut bounds: crate::dweb::engine::Bounds) -> crate::dweb::engi
     }
     if let Some(running) = millis("FREEDOM_CORED_TEST_DWEB_RUNNING") {
         bounds.running = usize::try_from(running).unwrap_or(usize::MAX);
+    }
+    bounds
+}
+
+#[cfg(feature = "testhooks")]
+pub fn swarm_bounds(mut bounds: crate::swarm::engine::Bounds) -> crate::swarm::engine::Bounds {
+    let read = |name: &str| millis(name).map(|n| usize::try_from(n).unwrap_or(usize::MAX));
+    if let Some(memory) = read("FREEDOM_CORED_TEST_SWARM_MEMORY_BYTES") {
+        bounds.memory = memory;
+    }
+    if let Some(running) = read("FREEDOM_CORED_TEST_SWARM_RUNNING") {
+        bounds.running = running;
+    }
+    if let Some(waiting) = read("FREEDOM_CORED_TEST_SWARM_WAITING") {
+        bounds.waiting = waiting;
     }
     bounds
 }
@@ -1183,6 +1206,11 @@ pub fn chain_bounds(bounds: fc_chain::machine::Bounds) -> fc_chain::machine::Bou
 
 #[cfg(not(feature = "testhooks"))]
 pub fn dweb_bounds(bounds: crate::dweb::engine::Bounds) -> crate::dweb::engine::Bounds {
+    bounds
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn swarm_bounds(bounds: crate::swarm::engine::Bounds) -> crate::swarm::engine::Bounds {
     bounds
 }
 

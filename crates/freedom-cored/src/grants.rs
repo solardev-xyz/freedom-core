@@ -26,9 +26,20 @@
 //!
 //! Every write runs inline on the event loop, as the approval methods do,
 //! so two writes to one store never overlap.
+//!
+//! **The Swarm grants are shared** (design 0015, SWM-4's D2): the swarm
+//! thread's method machines read a site's connection, messaging grant and
+//! rules synchronously, between two answers, so the Swarm store sits
+//! behind a handle ([`Grants::swarm_handle`]) that the event loop and the
+//! swarm thread both lock, each for a short section: the thread for one
+//! step of a request, the loop to read the store or to put a change in
+//! place. Until the manifest projections are written from the swarm thread
+//! (SWM-4 PR 9), the loop is the store's only writer, so a change read,
+//! written to the file and put in place by the loop loses nothing.
 
 use std::borrow::Cow;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use fc_approval::stores::{
     Applied, CapStore, DappStore, Effect, MAX_FILE_BYTES, RadicleStore, Refused, StoreKind,
@@ -47,8 +58,11 @@ pub trait StoreFile: Clone + Default {
     /// on the wall clock as they load).
     fn from_bytes(bytes: &[u8], wall_s: u64) -> Result<Self, Unreadable>;
     fn file_text(&self) -> Result<String, Refused>;
-    fn slot(grants: &Grants) -> &Self;
-    fn slot_mut(grants: &mut Grants) -> &mut Self;
+    /// The store in memory: borrowed, or a copy taken under the shared
+    /// Swarm store's lock.
+    fn slot(grants: &Grants) -> Cow<'_, Self>;
+    /// Puts `store` in memory in the store's place.
+    fn put(grants: &mut Grants, store: Self);
 }
 
 impl StoreFile for DappStore {
@@ -59,11 +73,11 @@ impl StoreFile for DappStore {
     fn file_text(&self) -> Result<String, Refused> {
         self.text()
     }
-    fn slot(grants: &Grants) -> &Self {
-        &grants.dapp
+    fn slot(grants: &Grants) -> Cow<'_, Self> {
+        Cow::Borrowed(&grants.dapp)
     }
-    fn slot_mut(grants: &mut Grants) -> &mut Self {
-        &mut grants.dapp
+    fn put(grants: &mut Grants, store: Self) {
+        grants.dapp = store;
     }
 }
 
@@ -75,11 +89,11 @@ impl StoreFile for SwarmStore {
     fn file_text(&self) -> Result<String, Refused> {
         self.text()
     }
-    fn slot(grants: &Grants) -> &Self {
-        &grants.swarm
+    fn slot(grants: &Grants) -> Cow<'_, Self> {
+        Cow::Owned(grants.swarm().clone())
     }
-    fn slot_mut(grants: &mut Grants) -> &mut Self {
-        &mut grants.swarm
+    fn put(grants: &mut Grants, store: Self) {
+        *grants.swarm() = store;
     }
 }
 
@@ -91,11 +105,11 @@ impl StoreFile for RadicleStore {
     fn file_text(&self) -> Result<String, Refused> {
         self.text()
     }
-    fn slot(grants: &Grants) -> &Self {
-        &grants.radicle
+    fn slot(grants: &Grants) -> Cow<'_, Self> {
+        Cow::Borrowed(&grants.radicle)
     }
-    fn slot_mut(grants: &mut Grants) -> &mut Self {
-        &mut grants.radicle
+    fn put(grants: &mut Grants, store: Self) {
+        grants.radicle = store;
     }
 }
 
@@ -107,11 +121,11 @@ impl StoreFile for CapStore {
     fn file_text(&self) -> Result<String, Refused> {
         self.text()
     }
-    fn slot(grants: &Grants) -> &Self {
-        &grants.x402
+    fn slot(grants: &Grants) -> Cow<'_, Self> {
+        Cow::Borrowed(&grants.x402)
     }
-    fn slot_mut(grants: &mut Grants) -> &mut Self {
-        &mut grants.x402
+    fn put(grants: &mut Grants, store: Self) {
+        grants.x402 = store;
     }
 }
 
@@ -148,7 +162,8 @@ pub struct Grants {
     /// memory whose write failed, and no write of that store since.
     behind: Vec<StoreKind>,
     dapp: DappStore,
-    swarm: SwarmStore,
+    /// Shared with the swarm thread (D2).
+    swarm: Arc<Mutex<SwarmStore>>,
     radicle: RadicleStore,
     x402: CapStore,
 }
@@ -156,6 +171,22 @@ pub struct Grants {
 impl Grants {
     pub fn new() -> Self {
         Grants::default()
+    }
+
+    /// The Swarm store's handle, which the swarm thread reads its grants
+    /// through (design 0015's D2): the same store the loop's approvals
+    /// read and write once `swarm` is in `grant_moved`, its file loaded
+    /// into it at the hello.
+    pub fn swarm_handle(&self) -> Arc<Mutex<SwarmStore>> {
+        Arc::clone(&self.swarm)
+    }
+
+    /// The shared Swarm store, locked. A poisoned lock still holds a whole
+    /// store: every change is put in place in one assignment.
+    fn swarm(&self) -> MutexGuard<'_, SwarmStore> {
+        self.swarm
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The hello's `grant_root` and `grant_moved`: each moved file's leftover
@@ -168,7 +199,8 @@ impl Grants {
             self.dapp = self.load_moved::<DappStore>(wall_s);
         }
         if self.moved(StoreKind::Swarm) {
-            self.swarm = self.load_moved::<SwarmStore>(wall_s);
+            let store = self.load_moved::<SwarmStore>(wall_s);
+            *self.swarm() = store;
         }
         if self.moved(StoreKind::Radicle) {
             self.radicle = self.load_moved::<RadicleStore>(wall_s);
@@ -219,7 +251,7 @@ impl Grants {
     /// empty, and left where it is).
     pub fn view<S: StoreFile>(&self, wall_s: u64) -> Cow<'_, S> {
         if self.moved(S::KIND) {
-            return Cow::Borrowed(S::slot(self));
+            return S::slot(self);
         }
         let Some(path) = self.path(S::KIND) else {
             return Cow::Owned(S::default());
@@ -265,7 +297,7 @@ impl Grants {
         let Some(path) = self.path(S::KIND) else {
             return Err(WriteFailure::NotMoved);
         };
-        let mut next = S::slot(self).clone();
+        let mut next = S::slot(self).into_owned();
         let applied = change(&mut next);
         let behind = through && self.behind.contains(&S::KIND);
         if applied.effect == Effect::Unchanged && !behind {
@@ -278,7 +310,7 @@ impl Grants {
         let text = next.file_text().map_err(WriteFailure::Bounds)?;
         match write_file(&path, text.as_bytes(), &GrantWrite(S::KIND.name())) {
             Ok(done) => {
-                *S::slot_mut(self) = next;
+                S::put(self, next);
                 self.behind.retain(|kind| *kind != S::KIND);
                 Ok(Written {
                     value: applied.value,
@@ -297,7 +329,7 @@ impl Grants {
                     }),
                 );
                 if applied {
-                    *S::slot_mut(self) = next;
+                    S::put(self, next);
                     if !self.behind.contains(&S::KIND) {
                         self.behind.push(S::KIND);
                     }

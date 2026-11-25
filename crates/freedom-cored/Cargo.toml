@@ -143,6 +143,12 @@ required-features = ["testhooks"]
 name = "signing"
 required-features = ["testhooks"]
 
+# Design 0015 (SWM-4): one core plays the swarm cases, its world set
+# between them through `test.swarm_world`.
+[[test]]
+name = "swarm"
+required-features = ["testhooks"]
+
 [dependencies]
 # Response bodies from main's shell.* executors travel as base64.
 base64 = "0.22.1"
@@ -178,6 +184,9 @@ fc-service = { path = "../fc-service" }
 # (design 0013, "How the core writes them").
 fc-store = { path = "../fc-store" }
 fc-swarm = { path = "../fc-swarm" }
+# `window.swarm`'s method machines (design 0015, SWM-3): the swarm thread
+# drives them, sans-I/O, and answers their asks (SWM-4).
+fc-swarm-provider = { path = "../fc-swarm-provider" }
 fc-vault = { path = "../fc-vault" }
 # The set-A stores' codecs (design 0013): `vault-meta.json`'s and its
 # changes (PRF-5a, `accounts.*`), `safe-pending.json`'s (PRF-5f), and
@@ -226,4 +235,8 @@ rustix = { version = "1.1", default-features = false, features = ["fs", "process
 [dev-dependencies]
 # The seal test checks the opened key against the Radicle public key.
 ed25519-dalek = { version = "3.0", default-features = false }
+# The swarm pipe tests share fc-swarm-provider's case harness, whose fake
+# node signs feed updates with keys.json's test keys: k256 at the version
+# and features fc-swarm-provider links.
+k256 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdsa"] }
 tempfile = "3"
