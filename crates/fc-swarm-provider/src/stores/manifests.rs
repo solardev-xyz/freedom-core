@@ -2084,7 +2084,7 @@ mod tests {
     #[test]
     fn a_journal_is_replayed_without_an_unavailable_identity_s_grants() {
         let mut world = TestWorld::default();
-        let eth = "{\"version\":2,\"nextPublisherKeyIndex\":0,\"origins\":{\"bzz://5a5a\":{\"activeIdentityId\":\"e\",\"identities\":{\"e\":{\"mode\":\"ethereum-wallet\"}}}}}";
+        let eth = "{\"version\":2,\"nextPublisherKeyIndex\":0,\"origins\":{\"bzz://5a5a\":{\"activeIdentityId\":\"e\",\"identities\":{\"e\":{\"id\":\"e\",\"mode\":\"ethereum-wallet\"}}}}}";
         world.feeds = FeedStore::load(Some(eth.as_bytes()), NOW, |_| false).store;
         world.files.insert(
             FILE_NAME,
