@@ -1589,11 +1589,16 @@ fn a_cancel_closes_what_main_opened() {
             .filter_map(|e| match e {
                 Effect::Ask(
                     ask @ Ask {
-                        need: Need::Unsubscribe { id, .. },
+                        need:
+                            Need::Unsubscribe {
+                                id,
+                                answer_within_ms,
+                            },
                         ..
                     },
                 ) => {
                     assert_eq!(id, SUBSCRIPTION_ID);
+                    assert_eq!(*answer_within_ms, CLOSE_BOUND_MS, "a close's bound");
                     Some(ask.id)
                 }
                 _ => None,
@@ -1845,4 +1850,58 @@ fn a_held_close_carries_its_bound_and_holds_nothing_else() {
     assert_eq!(request.outcome(), None);
     request.answer(&mut main.world, close.id, Event::Closed);
     assert_eq!(answered(request.outcome().unwrap()), "no_address");
+}
+
+/// A request that ends while main opens its subscription (a cancel, the
+/// deadline, `busy`, a protocol error) cancels the open, and closes what
+/// a late `{ id }` opened, with the close's bound like every other close.
+#[test]
+fn a_late_open_is_closed_with_its_bound() {
+    for end in ["cancel", "deadline", "busy", "protocol"] {
+        let mut main = Main::new();
+        let (mut request, open) = main.run_to(&subscribe(None), |need, _| {
+            matches!(need, Need::Subscribe(_))
+        });
+        match end {
+            // The request's deadline is a cancel to the machine.
+            "cancel" | "deadline" => request.cancel(),
+            "busy" => request.busy(),
+            // An answer of another kind leaves the open in flight.
+            _ => request.answer(&mut main.world, open.id, Event::Closed),
+        }
+        let want = match end {
+            "cancel" | "deadline" => "cancelled",
+            "busy" => "busy",
+            _ => "protocol: an answer of another kind than its ask",
+        };
+        assert_eq!(answered(request.outcome().unwrap()), want, "{end}");
+        let effects = request.take_effects();
+        assert_eq!(
+            effects,
+            [Effect::Cancel(open.id)],
+            "{end}: the open cancelled, nothing closed yet"
+        );
+        request.answer(
+            &mut main.world,
+            open.id,
+            Event::Opened(Ok(JsString::from(SUBSCRIPTION_ID))),
+        );
+        let effects = request.take_effects();
+        let [Effect::Ask(close)] = &effects[..] else {
+            panic!("{end}: {effects:?}")
+        };
+        assert_eq!(
+            close.need,
+            Need::Unsubscribe {
+                id: JsString::from(SUBSCRIPTION_ID),
+                answer_within_ms: CLOSE_BOUND_MS,
+            },
+            "{end}: the late open closed, with the close's bound"
+        );
+        assert_eq!(request.open_asks(), 1, "{end}: the close alone open");
+        request.answer(&mut main.world, close.id, Event::Closed);
+        assert_eq!(request.open_asks(), 0, "{end}");
+        assert!(request.take_effects().is_empty(), "{end}");
+        assert_eq!(answered(request.outcome().unwrap()), want, "{end}");
+    }
 }
