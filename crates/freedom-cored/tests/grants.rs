@@ -1247,8 +1247,8 @@ fn soc_refused(reply: &Value, reason: &str) {
 /// for `auto` also `agent` false and the request's flag, `feeds` for a feed
 /// write and `signing` for a raw SOC. Main's own SOCs under `shell` sign
 /// as before; a page's without an authorization is refused (APR-4c), and
-/// so is the chrome's (APR-4a). `tests/enforced_soc.rs` has the APR-4
-/// row's cases.
+/// the chrome reaches no SOC (design 0015, SWM-4: `forbidden`).
+/// `tests/enforced_soc.rs` has the APR-4 row's cases.
 #[test]
 fn a_page_s_soc_needs_its_swarm_grant() {
     let root = tempfile::tempdir().unwrap();
@@ -1386,13 +1386,15 @@ fn a_page_s_soc_needs_its_swarm_grant() {
 
     // Main's own SOCs take no Swarm grant: `shell` signs as before, and is
     // refused one (`no_rule`, as a standing rule from another caller). The
-    // chrome's SOC, which no wallet-kind token binds, is refused without
-    // one (APR-4a).
+    // chrome reaches no SOC (SWM-4): the method table refuses it.
     signs(&sign_soc(&mut core, &mut id, &shell(), None));
-    soc_refused(&sign_soc(&mut core, &mut id, &chrome(), None), "no_token");
-    for context in [shell(), chrome()] {
-        let reply = sign_soc(&mut core, &mut id, &context, soc_auth("user", "feed"));
-        soc_refused(&reply, "no_rule");
+    let reply = sign_soc(&mut core, &mut id, &shell(), soc_auth("user", "feed"));
+    soc_refused(&reply, "no_rule");
+    for authorization in [None, soc_auth("user", "feed")] {
+        refused(
+            &sign_soc(&mut core, &mut id, &chrome(), authorization),
+            "forbidden",
+        );
     }
     // A page without an authorization is refused (APR-4c), and one
     // without its `PageContext` is malformed.

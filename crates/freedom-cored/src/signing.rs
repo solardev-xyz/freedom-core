@@ -21,8 +21,10 @@
 //! approval of the caller's own kind (APR-4b). `swarm.sign_soc` under
 //! `page` needs `{ swarm, soc }`, checked at the same point against the
 //! page's Swarm grant (APR-4c); main's own SOC, under `shell`, signs as
-//! before, and the chrome's is refused. A `page` caller sends its
-//! `PageContext`.
+//! before. The chrome reaches no SOC: from SWM-4 the method table admits
+//! only `page` and `shell` to `swarm.sign_soc` (design 0015's amendment to
+//! 0002), so its call is `forbidden` before any of this, and the row goes
+//! at SWM-9. A `page` caller sends its `PageContext`.
 //!
 //! Once `core.hello` names `vault_meta` in `store_moved` (G20b), an account
 //! key signs only for an index the core's own records give the vault: below
@@ -277,7 +279,8 @@ pub struct Checks<'a> {
 
 /// The methods that take an `authorization`, and a page's `PageContext`.
 /// A token presented to any of them is burnt, `swarm.sign_soc`'s included,
-/// though no token kind binds a SOC.
+/// though no token kind binds a SOC; the chrome's call to
+/// `swarm.sign_soc`, refused by the method table, presents none.
 const AUTHORIZED: [&str; 4] = [
     "sign.transaction",
     "sign.message",

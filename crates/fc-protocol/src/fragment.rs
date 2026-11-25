@@ -51,6 +51,12 @@ pub enum FragmentError {
     /// A begin whose size is zero or over the message cap.
     #[error("a response of {0} bytes, zero or over the message cap")]
     BadSize(u64),
+    /// A begin over its request's own bound, which the receiver gave when
+    /// it sent the request ([`Reassembler::push_bounded`]): a reply larger
+    /// than the room the receiver reserved for it (design 0015, "The swarm
+    /// thread's memory").
+    #[error("a response of {bytes} bytes to request {id}, over its bound of {bound}")]
+    OverBound { id: u64, bytes: u64, bound: u64 },
     /// A begin header that isn't `{ "id": <ID>, "bytes": <size> }`.
     #[error("a begin header that is not {{ id, bytes }}")]
     BadHeader,
@@ -223,8 +229,10 @@ struct Partial {
 /// responses and credit returns.
 ///
 /// - **At begin** it checks the sender's credit, the size against the
-///   message cap and the ID against the receiver's pending requests, then
-///   reserves exactly the declared bytes, in one `Zeroizing` buffer. Since
+///   message cap, the ID against the receiver's pending requests and the
+///   size against that request's own bound, when it has one
+///   ([`Reassembler::push_bounded`]), then reserves exactly the declared
+///   bytes, in one `Zeroizing` buffer. Since
 ///   the credit allows one response in reassembly, nothing else is ever
 ///   reserved, and a fragment never needs room the begin didn't take.
 /// - **Whole messages** pass through. Each one's envelope is read to find
@@ -265,6 +273,21 @@ impl Reassembler {
         frame: Frame,
         pending: impl FnOnce(u64) -> bool,
     ) -> Result<Delivery, FragmentError> {
+        self.push_bounded(frame, |id| pending(id).then_some(usize::MAX))
+    }
+
+    /// As [`Reassembler::push`], with each request's own bound: `pending`
+    /// gives a pending request's, the most bytes its response may take
+    /// reassembled, or `None` when the ID isn't pending. A begin past its
+    /// request's bound is [`FragmentError::OverBound`], before anything is
+    /// reserved for it (design 0015: the reader takes a reply's bound from
+    /// its request's entry, so a fragmented reply never grows past the
+    /// room its consumer reserved).
+    pub fn push_bounded(
+        &mut self,
+        frame: Frame,
+        pending: impl FnOnce(u64) -> Option<usize>,
+    ) -> Result<Delivery, FragmentError> {
         if let Some(error) = self.failed {
             return Err(error);
         }
@@ -279,7 +302,7 @@ impl Reassembler {
     fn take(
         &mut self,
         frame: Frame,
-        pending: impl FnOnce(u64) -> bool,
+        pending: impl FnOnce(u64) -> Option<usize>,
     ) -> Result<Delivery, FragmentError> {
         match frame.kind {
             KIND_JSON => {
@@ -307,8 +330,15 @@ impl Reassembler {
                     .ok()
                     .filter(|bytes| (1..=self.cap).contains(bytes))
                     .ok_or(FragmentError::BadSize(begin.bytes))?;
-                if !pending(begin.id) {
+                let Some(bound) = pending(begin.id) else {
                     return Err(FragmentError::UnknownId(begin.id));
+                };
+                if bytes > bound {
+                    return Err(FragmentError::OverBound {
+                        id: begin.id,
+                        bytes: begin.bytes,
+                        bound: u64::try_from(bound).unwrap_or(u64::MAX),
+                    });
                 }
                 self.peer_credit = false;
                 self.current = Some(Partial {
@@ -712,6 +742,44 @@ mod tests {
         .unwrap();
         r.push(frame(KIND_LAST, b"{}"), |_| unreachable!()).unwrap();
         assert_eq!(asked, [7]);
+    }
+
+    /// Design 0015: a begin within its request's own bound reserves it;
+    /// one past it is refused before anything is reserved, and the
+    /// reassembler stays failed. A begin at the bound is within it.
+    #[test]
+    fn a_begin_keeps_to_its_requests_bound() {
+        let bound = |id: u64| (id == 7).then_some(100);
+        let mut r = Reassembler::new();
+        assert!(matches!(
+            r.push_bounded(begin(7, 100), bound),
+            Ok(Delivery::Taken)
+        ));
+        assert_eq!(r.reserved(), 100);
+        let mut r = Reassembler::new();
+        assert_eq!(
+            r.push_bounded(begin(7, 101), bound).unwrap_err(),
+            FragmentError::OverBound {
+                id: 7,
+                bytes: 101,
+                bound: 100
+            }
+        );
+        assert_eq!((r.reserved(), r.in_progress()), (0, false));
+        assert!(r.push_bounded(frame_json(), bound).is_err());
+        // An ID with no bound is unknown, as without bounds; the message
+        // cap comes first.
+        let mut r = Reassembler::new();
+        assert_eq!(
+            r.push_bounded(begin(8, 10), bound).unwrap_err(),
+            FragmentError::UnknownId(8)
+        );
+        let mut r = Reassembler::new();
+        assert_eq!(
+            r.push_bounded(begin(7, MAX_MESSAGE as u64 + 1), |_| Some(usize::MAX))
+                .unwrap_err(),
+            FragmentError::BadSize(MAX_MESSAGE as u64 + 1)
+        );
     }
 
     #[test]

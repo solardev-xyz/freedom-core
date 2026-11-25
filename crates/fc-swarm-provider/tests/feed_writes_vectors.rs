@@ -2853,3 +2853,157 @@ fn an_auto_feed_write_is_admitted_at_its_guard() {
         );
     }
 }
+
+/// Each feed and SOC write, and `getSigningIdentity`, admits a rule's
+/// approval at its own guard, where the reference does: custody taken, or
+/// the rule turned off, between main's check and the hand-off answers
+/// `agent_custody` or `not_auto_approved` after the waits before the
+/// guard, and nothing after it runs.
+/// - `updateFeed` and `writeFeedEntry`: `/stamps`, the index lookup and
+///   the SOC's signature, then the refusal; no SOC upload, the store
+///   unchanged.
+/// - `writeSingleOwnerChunk`: the signature and `/stamps`, then the
+///   refusal; no SOC upload.
+/// - `getSigningIdentity`: the signer's owner resolved, then the refusal.
+fn admits_auto_at_its_guard(only: &str) {
+    let text = text_of("keys.json");
+    let index = Index::new(&text).unwrap();
+    let keys = keys(&index);
+    let blog = |store: &mut FeedStore, key: &JsString| {
+        let record = fc_json::parse(&format!(
+            r#"{{"topic":"t","owner":"o","manifestReference":"{}","identityId":"app-scoped:0"}}"#,
+            "cd".repeat(32)
+        ))
+        .unwrap();
+        store
+            .set_feed(key, &JsString::from("blog"), &record, 1)
+            .unwrap();
+    };
+    let data = || {
+        Value::Bytes(fc_swarm_provider::value::Bytes {
+            len: 2,
+            kind: fc_swarm_provider::value::BytesKind::Uint8Array,
+            source: fc_swarm_provider::value::Source::Inline(b"hi".to_vec()),
+            data: true,
+        })
+    };
+    let methods: [(&str, &str, Value); 4] = [
+        (
+            "swarm_updateFeed",
+            "feeds",
+            Value::object([
+                ("feedId", Value::str("blog")),
+                ("reference", Value::str(&"ef".repeat(32))),
+            ]),
+        ),
+        (
+            "swarm_writeFeedEntry",
+            "feeds",
+            Value::object([("name", Value::str("blog")), ("data", data())]),
+        ),
+        (
+            "swarm_writeSingleOwnerChunk",
+            "signing",
+            Value::object([
+                ("identifier", Value::str(&"ab".repeat(32))),
+                ("data", data()),
+            ]),
+        ),
+        (
+            "swarm_getSigningIdentity",
+            "signing",
+            Value::object::<&str>([]),
+        ),
+    ];
+    for (method, rule, params) in methods {
+        if method != only {
+            continue;
+        }
+        for (change, custody, rule_on, want) in [
+            ("custody taken", true, true, "agent_custody"),
+            ("rule turned off", false, false, "not_auto_approved"),
+        ] {
+            let what = format!("{method}, {change}");
+            let (key, mut store) = feed_site();
+            blog(&mut store, &key);
+            let mut world = site_world(&key, store.clone());
+            world.custody = custody;
+            if rule_on {
+                world.rules.insert((key.clone(), rule.to_owned()));
+            }
+            let mut thread = Thread::new(world, &keys, WriteNode::new());
+            thread.node.stamps = Some(STAMPS.to_owned());
+            thread.start(&Call {
+                method: Value::str(method),
+                params: params.clone(),
+                key: key.clone(),
+                approval: Some(Approval::Auto),
+            });
+            let refused = Outcome::Error(Failure::not_authorized(want));
+            let forms = |thread: &Thread<'_>| -> Vec<Form> {
+                thread.calls.iter().map(|c| c.call.form).collect()
+            };
+            if method == "swarm_getSigningIdentity" {
+                // The signer's owner is resolved first, then the guard.
+                let owner = thread
+                    .run_until(|need| matches!(need, Need::Owner(_)))
+                    .unwrap_or_else(|| panic!("{what}: the owner first"));
+                thread.answer(owner);
+                assert_eq!(thread.run(), refused, "{what}");
+                assert!(forms(&thread).is_empty(), "{what}: no node call");
+                assert!(thread.vault.signed.is_empty(), "{what}: nothing signed");
+                continue;
+            }
+            assert_eq!(thread.run(), refused, "{what}");
+            assert_eq!(thread.ready.len(), 1, "{what}: the readiness first");
+            let want_forms: &[Form] = match method {
+                "swarm_writeSingleOwnerChunk" => &[Form::Stamps],
+                _ => &[Form::Stamps, Form::FeedHead, Form::Chunk],
+            };
+            assert_eq!(forms(&thread), want_forms, "{what}: nothing past the guard");
+            assert_eq!(
+                thread.vault.signed.len(),
+                1,
+                "{what}: signed before the guard"
+            );
+            assert_eq!(thread.node.soc_posts, 0, "{what}: no SOC upload");
+            assert_eq!(
+                *thread.world.keeper.store(),
+                store,
+                "{what}: the store unchanged"
+            );
+            let rows = thread.history();
+            let row = &rows.as_array().unwrap()[0];
+            assert_eq!(
+                row.get("status").and_then(JsValue::as_str),
+                Some("failed"),
+                "{what}"
+            );
+            assert_eq!(
+                row.get("errorMessage").and_then(JsValue::as_str),
+                Some("The origin is not authorized for this operation"),
+                "{what}"
+            );
+        }
+    }
+}
+
+#[test]
+fn update_feed_admits_auto_at_its_guard() {
+    admits_auto_at_its_guard("swarm_updateFeed");
+}
+
+#[test]
+fn write_feed_entry_admits_auto_at_its_guard() {
+    admits_auto_at_its_guard("swarm_writeFeedEntry");
+}
+
+#[test]
+fn write_single_owner_chunk_admits_auto_at_its_guard() {
+    admits_auto_at_its_guard("swarm_writeSingleOwnerChunk");
+}
+
+#[test]
+fn get_signing_identity_admits_auto_at_its_guard() {
+    admits_auto_at_its_guard("swarm_getSigningIdentity");
+}

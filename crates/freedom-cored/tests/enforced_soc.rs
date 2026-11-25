@@ -7,8 +7,10 @@
 //! (`custody`); as `user` with the grant it signs. Every refusal comes after
 //! the chunk's public work and before any key is derived, and a token
 //! presented to it is burnt, the vault locked included. Main's own SOC,
-//! under `shell`, signs as before, and neither it nor the chrome's takes a
-//! grant (`no_rule`).
+//! under `shell`, signs as before, and takes no grant (`no_rule`). The
+//! chrome reaches no SOC (design 0015, SWM-4: the row is page-or-shell):
+//! its call is `forbidden` by the method table, before any work, and a
+//! token it presents is never read, so never burnt.
 //!
 //! The row's cases run against main's Swarm file and against the core's
 //! own store, once `swarm` has moved (APB-3). The feed grant (`feedGranted`,
@@ -81,6 +83,11 @@ fn call_as(core: &mut Core, id: &mut u64, context: &Value, method: &str, params:
 fn result(reply: &Value) -> &Value {
     assert!(reply["result"].is_object(), "{reply}");
     &reply["result"]
+}
+
+/// The chrome's call, refused by the method table before any work.
+fn forbidden(reply: &Value) {
+    refused(reply, "forbidden", None);
 }
 
 /// Refused with `code` (and `reason`), and nothing signed.
@@ -320,27 +327,30 @@ fn a_page_soc_needs_its_swarm_grant(store: Store) {
     }
 
     // Main's own SOC signs as before, and takes no grant: `{ swarm, soc }`
-    // from `shell` or `chrome` is refused, as a standing rule from either
-    // is, the granted site's `PageContext` sent beside it or not. The
-    // chrome's SOC without one needs a wallet-kind token.
+    // from `shell` is refused, as a standing rule from it is, the granted
+    // site's `PageContext` sent beside it or not. The chrome reaches no
+    // SOC (SWM-4): `forbidden`, with or without `{ swarm, soc }`.
     let with_site = |caller: &str| {
         let mut context = site();
         context["caller"] = json!(caller);
         context
     };
     for (swarm, soc) in ALL {
-        for context in [shell(), chrome(), with_site("shell"), with_site("chrome")] {
+        for context in [shell(), with_site("shell")] {
             not_authorized(
                 &sign_soc(&mut core, &mut id, &context, auth(swarm, soc)),
                 "no_rule",
             );
+        }
+        for context in [chrome(), with_site("chrome")] {
+            forbidden(&sign_soc(&mut core, &mut id, &context, auth(swarm, soc)));
         }
     }
     for context in [shell(), with_site("shell")] {
         signs(&sign_soc(&mut core, &mut id, &context, None));
     }
     for context in [chrome(), with_site("chrome")] {
-        not_authorized(&sign_soc(&mut core, &mut id, &context, None), "no_token");
+        forbidden(&sign_soc(&mut core, &mut id, &context, None));
     }
 
     // A grant removed stops answering at the next request; main's own SOC
@@ -395,7 +405,9 @@ fn wallet_token(core: &mut Core, id: &mut u64) -> String {
 /// a SOC the grant covers, or main's own, reaches the key, which is locked.
 /// A malformed SOC is refused for its malformation, with or without an
 /// authorization. A token presented to `swarm.sign_soc`, which no token
-/// kind binds, is burnt while locked, under each caller.
+/// kind binds, is burnt while locked, under each caller the row admits.
+/// The chrome's call is `forbidden` before all of it (SWM-4): malformed or
+/// not, and a token it presents is left as it was.
 #[test]
 fn refused_before_the_key_and_a_token_burnt_while_locked() {
     for store in [Store::MainsFile, Store::Moved] {
@@ -435,8 +447,6 @@ fn refused_before_the_key_and_a_token_burnt_while_locked() {
                 "custody",
             ),
             (page(SITE, SITE, None), auth("auto", "feed"), "custody"),
-            (chrome(), None, "no_token"),
-            (chrome(), auth("user", "feed"), "no_rule"),
             (shell(), auth("user", "feed"), "no_rule"),
         ];
         for (context, authorization, reason) in &refusals {
@@ -444,6 +454,9 @@ fn refused_before_the_key_and_a_token_burnt_while_locked() {
                 &sign_soc(&mut core, &mut id, context, authorization.clone()),
                 reason,
             );
+        }
+        for authorization in [None, auth("user", "feed")] {
+            forbidden(&sign_soc(&mut core, &mut id, &chrome(), authorization));
         }
         let covered = [
             (site(), auth("user", "feed")),
@@ -473,7 +486,6 @@ fn refused_before_the_key_and_a_token_burnt_while_locked() {
                 (site(), None),
                 (site(), auth("auto", "raw")),
                 (page(OTHER, OTHER, Some(false)), auth("user", "feed")),
-                (chrome(), None),
             ] {
                 let mut params = soc_params(authorization);
                 params[*field] = value.clone();
@@ -483,6 +495,15 @@ fn refused_before_the_key_and_a_token_burnt_while_locked() {
                     None,
                 );
             }
+            let mut params = soc_params(None);
+            params[*field] = value.clone();
+            forbidden(&call_as(
+                &mut core,
+                &mut id,
+                &chrome(),
+                "swarm.sign_soc",
+                params,
+            ));
         }
         // A page with no `PageContext` is malformed, with or without one.
         let bare = json!({ "caller": "page" });
@@ -495,17 +516,14 @@ fn refused_before_the_key_and_a_token_burnt_while_locked() {
         }
 
         // Tokens presented to `swarm.sign_soc` while locked: a page's under
-        // `page`, alone and beside `{ swarm, soc }`, and under `chrome`; a
-        // wallet's under `shell`.
+        // `page`, alone and beside `{ swarm, soc }`, and a wallet's under
+        // `shell`, each burnt. The chrome's call is forbidden before its
+        // token is read: that token stays live.
         let presented = [
             (site(), json!({ "token": page_tokens[0], "handle": HANDLE })),
             (
                 site(),
                 json!({ "swarm": "user", "soc": "feed", "token": page_tokens[1] }),
-            ),
-            (
-                chrome(),
-                json!({ "token": page_tokens[2], "handle": HANDLE }),
             ),
             (shell(), json!({ "token": wallet })),
         ];
@@ -516,6 +534,12 @@ fn refused_before_the_key_and_a_token_burnt_while_locked() {
                 None,
             );
         }
+        forbidden(&sign_soc(
+            &mut core,
+            &mut id,
+            &chrome(),
+            Some(json!({ "token": page_tokens[2], "handle": HANDLE })),
+        ));
 
         let unlocked = call_as(
             &mut core,
@@ -545,9 +569,14 @@ fn refused_before_the_key_and_a_token_burnt_while_locked() {
                     "authorization": { "token": token, "kind": "wallet-send" } }),
             )
         };
-        for token in &page_tokens {
+        for token in &page_tokens[..2] {
             not_authorized(&sign_message(&mut core, &mut id, token), "unknown_token");
         }
+        // The token the chrome presented to its forbidden call signs.
+        assert!(
+            result(&sign_message(&mut core, &mut id, &page_tokens[2]))["signature"].is_string(),
+            "{store:?}"
+        );
         not_authorized(&send(&mut core, &mut id, &wallet), "unknown_token");
         assert!(
             result(&sign_message(&mut core, &mut id, &page_control))["signature"].is_string(),
