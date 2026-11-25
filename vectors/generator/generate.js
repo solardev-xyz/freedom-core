@@ -116,6 +116,21 @@ const BEE_CASES = [
 ];
 
 const json = (value) => JSON.stringify(value, null, 2) + '\n';
+
+// A failed check names the first line that differs, with its neighbours, so a
+// mismatch seen only on another machine (CI) can be read from its log.
+function byteMismatch(filename, committed, generated) {
+  const a = committed.split('\n');
+  const b = generated.split('\n');
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  const clip = (line) => (line === undefined ? '(end of file)' : line.length > 400 ? `${line.slice(0, 400)}…` : line);
+  const lines = [`Byte mismatch: ${filename}`, `first difference at line ${i + 1} (committed ${a.length} lines, generated ${b.length})`];
+  for (let j = Math.max(0, i - 3); j < i; j++) lines.push(`  ${j + 1}  ${clip(a[j])}`);
+  for (let j = i; j < i + 4; j++) lines.push(`- ${j + 1}  ${clip(a[j])}`);
+  for (let j = i; j < i + 4; j++) lines.push(`+ ${j + 1}  ${clip(b[j])}`);
+  return lines.join('\n');
+}
 const hex = (bytes) => Buffer.from(bytes).toString('hex');
 const mnemonicFor = (id) => MNEMONICS.find((entry) => entry.id === id).mnemonic;
 
@@ -767,7 +782,11 @@ async function main() {
   for (const [filename, contents] of Object.entries(deterministic)) {
     const destination = path.join(OUTPUT, filename);
     if (mode === 'generate') fs.writeFileSync(destination, json(contents));
-    else assert.equal(fs.readFileSync(destination, 'utf8'), json(contents), `Byte mismatch: ${filename}`);
+    else {
+      const committed = fs.readFileSync(destination, 'utf8');
+      const generated = json(contents);
+      if (committed !== generated) throw new assert.AssertionError({ message: byteMismatch(filename, committed, generated) });
+    }
     console.log(`${mode}: ${filename}`);
   }
   for (const [filename, builder] of [
