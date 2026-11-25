@@ -68,23 +68,19 @@ impl UploadStatus {
     pub(crate) fn start<W: World>(cx: &mut Cx<'_, W>, params: &Value) -> Result<Self, Outcome> {
         permitted(cx)?;
         require_params(params)?;
-        let positive = match params.get("tagUid") {
-            Value::Number(n) => n.is_finite() && n.trunc() == *n && *n > 0.0,
-            _ => false,
+        // `typeof tagUid !== 'number' || !Number.isInteger(tagUid) ||
+        // tagUid <= 0`.
+        let uid = match params.get("tagUid") {
+            Value::Number(n) if n.is_finite() && n.trunc() == *n && *n > 0.0 => *n,
+            _ => return Err(refuse_tag().into()),
         };
-        let Value::Number(uid) = params.get("tagUid") else {
-            return Err(refuse_tag().into());
-        };
-        if !positive {
-            return Err(refuse_tag().into());
-        }
         // Only safe integers are recorded: any other number has no owner.
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "a positive integer no larger than 2^53 - 1"
         )]
-        let uid = (*uid <= MAX_SAFE).then_some(*uid as u64);
+        let uid = (uid <= MAX_SAFE).then_some(uid as u64);
         let owned = uid.filter(|uid| {
             cx.world
                 .tags()

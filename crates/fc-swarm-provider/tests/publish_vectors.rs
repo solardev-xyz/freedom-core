@@ -1361,12 +1361,13 @@ fn errors_through_the_machines() {
 
 /// Starts a two-file `publishFiles` whose second file is a part, and runs
 /// it up to the moment main has the body open and the core asks for the
-/// part: the request, the part's ask, and the database.
+/// part: the request, the upload's ask, the part's ask, and how many body
+/// bytes went out before it.
 fn files_up_to_the_part(
     world: &mut TestWorld,
     node: &Node,
     db: &HistoryDb,
-) -> (Request, AskId, AskId) {
+) -> (Request, AskId, AskId, usize) {
     let files = Value::Array(vec![
         Some(Value::object([
             ("path", Value::str("index.html")),
@@ -1385,10 +1386,19 @@ fn files_up_to_the_part(
     };
     let mut request = Request::start(&call, world).unwrap();
     let mut upload = None;
+    let mut sent = 0;
     let mut queue: VecDeque<Effect> = request.take_effects().into();
     while let Some(effect) = queue.pop_front() {
-        let Effect::Ask(ask) = effect else {
-            continue;
+        let ask = match effect {
+            Effect::Ask(ask) => ask,
+            Effect::Body {
+                out: BodyOut::Data(bytes),
+                ..
+            } => {
+                sent += bytes.len();
+                continue;
+            }
+            _ => continue,
         };
         let event = match ask.need {
             Need::Ready(_) => Event::Ready(Ok(())),
@@ -1408,7 +1418,7 @@ fn files_up_to_the_part(
                 upload = Some(ask.id);
                 Event::BodyOpen
             }
-            Need::Part(0) => return (request, upload.unwrap(), ask.id),
+            Need::Part(0) => return (request, upload.unwrap(), ask.id, sent),
             other => panic!("{other:?}"),
         };
         request.answer(world, ask.id, event);
@@ -1431,7 +1441,7 @@ fn a_cancel_mid_upload_ends_the_row() {
         };
         let mut world = site_world();
         let db = HistoryDb::open(CLOCK);
-        let (mut request, upload, part) = files_up_to_the_part(&mut world, &node, &db);
+        let (mut request, upload, part, _) = files_up_to_the_part(&mut world, &node, &db);
         world.now = CLOCK + 5_000;
         if end == "cancel" {
             request.cancel();
@@ -1513,7 +1523,7 @@ fn parts_are_read_strictly() {
         };
         let mut world = site_world();
         let db = HistoryDb::open(CLOCK);
-        let (mut request, upload, part) = files_up_to_the_part(&mut world, &node, &db);
+        let (mut request, upload, part, _) = files_up_to_the_part(&mut world, &node, &db);
         let mut effects = request.take_effects();
         for event in events {
             if request.outcome().is_some() {
@@ -1641,5 +1651,55 @@ fn an_upload_keeps_the_history_bound() {
             .query_row("SELECT MIN(id) FROM publishes", [], |r| r.get(0))
             .unwrap();
         assert_eq!(first, 2, "{set_back}: the oldest row went");
+    }
+}
+
+/// Main's `swarm.body` answers are read strictly: a second `swarm.body`
+/// for one call, or credit of 0 bytes, is a protocol error; and the core
+/// never sends past main's window.
+#[test]
+fn body_answers_are_read_strictly() {
+    use fc_swarm_provider::machine::Protocol;
+    for (what, event, want) in [
+        ("a second swarm.body", Event::BodyOpen, Protocol::WrongKind),
+        ("no credit", Event::BodyCredit(0), Protocol::Frame),
+    ] {
+        let node = Node {
+            stamps: Some(usable_stamps()),
+            ..Node::new()
+        };
+        let mut world = site_world();
+        let db = HistoryDb::open(CLOCK);
+        let (mut request, upload, part, sent) = files_up_to_the_part(&mut world, &node, &db);
+        // The first entry, padded, and the second's header have gone; the
+        // part is asked.
+        assert!(request.take_effects().is_empty(), "{what}");
+        assert_eq!(sent, 512 + 512 + 512, "{what}");
+        // The part fills the window, and the core stops there.
+        request.answer(&mut world, part, Event::PartHead(200_000));
+        request.answer(&mut world, part, Event::Data(vec![7; 65_536]));
+        request.answer(&mut world, part, Event::Data(vec![7; 65_536]));
+        let effects = request.take_effects();
+        let out: usize = effects
+            .iter()
+            .map(|e| match e {
+                Effect::Body {
+                    out: BodyOut::Data(bytes),
+                    ..
+                } => bytes.len(),
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(sent + out, WINDOW as usize, "{what}: the window, no more");
+        let credit: usize = effects
+            .iter()
+            .map(|e| match e {
+                Effect::Credit { id, bytes } if *id == part => *bytes,
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(credit, out, "{what}: credit for what went out");
+        request.answer(&mut world, upload, event);
+        assert_eq!(request.outcome(), Some(&Outcome::Protocol(want)), "{what}");
     }
 }

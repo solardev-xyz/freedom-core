@@ -15,10 +15,16 @@
 //! - **Asks** ([`Need`]), answered later, each with an [`AskId`]: a
 //!   readiness check (`shell.swarm_ready`), a node call (`shell.swarm_api`,
 //!   with what it costs the swarm thread's memory, which the thread
-//!   reserves before the call goes), work for the hashing pool, and, for the
-//!   pieces to come, a payload part (`shell.swarm_part`), a signature (the
-//!   vault, with SW-1's hold), a store write (0013's durable write) and a
-//!   GSOC search (the mining lane).
+//!   reserves before the call goes), work for the hashing pool, a payload
+//!   part (`shell.swarm_part`), a streaming upload's turn, a store write
+//!   (0013's durable write, or the history's statements), and, for the
+//!   pieces to come, a signature (the vault, with SW-1's hold) and a GSOC
+//!   search (the mining lane). A node call whose body streams is answered
+//!   with main's `swarm.body` and its credit too, and the request writes
+//!   that body ([`Effect::Body`]).
+//! - **A request that ends without its machine** (a cancel, its deadline,
+//!   `busy`, a protocol error) still makes the one write its method needs
+//!   then: an upload's history row ends `failed`.
 //! - **The world** ([`World`]), read synchronously on the swarm thread
 //!   between two answers: the clock, the Swarm grants (0012) and the feed
 //!   store (part 2's [`Reads`]), and the read budgets every request
