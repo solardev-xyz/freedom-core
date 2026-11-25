@@ -42,6 +42,10 @@ use crate::stores::StoreError;
 use crate::stores::feeds::{APP_SCOPED, FeedChange, FeedStore};
 use crate::stores::manifests::Projection;
 
+/// What a caller reads for a change past the feed store's bound (design
+/// 0015, Budgets: `store_full`); a page reads it as -32603.
+pub const STORE_FULL_MESSAGE: &str = "Swarm feed store is full";
+
 /// A hold's handle, the swarm thread's (one per signature it waits for).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HoldId(pub u64);
@@ -71,14 +75,15 @@ pub enum ChangeError {
 }
 
 impl ChangeError {
-    /// The text a caller reads: the reference's own refusal, `store_full`
-    /// past the store's bound (design 0015, Budgets), or the write's.
+    /// The text a caller reads: the reference's own refusal,
+    /// [`STORE_FULL_MESSAGE`] past the store's bound (design 0015, Budgets:
+    /// `store_full`), or the write's.
     pub fn message(&self) -> JsString {
         match self {
             ChangeError::Store(StoreError::Thrown(thrown)) => {
                 JsString::from(thrown.message.as_str())
             }
-            ChangeError::Store(StoreError::Full) => JsString::from("store_full"),
+            ChangeError::Store(StoreError::Full) => JsString::from(STORE_FULL_MESSAGE),
             ChangeError::Write(text) => text.clone(),
         }
     }
@@ -447,5 +452,13 @@ mod tests {
         assert_eq!(err.message(), "Publisher identity not found: nope");
         assert!(!wrote);
         assert_eq!(*k.store(), before);
+    }
+
+    #[test]
+    fn a_full_store_reads_as_full() {
+        assert_eq!(
+            ChangeError::Store(StoreError::Full).message(),
+            "Swarm feed store is full"
+        );
     }
 }
