@@ -40,8 +40,8 @@ use crate::errors::{self, ServiceError, Site};
 use crate::machine::node::{Body, BodyAbort, Failed, INLINE_BODY};
 use crate::machine::params::{empty_options, require_params};
 use crate::machine::{
-    AfterInsert, Approval, AskId, Capability, Closing, Cx, Effect, Event, Failure, Form, NodeCall,
-    Outcome, Protocol, ReadyCheck, Reply, RowEnd, Step, StoreWrite, World, fail,
+    AfterInsert, Approval, AskId, Capability, Closing, Cx, Effect, Event, Failure, Form, InFlight,
+    NodeCall, Outcome, Protocol, ReadyCheck, Reply, RowEnd, Step, StoreWrite, World, fail,
 };
 use crate::replies::{self, ChunkUpload, NO_REFERENCE_MESSAGE, PageUpload};
 use crate::stamps::{SelectOptions, read_stamps, select_best_batch};
@@ -237,12 +237,21 @@ impl Publish {
     /// What the request still writes when it ends without its machine: the
     /// row `failed`, with the request's end as its text (`cancelled`,
     /// `busy`, `Internal error`); for an insert still in flight, once it
-    /// answers its rowid, the bound's trim keeping that row first. Nothing
-    /// once the machine asked for the row's last update, which is made
-    /// whatever comes after.
+    /// answers its rowid, the bound's trim keeping that row first. Once the
+    /// machine asked for the row's last update, nothing more is asked: that
+    /// write is made whatever comes after, and if it fails, the failed
+    /// update with its error follows once, unless it was the retry.
     pub(crate) fn closing(&self, outcome: &Outcome) -> Option<Closing> {
         if self.closed {
-            return None;
+            return match (&self.stage, self.row) {
+                (Stage::Closing(id, _, last), Some(row)) => Some(Closing::InFlight(InFlight {
+                    id: *id,
+                    row,
+                    now: self.now,
+                    retry: !matches!(last, Last::Retry { .. }),
+                })),
+                _ => None,
+            };
         }
         let text = match outcome {
             Outcome::Result(_) => return None,

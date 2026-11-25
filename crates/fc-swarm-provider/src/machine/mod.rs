@@ -862,6 +862,21 @@ pub(crate) enum Closing {
     AfterInsert(AfterInsert),
     /// The history row is known: it ends `failed`, now.
     Row(RowEnd),
+    /// The machine's own last write of the row is already in flight when
+    /// the request ends: nothing more is asked unless it fails, and then
+    /// the failed update with the write's error once, if a retry is left.
+    InFlight(InFlight),
+}
+
+/// A row's last write the machine asked before the outcome, still open.
+pub(crate) struct InFlight {
+    /// The write's ask.
+    pub id: AskId,
+    pub row: i64,
+    /// The clock for the retry's `completed_at`.
+    pub now: u64,
+    /// Whether a retry is left: not once the write is itself the retry.
+    pub retry: bool,
 }
 
 /// The row an in-flight history insert makes, to end once it answers.
@@ -1069,6 +1084,12 @@ impl Request {
         match running.and_then(|m| m.closing(&outcome)) {
             Some(Closing::AfterInsert(after)) => self.after = Some(After::Insert(after)),
             Some(Closing::Row(end)) => self.end_row(end, false),
+            Some(Closing::InFlight(write)) => {
+                self.after = Some(After::Write {
+                    id: write.id,
+                    retry: write.retry.then_some((write.row, write.now, false)),
+                });
+            }
             None => {}
         }
         self.outcome = Some(outcome);
