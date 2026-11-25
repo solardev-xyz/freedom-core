@@ -32,13 +32,15 @@
 //! rules synchronously, between two answers, so the Swarm store sits
 //! behind a handle ([`Grants::swarm_handle`]) that the event loop and the
 //! swarm thread both lock, each for a short section: the thread for one
-//! step of a request, the loop to read the store or to put a change in
-//! place. Until the manifest projections are written from the swarm thread
-//! (SWM-4 PR 9), the loop is the store's only writer, so a change read,
-//! written to the file and put in place by the loop loses nothing.
+//! step of a request, the loop to read the store. Both write it: the loop
+//! main's approvals, the swarm thread a permission manifest's projections
+//! (`swarm.manifest`). Each write holds the lock from the copy it changes
+//! to the change put in place, its file written between ([`write_swarm`]),
+//! so the two writers' changes are serialised and neither loses the
+//! other's.
 
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use fc_approval::stores::{
@@ -61,8 +63,9 @@ pub trait StoreFile: Clone + Default {
     /// The store in memory: borrowed, or a copy taken under the shared
     /// Swarm store's lock.
     fn slot(grants: &Grants) -> Cow<'_, Self>;
-    /// Puts `store` in memory in the store's place.
-    fn put(grants: &mut Grants, store: Self);
+    /// Runs `f` on the store in memory, nothing else changing it
+    /// meanwhile: the shared Swarm store's lock held throughout (D2).
+    fn locked<R>(grants: &mut Grants, f: impl FnOnce(&mut Self) -> R) -> R;
 }
 
 impl StoreFile for DappStore {
@@ -76,8 +79,8 @@ impl StoreFile for DappStore {
     fn slot(grants: &Grants) -> Cow<'_, Self> {
         Cow::Borrowed(&grants.dapp)
     }
-    fn put(grants: &mut Grants, store: Self) {
-        grants.dapp = store;
+    fn locked<R>(grants: &mut Grants, f: impl FnOnce(&mut Self) -> R) -> R {
+        f(&mut grants.dapp)
     }
 }
 
@@ -92,8 +95,8 @@ impl StoreFile for SwarmStore {
     fn slot(grants: &Grants) -> Cow<'_, Self> {
         Cow::Owned(grants.swarm().clone())
     }
-    fn put(grants: &mut Grants, store: Self) {
-        *grants.swarm() = store;
+    fn locked<R>(grants: &mut Grants, f: impl FnOnce(&mut Self) -> R) -> R {
+        f(&mut grants.swarm())
     }
 }
 
@@ -108,8 +111,8 @@ impl StoreFile for RadicleStore {
     fn slot(grants: &Grants) -> Cow<'_, Self> {
         Cow::Borrowed(&grants.radicle)
     }
-    fn put(grants: &mut Grants, store: Self) {
-        grants.radicle = store;
+    fn locked<R>(grants: &mut Grants, f: impl FnOnce(&mut Self) -> R) -> R {
+        f(&mut grants.radicle)
     }
 }
 
@@ -124,8 +127,8 @@ impl StoreFile for CapStore {
     fn slot(grants: &Grants) -> Cow<'_, Self> {
         Cow::Borrowed(&grants.x402)
     }
-    fn put(grants: &mut Grants, store: Self) {
-        grants.x402 = store;
+    fn locked<R>(grants: &mut Grants, f: impl FnOnce(&mut Self) -> R) -> R {
+        f(&mut grants.x402)
     }
 }
 
@@ -179,6 +182,15 @@ impl Grants {
     /// into it at the hello.
     pub fn swarm_handle(&self) -> Arc<Mutex<SwarmStore>> {
         Arc::clone(&self.swarm)
+    }
+
+    /// `swarm-permissions.json`'s path once the core writes it (`swarm` in
+    /// `grant_moved`), for the swarm thread's writes ([`write_swarm`]).
+    pub fn swarm_path(&self) -> Option<PathBuf> {
+        if !self.moved(StoreKind::Swarm) {
+            return None;
+        }
+        self.path(StoreKind::Swarm)
     }
 
     /// The shared Swarm store, locked. A poisoned lock still holds a whole
@@ -297,45 +309,99 @@ impl Grants {
         let Some(path) = self.path(S::KIND) else {
             return Err(WriteFailure::NotMoved);
         };
-        let mut next = S::slot(self).into_owned();
-        let applied = change(&mut next);
         let behind = through && self.behind.contains(&S::KIND);
-        if applied.effect == Effect::Unchanged && !behind {
-            return Ok(Written {
+        // The copy, its file and the change put in place under one lock,
+        // so another writer of the shared Swarm store waits (D2).
+        let (result, file) = S::locked(self, |slot| write_slot(slot, &path, change, behind));
+        match file {
+            File::Current => self.behind.retain(|kind| *kind != S::KIND),
+            File::Behind if !self.behind.contains(&S::KIND) => self.behind.push(S::KIND),
+            File::Behind | File::Unchanged => {}
+        }
+        result
+    }
+}
+
+/// Where a write left the file against memory.
+enum File {
+    /// Written: the file holds memory's store.
+    Current,
+    /// Its write failed with the change applied in memory (a narrowing).
+    Behind,
+    /// Not written, and memory as it was.
+    Unchanged,
+}
+
+/// `change` on a copy of `slot`, the copy's text written to `path`, and the
+/// copy put in `slot`'s place once written; a narrowing (or a neutral
+/// change) whose write fails is put in place all the same, a widening
+/// isn't. `behind`: write even a change that leaves the store as it is
+/// ([`Grants::write_through`]).
+fn write_slot<S: StoreFile, T>(
+    slot: &mut S,
+    path: &Path,
+    change: impl FnOnce(&mut S) -> Applied<T>,
+    behind: bool,
+) -> (Result<Written<T>, WriteFailure>, File) {
+    let mut next = slot.clone();
+    let applied = change(&mut next);
+    if applied.effect == Effect::Unchanged && !behind {
+        let written = Written {
+            value: applied.value,
+            effect: applied.effect,
+            durable: true,
+        };
+        return (Ok(written), File::Unchanged);
+    }
+    let text = match next.file_text() {
+        Ok(text) => text,
+        Err(refused) => return (Err(WriteFailure::Bounds(refused)), File::Unchanged),
+    };
+    match write_file(path, text.as_bytes(), &GrantWrite(S::KIND.name())) {
+        Ok(done) => {
+            *slot = next;
+            let written = Written {
                 value: applied.value,
                 effect: applied.effect,
-                durable: true,
-            });
+                durable: done == Done::Durable,
+            };
+            (Ok(written), File::Current)
         }
-        let text = next.file_text().map_err(WriteFailure::Bounds)?;
-        match write_file(&path, text.as_bytes(), &GrantWrite(S::KIND.name())) {
-            Ok(done) => {
-                S::put(self, next);
-                self.behind.retain(|kind| *kind != S::KIND);
-                Ok(Written {
-                    value: applied.value,
-                    effect: applied.effect,
-                    durable: done == Done::Durable,
-                })
-            }
-            Err(e) => {
-                let applied = applied.effect != Effect::Widening;
-                crate::log::error(
-                    "a permission file's write failed",
-                    serde_json::json!({
-                        "store": S::KIND.name(),
-                        "kind": e.kind().to_string(),
-                        "applied": applied,
-                    }),
-                );
-                if applied {
-                    S::put(self, next);
-                    if !self.behind.contains(&S::KIND) {
-                        self.behind.push(S::KIND);
-                    }
-                }
-                Err(WriteFailure::Io { applied })
-            }
+        Err(e) => {
+            let applied = applied.effect != Effect::Widening;
+            crate::log::error(
+                "a permission file's write failed",
+                serde_json::json!({
+                    "store": S::KIND.name(),
+                    "kind": e.kind().to_string(),
+                    "applied": applied,
+                }),
+            );
+            let file = if applied {
+                *slot = next;
+                File::Behind
+            } else {
+                File::Unchanged
+            };
+            (Err(WriteFailure::Io { applied }), file)
         }
     }
+}
+
+/// The swarm thread's write of the shared Swarm store (design 0015's D2:
+/// a permission manifest's projection): as the loop's
+/// ([`Grants::write`]), `change` on a copy, `swarm-permissions.json` at
+/// `path` written, and the copy put in place, all under the store's lock,
+/// so the loop's writes and the thread's are serialised. A narrowing whose
+/// write fails is in place all the same, as the loop's is; the loop's next
+/// write of the store carries it.
+pub fn write_swarm<T>(
+    handle: &Mutex<SwarmStore>,
+    path: &Path,
+    change: impl FnOnce(&mut SwarmStore) -> Applied<T>,
+) -> Result<Written<T>, WriteFailure> {
+    let mut store = handle
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    write_slot(&mut *store, path, change, false).0
 }

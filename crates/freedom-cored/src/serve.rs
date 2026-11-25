@@ -1872,17 +1872,25 @@ impl Core {
                     Some(Err(_)) => return Flow::Exit(Exit::Internal),
                     None => None,
                 };
-                let message = if method == "swarm.body" {
-                    self.requests
-                        .routes()
-                        .register(StreamKey::Body(id), Owner::Swarm);
-                    swarm::In::Body { id, params }
-                } else {
-                    swarm::In::Request {
+                let message = match method {
+                    "swarm.body" => {
+                        self.requests
+                            .routes()
+                            .register(StreamKey::Body(id), Owner::Swarm);
+                        swarm::In::Body { id, params }
+                    }
+                    "swarm.request" => swarm::In::Request {
                         id,
                         params,
                         page: context.page.clone(),
-                    }
+                    },
+                    // Main's own Swarm methods, and the chrome's (D5).
+                    _ => swarm::In::Own {
+                        id,
+                        method: loggable(method),
+                        params,
+                        caller: context.caller,
+                    },
                 };
                 let sent = self
                     .swarm
@@ -2182,7 +2190,7 @@ impl Core {
             return Flow::Exit(Exit::Internal);
         };
         let swarm_start = {
-            let (grants, grants_moved) = self.vault.swarm_grants();
+            let (grants, grants_file) = self.vault.swarm_grants();
             swarm::Spawn {
                 out: start.out.clone(),
                 events: start.events.clone(),
@@ -2190,7 +2198,7 @@ impl Core {
                 link: Arc::clone(&self.link),
                 naming: self.naming.clone(),
                 grants,
-                grants_moved,
+                grants_file,
                 bindings: self.connects.bindings(),
                 stores: swarm_stores,
             }

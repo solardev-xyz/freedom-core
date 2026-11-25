@@ -14,6 +14,9 @@ const KIB: usize = 1024;
 /// The streams' own tests (SWM-4 PR 6).
 mod stream_tests;
 
+/// Main's own methods' tests (SWM-4 PR 9).
+mod shell_tests;
+
 #[derive(Default)]
 struct Fake {
     next: u64,
@@ -47,6 +50,8 @@ struct Fake {
     statements: Vec<Statement>,
     /// The vault's asks, by tag.
     vaults: Vec<(u64, VaultAsk)>,
+    /// `approval.changed`'s keys, in order.
+    changed: Vec<String>,
 }
 
 impl Io for Fake {
@@ -120,6 +125,26 @@ impl Io for Fake {
     }
     fn vault(&mut self, tag: u64, ask: VaultAsk) {
         self.vaults.push((tag, ask));
+    }
+    fn read_manifests(&mut self) -> Option<Vec<u8>> {
+        None
+    }
+    fn read_manifests_backup(&mut self) -> Option<Vec<u8>> {
+        None
+    }
+    fn random(&mut self) -> Option<[u8; 24]> {
+        Some([7; 24])
+    }
+    fn history_rows(&mut self, statement: &Statement) -> Result<Vec<Row>, JsString> {
+        self.statements.push(statement.clone());
+        Ok(Vec::new())
+    }
+    fn history_run(&mut self, statement: &Statement) -> Result<usize, JsString> {
+        self.statements.push(statement.clone());
+        Ok(0)
+    }
+    fn changed(&mut self, key: &str) {
+        self.changed.push(key.to_owned());
     }
 }
 

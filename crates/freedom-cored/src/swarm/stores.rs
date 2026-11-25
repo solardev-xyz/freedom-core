@@ -198,12 +198,39 @@ impl Files {
         Ok(conn.last_insert_rowid())
     }
 
-    /// A query's rows, as SQLite answers them: `swarm.history`'s reads,
-    /// which main's own methods bring (SWM-4 PR 9).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "swarm.history's reads come with PR 9")
-    )]
+    /// One statement: the rows it changed (`swarm.history`'s `clear` and
+    /// `remove`).
+    pub fn history_run(&mut self, statement: &Statement, now_ms: u64) -> Result<usize, JsString> {
+        let conn = self.history.writable(now_ms)?;
+        execute(conn, statement).map_err(history_failed)
+    }
+
+    /// `swarm-manifest-grants.json`'s bytes, as a store op loads them while
+    /// the store isn't loaded (`loadStore`): a file `read_file` refuses
+    /// reads as one that doesn't parse, so its backup is read.
+    pub fn read_manifests(&mut self) -> Option<Vec<u8>> {
+        match read_file(
+            &self.root.join(manifests::FILE_NAME),
+            manifests::MAX_FILE_BYTES + 1,
+        ) {
+            Read::Missing => None,
+            Read::Bytes(bytes) => Some(bytes),
+            Read::Unreadable => Some(Vec::new()),
+        }
+    }
+
+    /// Its `.bak` copy's bytes, where the file can't be read.
+    pub fn read_manifests_backup(&mut self) -> Option<Vec<u8>> {
+        match read_file(
+            &self.root.join(manifests::BACKUP_NAME),
+            manifests::MAX_FILE_BYTES + 1,
+        ) {
+            Read::Bytes(bytes) => Some(bytes),
+            Read::Missing | Read::Unreadable => None,
+        }
+    }
+
+    /// A query's rows, as SQLite answers them: `swarm.history`'s reads.
     pub fn history_rows(
         &mut self,
         statement: &Statement,
@@ -213,10 +240,13 @@ impl Files {
         query(conn, statement).map_err(history_failed)
     }
 
-    /// The feed store and the manifest store read again from their files
-    /// (the test hooks' `test.swarm_world`, D11).
+    /// The feed store and the manifest store read again from their files,
+    /// and the history opened again (its import, sweep and trim), as at a
+    /// start (the test hooks' `test.swarm_world`, D11).
     #[cfg(feature = "testhooks")]
     pub fn reload(&mut self, now_ms: u64) -> (FeedStore, ManifestStore) {
+        self.history.conn = None;
+        let _ = self.history.conn(now_ms);
         (load_feeds(&self.root, now_ms), load_manifests(&self.root))
     }
 
@@ -386,10 +416,6 @@ fn execute(conn: &Connection, statement: &Statement) -> rusqlite::Result<usize> 
 }
 
 /// `statement`'s rows, each cell as SQLite answers it.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "swarm.history's reads come with PR 9")
-)]
 fn query(conn: &Connection, statement: &Statement) -> rusqlite::Result<Vec<Row>> {
     use rusqlite::types::ValueRef;
     let mut prepared = conn.prepare(statement.sql)?;

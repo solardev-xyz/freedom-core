@@ -62,6 +62,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::Range;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -70,16 +71,19 @@ use fc_approval::stores::SwarmStore;
 use fc_eip1193::names::Binding;
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::frame::Frame;
-use fc_protocol::message::{self, PageContext};
+use fc_protocol::message::{self, CallerKind, PageContext};
 use fc_protocol::stream::{
     Arrived, Credited, Duplex, Received, Replied, Retire, SendError, StreamFrame,
 };
+use fc_swarm_provider::machine::shell::ShellMethod;
 use fc_swarm_provider::machine::{AskId, BodyOut, Job};
+use fc_swarm_provider::ops::Caller;
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
 use super::engine::{
-    Answer, Bounds, Engine, Fault, Io, Ms, NAME_TAG, Outgoing, Sent, Shared, VaultAsk,
+    Answer, Bounds, Engine, Fault, GrantWritten, GrantsWriter, Io, Ms, NAME_TAG, Outgoing, Sent,
+    Shared, VaultAnswer, VaultAsk,
 };
 use super::stores::{Files, Place};
 use super::{stream, wire};
@@ -93,8 +97,19 @@ use crate::transport::{
 };
 
 /// The methods this thread serves (design 0015, SWM-4's D5): a page's
-/// request, and main's ask for the body of one of the thread's calls.
-pub const METHODS: &[&str] = &["swarm.request", "swarm.body"];
+/// request, main's ask for the body of one of the thread's calls, main's
+/// own node methods (the shell parents) and the stores' ops.
+pub const METHODS: &[&str] = &[
+    "swarm.request",
+    "swarm.body",
+    "swarm.publish",
+    "swarm.feed",
+    "swarm.stamps",
+    "swarm.upload_status",
+    "swarm.identities",
+    "swarm.history",
+    "swarm.manifest",
+];
 
 /// The `swarm.body` answers the duplex's sender holds unwritten, across
 /// every body: the 4 uploads' 128 KiB windows (design 0015, Streams).
@@ -123,6 +138,16 @@ pub enum In {
         id: u64,
         params: Option<Box<RawValue>>,
     },
+    /// One of main's own Swarm methods, or the chrome's (`swarm.publish`,
+    /// `swarm.feed`, `swarm.stamps`, `swarm.upload_status`,
+    /// `swarm.identities`, `swarm.history`, `swarm.manifest`), request `id`
+    /// from `caller`, its params as main sent them.
+    Own {
+        id: u64,
+        method: &'static str,
+        params: Option<Box<RawValue>>,
+        caller: CallerKind,
+    },
     /// A stream's entry of frames, coalesced under the reader's stream cap:
     /// taken here, and charged until handled.
     Stream(StreamMark),
@@ -141,11 +166,11 @@ pub enum In {
         tag: u64,
         verdict: Verdict,
     },
-    /// The vault's answer to the ask under `tag`: [`fc_swarm_provider::machine::Event::Owner`]
-    /// or [`fc_swarm_provider::machine::Event::Signed`].
+    /// The vault's answer to the ask under `tag`: an owner, a signature, or
+    /// the user's accounts.
     Vault {
         tag: u64,
-        answer: Box<fc_swarm_provider::machine::Event>,
+        answer: Box<VaultAnswer>,
     },
     /// The writer has written `swarm.request` `id`'s answer, or dropped it.
     Written(u64),
@@ -219,10 +244,11 @@ pub struct Spawn {
     pub link: Arc<Link>,
     /// The naming thread, for the name checks (D1).
     pub naming: naming::Handle,
-    /// The Swarm grants, shared with the event loop (D2), and whether they
-    /// have moved (`grant_moved: swarm`).
+    /// The Swarm grants, shared with the event loop (D2), and once they
+    /// have moved (`grant_moved: swarm`) their file, which a manifest's
+    /// projections write ([`crate::grants::write_swarm`]).
     pub grants: Arc<Mutex<SwarmStore>>,
-    pub grants_moved: bool,
+    pub grants_file: Option<PathBuf>,
     /// The ended name bindings, shared with the event loop's page requests
     /// (D1).
     pub bindings: crate::eip1193::Bindings,
@@ -251,10 +277,11 @@ pub fn spawn(start: Spawn) -> std::io::Result<Handle> {
         link,
         naming,
         grants,
-        grants_moved,
+        grants_file,
         bindings,
         stores,
     } = start;
+    let grants_moved = grants_file.is_some();
     std::thread::Builder::new()
         .name("swarm".into())
         .spawn(move || {
@@ -280,6 +307,9 @@ pub fn spawn(start: Spawn) -> std::io::Result<Handle> {
                 hashing: Some(hashing),
             };
             let mut shared = Shared::new(grants, bindings);
+            if let Some(path) = grants_file {
+                shared.grants_writer = Some(Box::new(GrantsFile { path }));
+            }
             // The stores load as the thread starts (D3), off the event loop.
             if let Some(place) = stores {
                 let loaded = Files::load(place, wire.wall_ms());
@@ -371,7 +401,7 @@ struct Thread {
     /// Vault answers the test hooks hold back (`FREEDOM_CORED_TEST_SWARM_HOLD`,
     /// D11), in order, until the hook's release.
     #[cfg(feature = "testhooks")]
-    parked: VecDeque<(u64, fc_swarm_provider::machine::Event)>,
+    parked: VecDeque<(u64, VaultAnswer)>,
 }
 
 impl Thread {
@@ -435,6 +465,27 @@ impl Thread {
                 self.engine.body_cancelled(&mut self.wire, now, id)
             }
             In::Cancel { id } => self.engine.cancel(&mut self.wire, now, id),
+            In::Own {
+                id,
+                method,
+                params,
+                caller,
+            } => {
+                let params = params.as_deref().map(RawValue::get);
+                match ShellMethod::from_name(method) {
+                    Some(shell) => self.engine.shell(&mut self.wire, now, id, shell, params),
+                    None => {
+                        // The chrome's or main's: an op only main makes is
+                        // refused to the chrome (D7).
+                        let caller = match caller {
+                            CallerKind::Chrome => Caller::Chrome,
+                            _ => Caller::Shell,
+                        };
+                        self.engine
+                            .op(&mut self.wire, now, id, method, params, caller)
+                    }
+                }
+            }
             In::Response {
                 id,
                 message,
@@ -484,18 +535,13 @@ impl Thread {
 
     /// The vault's answer under `tag`, to the engine; or, while the test
     /// hooks hold that kind back, parked until their release (D11).
-    fn vaulted(
-        &mut self,
-        now: Ms,
-        tag: u64,
-        answer: fc_swarm_provider::machine::Event,
-    ) -> Result<(), Fault> {
+    fn vaulted(&mut self, now: Ms, tag: u64, answer: VaultAnswer) -> Result<(), Fault> {
         #[cfg(feature = "testhooks")]
         {
             use fc_swarm_provider::machine::Event;
             let kind = match &answer {
-                Event::Owner(_) => "owner",
-                _ => "sign",
+                VaultAnswer::Event(Event::Owner(_)) | VaultAnswer::Accounts(_) => "owner",
+                VaultAnswer::Event(_) => "sign",
             };
             if !self.parked.is_empty() || crate::testhooks::swarm_hold_parks(kind) {
                 self.parked.push_back((tag, answer));
@@ -579,7 +625,8 @@ impl Thread {
     /// `reset` starts the read budgets and the tags' owners afresh, and the
     /// stores: once they have moved, `swarm-feeds.json` removed and the
     /// publish history a new, empty database (before the move, the feed
-    /// store empty in memory); `clock` fixes the machines' `Date.now()`;
+    /// store empty in memory); `clock` fixes the machines' `Date.now()`, the
+    /// stores' reads below included;
     /// `grants` replaces the Swarm grants in memory (the file's form);
     /// `tags` sets tags' owners (`[[uid, key], …]`); `feeds` replaces
     /// `swarm-feeds.json` with the text and loads it as a start does (before
@@ -617,6 +664,11 @@ impl Thread {
             return;
         };
         use fc_swarm_provider::machine::keeper::Keeper;
+        // The clock first: the stores read below (a v1 migration, the
+        // history's sweep) read it.
+        if world.clock.is_some() {
+            self.wire.clock = world.clock;
+        }
         let wall = self.wire.wall_ms();
         let shared = self.engine.shared_mut();
         if world.reset {
@@ -652,9 +704,6 @@ impl Thread {
             let (feeds, manifests) = files.reload(wall);
             shared.keeper = Keeper::new(feeds);
             shared.manifests = manifests;
-        }
-        if world.clock.is_some() {
-            self.wire.clock = world.clock;
         }
         // What the thread holds now, so a test sees every charge freed.
         let held = serde_json::json!({
@@ -751,8 +800,8 @@ struct Wire {
     /// Control frames that wait for room, with the answer each one is, if
     /// it is one.
     small: VecDeque<(Zeroizing<Vec<u8>>, Option<u64>)>,
-    /// Large answers that wait for room.
-    large: VecDeque<(Reply, u64)>,
+    /// Large answers that wait for room, and the events behind one.
+    large: VecDeque<(Reply, Option<u64>)>,
     /// The machines' fixed `Date.now()`, from the test hooks (D11).
     clock: Option<u64>,
     /// Why the thread must stop, found while acting for the engine.
@@ -835,7 +884,7 @@ impl Wire {
             let Some((reply, id)) = self.large.pop_front() else {
                 break;
             };
-            let hold = self.notice(hold, Some(id));
+            let hold = self.notice(hold, id);
             self.out
                 .send(reply.into_out(hold))
                 .map_err(|_| Stop::Writer)?;
@@ -868,7 +917,7 @@ impl Wire {
             let _ = self.out.send(Out::Frame { frame, hold });
         }
         while let Some((reply, id)) = self.large.pop_front() {
-            let hold = self.notice(self.bulk.force(reply.len()), Some(id));
+            let hold = self.notice(self.bulk.force(reply.len()), id);
             let _ = self.out.send(reply.into_out(hold));
         }
         if let Some(hashing) = self.hashing.take() {
@@ -1016,7 +1065,7 @@ impl Io for Wire {
             Some(Reply::Whole(frame)) if frame.len() <= SMALL_ANSWER => {
                 self.small.push_back((frame, Some(id)));
             }
-            Some(reply) => self.large.push_back((reply, id)),
+            Some(reply) => self.large.push_back((reply, Some(id))),
             None => {}
         }
     }
@@ -1154,6 +1203,107 @@ impl Io for Wire {
             tag,
             ask: Box::new(ask),
         });
+    }
+
+    fn read_manifests(&mut self) -> Option<Vec<u8>> {
+        self.files.as_mut()?.read_manifests()
+    }
+
+    fn read_manifests_backup(&mut self) -> Option<Vec<u8>> {
+        self.files.as_mut()?.read_manifests_backup()
+    }
+
+    fn random(&mut self) -> Option<[u8; 24]> {
+        let mut bytes = [0u8; 24];
+        match getrandom::fill(&mut bytes) {
+            Ok(()) => Some(bytes),
+            Err(_) => {
+                crate::log::error("swarm: the OS randomness failed", serde_json::json!({}));
+                None
+            }
+        }
+    }
+
+    fn history_rows(
+        &mut self,
+        statement: &fc_swarm_provider::stores::history::Statement,
+    ) -> Result<Vec<fc_swarm_provider::stores::history::Row>, fc_json::JsString> {
+        let now = self.wall_ms();
+        self.files_mut()?.history_rows(statement, now)
+    }
+
+    fn history_run(
+        &mut self,
+        statement: &fc_swarm_provider::stores::history::Statement,
+    ) -> Result<usize, fc_json::JsString> {
+        let now = self.wall_ms();
+        self.files_mut()?.history_run(statement, now)
+    }
+
+    fn changed(&mut self, key: &str) {
+        let mut payload = Zeroizing::new(Vec::new());
+        if message::write_event(
+            &mut *payload,
+            "approval.changed",
+            &serde_json::json!({ "store": "swarm", "key": key }),
+        )
+        .is_err()
+        {
+            return;
+        }
+        let Some(frame) = transport::frame(&payload) else {
+            return;
+        };
+        // After every answer queued before it: behind a large answer that
+        // waits, else with the control frames, in order.
+        if self.large.is_empty() {
+            self.small.push_back((frame, None));
+        } else {
+            self.large.push_back((Reply::Whole(frame), None));
+        }
+    }
+}
+
+/// `swarm-permissions.json`, which a permission manifest's projections
+/// write from the swarm thread (D2), under the shared store's lock.
+struct GrantsFile {
+    path: PathBuf,
+}
+
+/// What a caller reads when the Swarm grants' write fails: a fixed text,
+/// never the OS's.
+const GRANTS_WRITE_FAILED: &str = "The Swarm grants could not be written";
+
+impl GrantsWriter for GrantsFile {
+    fn write(
+        &mut self,
+        grants: &Mutex<SwarmStore>,
+        change: &mut dyn FnMut(&mut SwarmStore) -> fc_approval::stores::Applied<()>,
+    ) -> GrantWritten {
+        use crate::grants::WriteFailure;
+        use fc_approval::stores::Effect;
+        let mut effect = Effect::Unchanged;
+        let written = crate::grants::write_swarm(grants, &self.path, |store| {
+            let applied = change(store);
+            effect = applied.effect;
+            applied
+        });
+        match written {
+            Ok(written) => GrantWritten {
+                effect: written.effect,
+                error: None,
+            },
+            // A narrowing stands in memory all the same, as the event
+            // loop's does.
+            Err(WriteFailure::Io { applied }) => GrantWritten {
+                effect: if applied { effect } else { Effect::Unchanged },
+                error: Some(fc_json::JsString::from(GRANTS_WRITE_FAILED)),
+            },
+            Err(WriteFailure::Bounds(_) | WriteFailure::NotMoved) => GrantWritten {
+                effect: Effect::Unchanged,
+                error: Some(fc_json::JsString::from(GRANTS_WRITE_FAILED)),
+            },
+        }
     }
 }
 

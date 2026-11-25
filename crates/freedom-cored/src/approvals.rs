@@ -1622,13 +1622,17 @@ impl Approvals {
         self.grants.moved(StoreKind::Dapp)
     }
 
-    /// The Swarm grants' shared handle and whether `swarm` is in
-    /// `grant_moved` (design 0015's D2), for the swarm thread.
-    pub fn swarm_grants(&self) -> (std::sync::Arc<std::sync::Mutex<SwarmStore>>, bool) {
-        (
-            self.grants.swarm_handle(),
-            self.grants.moved(StoreKind::Swarm),
-        )
+    /// The Swarm grants' shared handle and, once `swarm` is in
+    /// `grant_moved`, `swarm-permissions.json`'s path (design 0015's D2),
+    /// for the swarm thread, which writes a permission manifest's
+    /// projections there ([`crate::grants::write_swarm`]).
+    pub fn swarm_grants(
+        &self,
+    ) -> (
+        std::sync::Arc<std::sync::Mutex<SwarmStore>>,
+        Option<std::path::PathBuf>,
+    ) {
+        (self.grants.swarm_handle(), self.grants.swarm_path())
     }
 
     /// A page's approved connect (APR-5c): the key's grant, from the

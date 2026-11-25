@@ -1136,13 +1136,14 @@ impl Vault {
         self.approvals.dapp_moved()
     }
 
-    /// The Swarm grants' shared handle and whether they have moved
-    /// (design 0015's D2), for the swarm thread the hello starts.
+    /// The Swarm grants' shared handle and, once they have moved, their
+    /// file's path (design 0015's D2), for the swarm thread the hello
+    /// starts.
     pub fn swarm_grants(
         &self,
     ) -> (
         std::sync::Arc<std::sync::Mutex<fc_approval::stores::SwarmStore>>,
-        bool,
+        Option<std::path::PathBuf>,
     ) {
         self.approvals.swarm_grants()
     }
@@ -1360,18 +1361,63 @@ impl Vault {
     }
 
     /// The swarm thread's ask of the vault (design 0015, SWM-4; D15), on
-    /// this thread, which holds it: [`Vault::swarm_owner`] or
-    /// [`Vault::swarm_sign`].
+    /// this thread, which holds it: [`Vault::swarm_owner`],
+    /// [`Vault::swarm_sign`], [`Vault::swarm_own_sign`] or
+    /// [`Vault::swarm_accounts`].
     pub fn swarm_vault(
         &mut self,
         ask: &crate::swarm::engine::VaultAsk,
-    ) -> fc_swarm_provider::machine::Event {
-        use crate::swarm::engine::VaultAsk;
+    ) -> crate::swarm::engine::VaultAnswer {
+        use crate::swarm::engine::{VaultAnswer, VaultAsk};
         use fc_swarm_provider::machine::Event;
         match ask {
-            VaultAsk::Owner(key) => Event::Owner(self.swarm_owner(*key)),
-            VaultAsk::Sign(sign) => Event::Signed(self.swarm_sign(sign)),
+            VaultAsk::Owner(key) => VaultAnswer::Event(Event::Owner(self.swarm_owner(*key))),
+            VaultAsk::Sign(sign) => VaultAnswer::Event(Event::Signed(self.swarm_sign(sign))),
+            VaultAsk::OwnSign(soc) => VaultAnswer::Event(Event::Signed(self.swarm_own_sign(soc))),
+            VaultAsk::Accounts => VaultAnswer::Accounts(self.swarm_accounts()),
         }
+    }
+
+    /// Main's own SOC (`swarm.feed`'s update: no page, so 0012's page-SOC
+    /// decision doesn't apply): signed only with the Bee wallet key, as
+    /// `swarm.feed` takes no other (SW-1). The key is derived for the one
+    /// digest and its address, and wiped.
+    pub fn swarm_own_sign(
+        &self,
+        soc: &fc_swarm_provider::machine::SignSoc,
+    ) -> Result<fc_swarm_provider::machine::Signed, fc_json::JsString> {
+        use fc_swarm_provider::machine::{SignKey, Signed};
+        if soc.key != SignKey::BeeWallet || soc.hold.is_some() {
+            crate::log::warn(
+                "swarm: main's own SOC under a key swarm.feed doesn't take",
+                serde_json::json!({}),
+            );
+            return Err(fc_json::JsString::from(SOC_NOT_COVERED));
+        }
+        let (signature, owner) = crate::signing::chunk_signature(
+            &self.state,
+            soc.key,
+            &soc.identifier,
+            soc.span,
+            &soc.payload,
+        )
+        .map_err(|body| fc_json::JsString::from(body.message.as_str()))?;
+        crate::testhooks::swarm_signed();
+        Ok(Signed { signature, owner })
+    }
+
+    /// The user's accounts for a store op (`getDerivedWallets`, which is
+    /// `accounts.list` for main): the core's own records once `vault_meta`
+    /// has moved, else main's file as it stands, read and never written,
+    /// each mnemonic account's address derived against the vault's state
+    /// (the stored ones while locked).
+    pub fn swarm_accounts(&self) -> Result<Vec<fc_json::JsValue>, fc_json::JsString> {
+        if let Some((wallets, _)) = self.own_wallets() {
+            return Ok(wallets);
+        }
+        self.accounts
+            .listed(&self.state)
+            .map_err(|body| fc_json::JsString::from(body.message.as_str()))
     }
 
     /// A chunk key's owner (swarm-signer.js's `resolveSwarmSigner`): `None`

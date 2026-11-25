@@ -87,7 +87,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use fc_approval::stores::{SwarmFlag, SwarmStore};
+use fc_approval::stores::{Applied, Effect as GrantEffect, SwarmFlag, SwarmStore};
 use fc_eip1193::names::{Binding, Document};
 use fc_json::JsString;
 use fc_protocol::error::{ErrorBody, ErrorCode};
@@ -96,14 +96,17 @@ use fc_protocol::stream::Codes;
 use fc_swarm_provider::budgets::ReadBudgets;
 use fc_swarm_provider::machine::keeper::{ChangeAnswer, ChangeError, HoldId, Keeper, Ran, Ticket};
 use fc_swarm_provider::machine::node::{ERROR_BODY, b64};
-use fc_swarm_provider::machine::shell::Deadline;
+use fc_swarm_provider::machine::shell::{
+    self, AskBound, Deadline, Shell, ShellCall, ShellMethod, ShellOutcome, ask_bound,
+};
 use fc_swarm_provider::machine::{
     AskId, Body, BodyOut, Call, Capability, Effect, Event, Failed, Failure, Job, KNOWN_METHODS,
     Live, Mined, Need, NotBuilt, Outcome, Protocol, REQUEST_CHARGE, RUNNING_REQUESTS, Reads,
     Request, STREAMING_UPLOADS, SignKey, SignSoc, StoreWrite, TagOwners, WAITING_REQUESTS, World,
 };
+use fc_swarm_provider::ops;
 use fc_swarm_provider::stores::feeds::{FeedChange, FeedStore};
-use fc_swarm_provider::stores::history::Statement;
+use fc_swarm_provider::stores::history::{Row, Statement};
 use fc_swarm_provider::stores::manifests::{ManifestStore, Save};
 use fc_swarm_provider::value::Value;
 
@@ -113,7 +116,11 @@ use super::wire::{self, Params, Refusal};
 use crate::eip1193::Bindings;
 use crate::transport::{SWARM_STREAMS, StreamKey};
 
+mod store_ops;
 mod streams;
+
+pub use store_ops::MANIFEST_MOST;
+use store_ops::OpInput;
 
 /// Milliseconds on the thread's monotonic clock.
 pub type Ms = u64;
@@ -161,6 +168,13 @@ pub struct Bounds {
     pub streams: usize,
     /// The idle bound ([`IDLE_MS`]).
     pub idle_ms: Ms,
+    /// D13, for a request with no total deadline: the most it waits for a
+    /// place, its base or a charge (60 s), and `shell.swarm_manifest`'s
+    /// bound in all (60 s).
+    pub wait_ms: Ms,
+    /// D13: a whole node reply's bound in all under a parent with no total
+    /// deadline (300 s).
+    pub whole_ms: Ms,
 }
 
 impl Default for Bounds {
@@ -173,6 +187,8 @@ impl Default for Bounds {
             uploads: STREAMING_UPLOADS,
             streams: SWARM_STREAMS,
             idle_ms: IDLE_MS,
+            wait_ms: fc_swarm_provider::machine::shell::MEMORY_WAIT_MS,
+            whole_ms: fc_swarm_provider::machine::shell::WHOLE_REPLY_MS,
         }
     }
 }
@@ -266,6 +282,46 @@ pub trait Io {
     /// An ask of the vault, which the event loop holds: its answer comes
     /// to [`Engine::vaulted`] under `tag`.
     fn vault(&mut self, tag: u64, ask: VaultAsk);
+    /// `swarm-manifest-grants.json`'s bytes, `None` when there is none
+    /// (a store op's load, `loadStore`).
+    fn read_manifests(&mut self) -> Option<Vec<u8>>;
+    /// Its `.bak` copy's, read where the file can't be.
+    fn read_manifests_backup(&mut self) -> Option<Vec<u8>>;
+    /// `crypto.randomBytes(24)`, for a manifest consent's token: `None`
+    /// when the system's randomness fails.
+    fn random(&mut self) -> Option<[u8; 24]>;
+    /// A query's rows from `publish-history.sqlite` (`swarm.history`).
+    fn history_rows(&mut self, statement: &Statement) -> Result<Vec<Row>, JsString>;
+    /// One statement run on `publish-history.sqlite`: the rows it changed.
+    fn history_run(&mut self, statement: &Statement) -> Result<usize, JsString>;
+    /// `approval.changed { store: "swarm", key }` (design 0012), written
+    /// after everything the thread answered before it: a manifest's
+    /// projection widened or narrowed the site's Swarm grant (D2).
+    fn changed(&mut self, key: &str);
+}
+
+/// The swarm thread's writes of the shared Swarm grants (D2): a permission
+/// manifest's projection, made on the store and its file written under
+/// the store's lock, so the event loop's writes and the thread's are
+/// serialised ([`crate::grants::write_swarm`]).
+pub trait GrantsWriter: Send {
+    /// `change` made on `grants` and written.
+    fn write(
+        &mut self,
+        grants: &Mutex<SwarmStore>,
+        change: &mut dyn FnMut(&mut SwarmStore) -> Applied<()>,
+    ) -> GrantWritten;
+}
+
+/// What a write of the Swarm grants did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GrantWritten {
+    /// The change's effect where it took effect in memory (written, or a
+    /// narrowing whose write failed, as the event loop's do); `Unchanged`
+    /// where it didn't.
+    pub effect: GrantEffect,
+    /// The write's failure, as the caller reads it.
+    pub error: Option<JsString>,
 }
 
 /// What the swarm thread asks of the vault (design 0015, "SW-1 in the
@@ -279,6 +335,23 @@ pub enum VaultAsk {
     /// [`Event::Signed`], once 0012's page-SOC decision, run again over
     /// the grants as they stand, covers it (D15).
     Sign(Box<SignAsk>),
+    /// [`Need::Sign`] for main's own SOC (`swarm.feed`'s update: no page,
+    /// so no page decision), signed only with the Bee wallet key (SW-1:
+    /// `swarm.feed` takes only that key). Answered [`Event::Signed`].
+    OwnSign(Box<SignSoc>),
+    /// A store op's [`ops::Need::Accounts`]: the user's accounts as
+    /// `accounts.list` reads them for main (`getDerivedWallets`), answered
+    /// [`VaultAnswer::Accounts`].
+    Accounts,
+}
+
+/// The vault's answer to a [`VaultAsk`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum VaultAnswer {
+    /// An owner ([`Event::Owner`]) or a signature ([`Event::Signed`]).
+    Event(Event),
+    /// The user's accounts, or the text their list failed with.
+    Accounts(Result<Vec<fc_json::JsValue>, JsString>),
 }
 
 /// A SOC to sign, with D15's inputs.
@@ -310,6 +383,9 @@ pub struct Shared {
     pub stores_moved: bool,
     pub budgets: ReadBudgets,
     pub tags: TagOwners,
+    /// The Swarm grants' writer for a manifest's projections, once they
+    /// have moved (D2); `None` before.
+    pub grants_writer: Option<Box<dyn GrantsWriter>>,
 }
 
 impl Shared {
@@ -324,6 +400,7 @@ impl Shared {
             stores_moved: false,
             budgets: ReadBudgets::new(),
             tags: TagOwners::new(),
+            grants_writer: None,
         }
     }
 }
@@ -493,23 +570,107 @@ struct Ask {
     /// A raw SOC's signature: SW-1's hold on its site's key, until the
     /// vault answers or the ask is cancelled.
     hold: Option<HoldId>,
+    /// Under a parent with no total deadline (D13), an ask of main with no
+    /// progress of its own to watch: its bound in all, from when it went
+    /// (a whole node reply), or from its body's terminal (a call whose
+    /// body streams).
+    total: Option<Ms>,
+    /// When that bound ends, once it runs.
+    due: Option<Ms>,
+    /// Under such a parent, an ask the idle bound watches whatever it is
+    /// (a readiness check, a streamed reply): 60 s without progress.
+    idle_watch: bool,
+    /// When it began to wait for its charge, for D13's memory wait.
+    since: Ms,
 }
 
 enum Phase {
     /// Waiting for a place.
-    Waiting(Params),
+    Waiting(Start),
     /// Placed, waiting for its base.
-    Base(Params),
-    Running(Box<Request>),
+    Base(Start),
+    Running(Machine),
     /// Answered without its machine.
     Done,
 }
 
+/// What a request starts its machine with.
+enum Start {
+    /// A page's `swarm.request`.
+    Page(Params),
+    /// One of main's own node methods (a shell parent).
+    Shell(Box<ShellCall>),
+}
+
+/// A request's method machine: a page's, or a shell parent's (design
+/// 0015, "Methods main calls"), moved the same way.
+enum Machine {
+    Page(Box<Request>),
+    Shell(Box<Shell>),
+}
+
+impl Machine {
+    fn answer<W: World>(&mut self, world: &mut W, ask: AskId, event: Event) {
+        match self {
+            Machine::Page(request) => request.answer(world, ask, event),
+            Machine::Shell(shell) => shell.answer(world, ask, event),
+        }
+    }
+
+    fn cancel(&mut self) {
+        match self {
+            Machine::Page(request) => request.cancel(),
+            Machine::Shell(shell) => shell.cancel(),
+        }
+    }
+
+    fn busy(&mut self) {
+        match self {
+            Machine::Page(request) => request.busy(),
+            Machine::Shell(shell) => shell.busy(),
+        }
+    }
+
+    fn take_effects(&mut self) -> Vec<Effect> {
+        match self {
+            Machine::Page(request) => request.take_effects(),
+            Machine::Shell(shell) => shell.take_effects(),
+        }
+    }
+
+    /// Its answer once it has its outcome; main broke the protocol (D5)
+    /// if that is the outcome.
+    fn answer_of(&self) -> Option<Result<Answer, Fault>> {
+        Some(match self {
+            Machine::Page(request) => match request.outcome()? {
+                Outcome::Result(value) => Ok(Answer::Result(wire::result_typed(value))),
+                Outcome::Error(failure) => Ok(Answer::Result(wire::error_typed(failure))),
+                Outcome::Cancelled => Ok(cancelled()),
+                Outcome::Protocol(protocol) => Err(Fault(category(*protocol))),
+            },
+            Machine::Shell(shell) => match shell.outcome()? {
+                ShellOutcome::Result(value) => Ok(Answer::Result(wire::result_typed(value))),
+                ShellOutcome::Error(error) => {
+                    Ok(Answer::Result(wire::thrown_typed(&error.to_value())))
+                }
+                ShellOutcome::Cancelled => Ok(cancelled()),
+                ShellOutcome::Busy => Ok(protocol_busy()),
+                ShellOutcome::Protocol(protocol) => Err(Fault(category(*protocol))),
+            },
+        })
+    }
+}
+
 struct Slot {
     phase: Phase,
-    page: PageContext,
+    /// A page's request's page; none for main's own (a shell parent).
+    page: Option<PageContext>,
     /// The `PageContext` as JSON, for `approval.recheck`.
     page_json: String,
+    /// Its deadline kind (D5): `swarm`, or no total deadline (D13).
+    bound: Deadline,
+    /// When it came, for D13's bound on a wait for a place or its base.
+    arrived: Ms,
     /// The page's name binding (D1), when its transport key binds its key,
     /// and the document it binds.
     binding: Option<(Binding, Document)>,
@@ -532,6 +693,45 @@ struct Slot {
     /// the hashing pool): they go once it has ended, nothing of it is
     /// open, and its answer has been written.
     kept: usize,
+}
+
+impl Slot {
+    /// When it ends if still unanswered: its deadline, and under no total
+    /// deadline (D13) 60 s after it came while it waits for a place or its
+    /// base, or 60 s after an ask began to wait for its charge; then it is
+    /// `busy` (a running one waiting for a charge) or cancelled.
+    fn due(&self, wait: Ms) -> Option<Ms> {
+        let mut due = self.deadline;
+        if self.bound == Deadline::Idle {
+            match self.phase {
+                Phase::Waiting(_) | Phase::Base(_) => {
+                    due = due.min(self.arrived.saturating_add(wait));
+                }
+                Phase::Running(_) => {
+                    let waiting = self
+                        .asks
+                        .values()
+                        .filter(|ask| ask.stage == Stage::Memory)
+                        .map(|ask| ask.since)
+                        .min();
+                    if let Some(since) = waiting {
+                        due = due.min(since.saturating_add(wait));
+                    }
+                }
+                Phase::Done => {}
+            }
+        }
+        (due != Ms::MAX).then_some(due)
+    }
+
+    /// Its `busy` (D5): 4900 inside `{ error_typed }` for a page, the
+    /// protocol error for main's own.
+    fn busy_answer(&self) -> Answer {
+        match self.page {
+            Some(_) => Answer::Result(wire::error_typed(&Failure::busy())),
+            None => protocol_busy(),
+        }
+    }
 }
 
 /// One write to a topic at a time (feed-service.js's `withWriteLock`):
@@ -663,6 +863,12 @@ pub struct Engine {
     next_ticket: u64,
     /// Feed store changes a hold defers, and whom to answer.
     tickets: BTreeMap<Ticket, Asker>,
+    /// The store ops (`swarm.identities`, `swarm.history`,
+    /// `swarm.manifest`), by request ID.
+    ops: BTreeMap<u64, store_ops::OpSlot>,
+    /// What the engine hands its ops back, in order (a deferred change
+    /// made, a hold's end).
+    op_ready: VecDeque<(u64, OpInput)>,
 }
 
 /// Who waits for a feed store change a hold deferred.
@@ -670,6 +876,9 @@ pub struct Engine {
 enum Asker {
     /// A request's write.
     Ask(u64, AskId),
+    /// A store op `id`'s change (`swarm.identities`), which the op takes
+    /// back ([`ops::Op::changed`]).
+    Op(u64),
     /// `test.swarm_feed_change` `id` (D11).
     #[cfg(any(test, feature = "testhooks"))]
     Test(u64),
@@ -712,6 +921,8 @@ impl Engine {
             next_hold: 0,
             next_ticket: 0,
             tickets: BTreeMap::new(),
+            ops: BTreeMap::new(),
+            op_ready: VecDeque::new(),
         }
     }
 
@@ -730,7 +941,7 @@ impl Engine {
     /// Requests held (running, waiting, or ended with asks still open).
     #[cfg(any(test, feature = "testhooks"))]
     pub fn requests(&self) -> usize {
-        self.slots.len()
+        self.slots.len() + self.ops.len()
     }
 
     /// Main's `swarm.request` `id` from page `page`, its params read (or
@@ -781,16 +992,7 @@ impl Engine {
             Door::Run => {}
             Door::NotMoved if self.shared.stores_moved => {}
             Door::NotMoved => {
-                io.answer(
-                    id,
-                    Answer::Error(
-                        ErrorBody::new(
-                            ErrorCode::NotMoved,
-                            "main still writes the Swarm stores (they aren't in store_moved)",
-                        )
-                        .with_data(serde_json::json!({ "store": "swarm_stores" })),
-                    ),
-                );
+                io.answer(id, stores_not_moved());
                 return Ok(());
             }
             Door::Unsubscribe => {
@@ -824,11 +1026,88 @@ impl Engine {
         self.slots.insert(
             id,
             Slot {
-                phase: Phase::Waiting(params),
-                page,
+                phase: Phase::Waiting(Start::Page(params)),
+                page: Some(page),
                 page_json,
+                bound: Deadline::Swarm,
+                arrived: now,
                 binding,
                 deadline: now.saturating_add(total),
+                asks: BTreeMap::new(),
+                placed: false,
+                base: 0,
+                turn: 0,
+                answered: false,
+                written: false,
+                idle: None,
+                hashing: 0,
+                kept: 0,
+            },
+        );
+        self.admission.push_back(id);
+        self.drive(io, now)
+    }
+
+    /// Main's own node method `method` (`swarm.publish`, `swarm.feed`,
+    /// `swarm.stamps` or `swarm.upload_status`: a shell parent), request
+    /// `id`, its params as main sent them (design 0015, "Methods main
+    /// calls"). Read strictly (`invalid_argument`); a publish that keeps a
+    /// history row answers `not_moved` until the stores have moved (D3).
+    /// It takes a place in the admission gate, past which it is the
+    /// protocol error `busy` ("Budgets"); its deadline is its row's (D5):
+    /// `swarm`'s 300 s, or for `swarm.publish` none, only D13's bounds.
+    pub fn shell(
+        &mut self,
+        io: &mut impl Io,
+        now: Ms,
+        id: u64,
+        method: ShellMethod,
+        params: Option<&str>,
+    ) -> Result<(), Fault> {
+        self.deadlines(io, now)?;
+        let parsed = params
+            .ok_or_else(|| shell::Invalid("params: missing".to_owned()))
+            .and_then(|text| {
+                fc_json::parse(text).map_err(|_| shell::Invalid("params: not JSON".to_owned()))
+            })
+            .and_then(|value| ShellCall::parse(method, &value));
+        let call = match parsed {
+            Ok(call) => call,
+            Err(invalid) => {
+                io.answer(
+                    id,
+                    Answer::Error(ErrorBody::new(
+                        ErrorCode::InvalidArgument,
+                        bounded_text(&invalid.0),
+                    )),
+                );
+                return Ok(());
+            }
+        };
+        if matches!(&call, ShellCall::Publish(publish) if publish.history.is_some())
+            && !self.shared.stores_moved
+        {
+            io.answer(id, stores_not_moved());
+            return Ok(());
+        }
+        if self.running >= self.bounds.running && self.admission.len() >= self.bounds.waiting {
+            io.answer(id, protocol_busy());
+            return Ok(());
+        }
+        let bound = method.deadline();
+        let deadline = bound
+            .total_ms(None)
+            .map_or(Ms::MAX, |total| now.saturating_add(total));
+        self.slots.insert(
+            id,
+            Slot {
+                phase: Phase::Waiting(Start::Shell(Box::new(call))),
+                page: None,
+                page_json: String::new(),
+                bound,
+                arrived: now,
+                binding: None,
+                deadline,
                 asks: BTreeMap::new(),
                 placed: false,
                 base: 0,
@@ -848,6 +1127,10 @@ impl Engine {
     /// has answered, changes nothing.
     pub fn cancel(&mut self, io: &mut impl Io, now: Ms, id: u64) -> Result<(), Fault> {
         self.deadlines(io, now)?;
+        if self.ops.contains_key(&id) {
+            self.op_cancel(io, id, cancelled());
+            return self.drive(io, now);
+        }
         let Some(slot) = self.slots.get_mut(&id) else {
             return Ok(());
         };
@@ -855,8 +1138,8 @@ impl Engine {
             return Ok(());
         }
         match &mut slot.phase {
-            Phase::Running(request) => {
-                request.cancel();
+            Phase::Running(machine) => {
+                machine.cancel();
                 self.settle(io, now, id)?;
             }
             Phase::Waiting(_) | Phase::Base(_) | Phase::Done => {
@@ -879,6 +1162,10 @@ impl Engine {
         let Some((id, ask_id)) = self.sent.remove(&core) else {
             return Err(Fault("swarm_unsolicited"));
         };
+        if self.ops.contains_key(&id) {
+            self.op_response(io, now, id, ask_id, outcome)?;
+            return self.drive(io, now);
+        }
         let slot = self.slots.get_mut(&id).ok_or(Fault("swarm_unsolicited"))?;
         let ask = slot.asks.get(&ask_id).ok_or(Fault("swarm_unsolicited"))?;
         let ended = slot
@@ -996,8 +1283,8 @@ impl Engine {
             // which ends no binding.
             Verdict::Deadline => {
                 slot.asks.remove(&ask_id);
-                if let Phase::Running(request) = &mut slot.phase {
-                    request.cancel();
+                if let Phase::Running(machine) = &mut slot.phase {
+                    machine.cancel();
                 }
                 self.settle(io, now, id)?;
             }
@@ -1016,11 +1303,19 @@ impl Engine {
         io: &mut impl Io,
         now: Ms,
         tag: u64,
-        event: Event,
+        answer: VaultAnswer,
     ) -> Result<(), Fault> {
         self.deadlines(io, now)?;
         let Some((id, ask_id)) = self.vaults.remove(&tag) else {
             return Ok(());
+        };
+        if self.ops.contains_key(&id) {
+            self.op_vaulted(io, now, id, ask_id, answer)?;
+            return self.drive(io, now);
+        }
+        let VaultAnswer::Event(event) = answer else {
+            // A request's machine asks for no accounts.
+            return self.drive(io, now);
         };
         let hold = self
             .slots
@@ -1048,11 +1343,15 @@ impl Engine {
                     self.ready
                         .push_back((id, ask_id, Event::Written(written(result))));
                 }
+                Some(Asker::Op(id)) => self.op_ready.push_back((id, OpInput::Changed(result))),
                 #[cfg(any(test, feature = "testhooks"))]
                 Some(Asker::Test(id)) => io.answer(id, changed(result)),
                 None => {}
             }
         }
+        // A hold's end moves an op that waited for one (a manifest
+        // transaction that would revoke a held site's feed grant).
+        self.retry_ops();
     }
 
     /// `test.swarm_feed_change` `id` (D11): a change to the feed store
@@ -1104,6 +1403,12 @@ impl Engine {
                 let base = std::mem::take(&mut slot.base);
                 self.release(base);
             }
+        } else if let Some(op) = self.ops.get_mut(&id) {
+            op.written = true;
+            if op.answered {
+                let base = std::mem::take(&mut op.base);
+                self.release(base);
+            }
         } else if let Some(base) = self.unwritten.remove(&id) {
             self.release(base);
         }
@@ -1133,6 +1438,21 @@ impl Engine {
         for id in idle {
             self.stall(io, now, id)?;
         }
+        // Asks past their own bound in all (D13).
+        let expired: Vec<(u64, AskId)> = self
+            .slots
+            .iter()
+            .flat_map(|(id, slot)| {
+                slot.asks
+                    .iter()
+                    .filter(|(_, ask)| ask.due.is_some_and(|due| due <= now))
+                    .map(|(ask_id, _)| (*id, *ask_id))
+            })
+            .collect();
+        for (id, ask_id) in expired {
+            self.expire(io, now, id, ask_id)?;
+        }
+        self.op_tick(io, now)?;
         self.drive(io, now)
     }
 
@@ -1143,33 +1463,36 @@ impl Engine {
     /// it had it turned first. So a name check that fails then ends no
     /// binding: a deadline ends nothing.
     fn deadlines(&mut self, io: &mut impl Io, now: Ms) -> Result<(), Fault> {
+        let wait = self.bounds.wait_ms;
         let due: Vec<u64> = self
             .slots
             .iter()
-            .filter(|(_, slot)| !slot.answered && slot.deadline <= now)
+            .filter(|(_, slot)| !slot.answered && slot.due(wait).is_some_and(|due| due <= now))
             .map(|(id, _)| *id)
             .collect();
-        let ended = !due.is_empty();
+        let mut ended = !due.is_empty();
         for id in due {
             let Some(slot) = self.slots.get_mut(&id) else {
                 continue;
             };
+            let busy = slot.busy_answer();
             match &mut slot.phase {
-                Phase::Running(request) => {
+                Phase::Running(machine) => {
                     // A charge still waiting is `busy`; anything else the
                     // page's timer, `cancelled` (deviation `deadlines`).
                     if slot.asks.values().any(|ask| ask.stage == Stage::Memory) {
-                        request.busy();
+                        machine.busy();
                     } else {
-                        request.cancel();
+                        machine.cancel();
                     }
                     self.settle(io, now, id)?;
                 }
                 Phase::Waiting(_) | Phase::Base(_) | Phase::Done => {
-                    self.end_unstarted(io, id, Answer::Result(wire::error_typed(&Failure::busy())));
+                    self.end_unstarted(io, id, busy);
                 }
             }
         }
+        ended |= self.op_deadlines(io, now)?;
         if ended {
             self.drive(io, now)?;
         }
@@ -1182,12 +1505,18 @@ impl Engine {
             .slots
             .values()
             .filter(|slot| !slot.answered)
-            .map(|slot| slot.deadline);
+            .filter_map(|slot| slot.due(self.bounds.wait_ms));
         let idle = self.slots.values().filter_map(|slot| slot.idle);
+        let asks = self
+            .slots
+            .values()
+            .flat_map(|slot| slot.asks.values().filter_map(|ask| ask.due));
         deadlines
             .chain(idle)
+            .chain(asks)
             .chain(self.closes.values().copied())
             .chain(self.retiring.values().copied())
+            .chain(self.op_next_due())
             .min()
     }
 
@@ -1201,26 +1530,32 @@ impl Engine {
         loop {
             if let Some(id) = self.cancels.pop_front() {
                 if let Some(Slot {
-                    phase: Phase::Running(request),
+                    phase: Phase::Running(machine),
                     ..
                 }) = self.slots.get_mut(&id)
                 {
-                    request.cancel();
+                    machine.cancel();
                     self.settle(io, now, id)?;
                 }
                 continue;
             }
             if let Some(id) = self.granted.pop_front() {
                 if let Some(slot) = self.slots.get_mut(&id)
-                    && let Phase::Base(params) = std::mem::replace(&mut slot.phase, Phase::Done)
+                    && let Phase::Base(start) = std::mem::replace(&mut slot.phase, Phase::Done)
                 {
-                    self.start(io, now, id, params)?;
+                    self.start(io, now, id, start)?;
+                } else if self.ops.contains_key(&id) {
+                    self.op_start(io, now, id)?;
                 }
                 continue;
             }
             if let Some((id, ask, event)) = self.ready.pop_front() {
                 self.deliver(io, now, id, ask, event)?;
                 self.settle(io, now, id)?;
+                continue;
+            }
+            if let Some((id, input)) = self.op_ready.pop_front() {
+                self.op_input(io, now, id, input)?;
                 continue;
             }
             if self.pump_api()
@@ -1252,8 +1587,17 @@ impl Engine {
                         slot.base = REQUEST_CHARGE;
                         self.granted.push_back(id);
                     }
-                    None => self.release(REQUEST_CHARGE),
+                    None => match self.ops.get_mut(&id) {
+                        Some(op) => {
+                            op.base = REQUEST_CHARGE;
+                            self.granted.push_back(id);
+                        }
+                        None => self.release(REQUEST_CHARGE),
+                    },
                 },
+                Waiter::Ask(id, ask_id) if self.ops.contains_key(&id) => {
+                    self.op_charged(id, ask_id);
+                }
                 Waiter::Ask(id, ask_id) => self.charged(id, ask_id),
             }
         }
@@ -1308,32 +1652,46 @@ impl Engine {
         let Some(id) = self.admission.pop_front() else {
             return Ok(false);
         };
+        if self.ops.contains_key(&id) {
+            return self.op_admitted(io, now, id).map(|()| true);
+        }
         let Some(slot) = self.slots.get_mut(&id) else {
             return Ok(true);
         };
-        let Phase::Waiting(params) = std::mem::replace(&mut slot.phase, Phase::Done) else {
+        let Phase::Waiting(start) = std::mem::replace(&mut slot.phase, Phase::Done) else {
             return Ok(true);
         };
         slot.placed = true;
         self.running += 1;
         if self.memory.reserve(Waiter::Base(id), REQUEST_CHARGE) {
             slot.base = REQUEST_CHARGE;
-            self.start(io, now, id, params)?;
+            self.start(io, now, id, start)?;
         } else {
-            slot.phase = Phase::Base(params);
+            slot.phase = Phase::Base(start);
         }
         Ok(true)
     }
 
     /// Starts the request's machine, its base reserved.
-    fn start(&mut self, io: &mut impl Io, now: Ms, id: u64, params: Params) -> Result<(), Fault> {
+    fn start(&mut self, io: &mut impl Io, now: Ms, id: u64, start: Start) -> Result<(), Fault> {
         let Some(slot) = self.slots.get_mut(&id) else {
             return Ok(());
         };
+        let params = match start {
+            Start::Page(params) => params,
+            Start::Shell(call) => {
+                let mut world = StepWorld::new(&mut self.shared, io.wall_ms());
+                let shell = Shell::start(*call, &mut world);
+                drop(world);
+                slot.phase = Phase::Running(Machine::Shell(Box::new(shell)));
+                return self.settle(io, now, id);
+            }
+        };
+        let key = slot.page.as_ref().map_or("", |page| page.origin.as_str());
         let call = Call {
             method: params.method,
             params: params.params,
-            key: JsString::from(slot.page.origin.as_str()),
+            key: JsString::from(key),
             approval: params.approval,
         };
         let mut world = StepWorld::new(&mut self.shared, io.wall_ms());
@@ -1341,7 +1699,7 @@ impl Engine {
         drop(world);
         match started {
             Ok(request) => {
-                slot.phase = Phase::Running(Box::new(request));
+                slot.phase = Phase::Running(Machine::Page(Box::new(request)));
                 self.settle(io, now, id)
             }
             Err(NotBuilt(_)) => {
@@ -1368,14 +1726,14 @@ impl Engine {
         event: Event,
     ) -> Result<(), Fault> {
         let Some(Slot {
-            phase: Phase::Running(request),
+            phase: Phase::Running(machine),
             ..
         }) = self.slots.get_mut(&id)
         else {
             return Ok(());
         };
         let mut world = StepWorld::new(&mut self.shared, io.wall_ms());
-        request.answer(&mut world, ask, event);
+        machine.answer(&mut world, ask, event);
         Ok(())
     }
 
@@ -1385,9 +1743,9 @@ impl Engine {
         loop {
             let effects = match self.slots.get_mut(&id) {
                 Some(Slot {
-                    phase: Phase::Running(request),
+                    phase: Phase::Running(machine),
                     ..
-                }) => request.take_effects(),
+                }) => machine.take_effects(),
                 _ => return Ok(()),
             };
             if effects.is_empty() {
@@ -1400,18 +1758,13 @@ impl Engine {
         let Some(slot) = self.slots.get_mut(&id) else {
             return Ok(());
         };
-        let Phase::Running(request) = &slot.phase else {
+        let Phase::Running(machine) = &slot.phase else {
             return Ok(());
         };
         if !slot.answered
-            && let Some(outcome) = request.outcome()
+            && let Some(answer) = machine.answer_of()
         {
-            let answer = match outcome {
-                Outcome::Result(value) => Answer::Result(wire::result_typed(value)),
-                Outcome::Error(failure) => Answer::Result(wire::error_typed(failure)),
-                Outcome::Cancelled => cancelled(),
-                Outcome::Protocol(protocol) => return Err(Fault(category(*protocol))),
-            };
+            let answer = answer?;
             slot.answered = true;
             io.answer(id, answer);
             // Its place, its topics and its upload's turn go with its
@@ -1458,7 +1811,7 @@ impl Engine {
             Effect::Ask(ask) => self.ask(io, now, id, ask.id, ask.need, ask.charge),
             Effect::Cancel(ask) => self.cancel_ask(io, now, id, ask),
             Effect::Credit { id: ask, bytes } => self.credit(io, id, ask, bytes),
-            Effect::Body { id: ask, out } => self.body_out(io, id, ask, out),
+            Effect::Body { id: ask, out } => self.body_out(io, now, id, ask, out),
         }
     }
 
@@ -1529,6 +1882,12 @@ impl Engine {
             // a stream's slot.
             Need::Part(_) => Stage::Streams,
             Need::Hash(_) => return,
+            // No page to recheck (main's own methods ask none): every guard
+            // that would ask fails.
+            Need::Live if slot.page.is_none() => {
+                self.ready.push_back((id, ask_id, Event::Live(MOVED)));
+                return;
+            }
             Need::Live => match slot.binding.clone() {
                 // A binding already ended, by any family's check, or a
                 // transport key that isn't `ipns://<key>`: the name fails,
@@ -1568,10 +1927,20 @@ impl Engine {
                 self.vaults.insert(tag, (id, ask_id));
                 Stage::Vault(tag)
             }
+            // Main's own SOC (`swarm.feed`'s update): no page, so no page
+            // decision; the vault signs only with the Bee wallet key (SW-1).
+            Need::Sign(soc) if slot.page.is_none() => {
+                self.next_vault += 1;
+                let tag = self.next_vault;
+                io.vault(tag, VaultAsk::OwnSign(Box::new(soc.clone())));
+                self.vaults.insert(tag, (id, ask_id));
+                Stage::Vault(tag)
+            }
             // SW-1's hold from this ask until the vault answers (design
             // 0015, "SW-1 in the core"), and D15's inputs with the SOC.
             Need::Sign(soc) => {
-                let key = JsString::from(slot.page.origin.as_str());
+                let origin = slot.page.as_ref().map_or("", |page| page.origin.as_str());
+                let key = JsString::from(origin);
                 if let Some(held) = &soc.hold {
                     self.next_hold += 1;
                     hold = Some(HoldId(self.next_hold));
@@ -1581,7 +1950,7 @@ impl Engine {
                 }
                 let ask = SignAsk {
                     soc: soc.clone(),
-                    key: slot.page.origin.clone(),
+                    key: origin.to_owned(),
                     feed_grant: self.shared.keeper.store().has_feed_grant(&key),
                 };
                 self.next_vault += 1;
@@ -1591,6 +1960,17 @@ impl Engine {
                 Stage::Vault(tag)
             }
             Need::Write(_) => return,
+        };
+        // D13, under a parent with no total deadline: the ask's own bound.
+        let (total, idle_watch) = match slot.bound {
+            Deadline::Swarm => (None, false),
+            Deadline::Idle => match ask_bound(Deadline::Idle, &need) {
+                AskBound::Total(_) | AskBound::BodyThenReply { .. } => {
+                    (Some(self.bounds.whole_ms), false)
+                }
+                AskBound::Idle(_) => (None, true),
+                AskBound::Deadline | AskBound::None => (None, false),
+            },
         };
         slot.asks.insert(
             ask_id,
@@ -1605,6 +1985,10 @@ impl Engine {
                 closed: false,
                 body_ended: false,
                 hold,
+                total,
+                due: None,
+                idle_watch,
+                since: now,
             },
         );
         if stage == Stage::Outbox {
@@ -1797,6 +2181,9 @@ impl Engine {
         let Some((id, ask_id)) = self.outbox.pop_front() else {
             return Ok(false);
         };
+        if self.ops.contains_key(&id) {
+            return self.op_send(io, now, id, ask_id);
+        }
         let Some(slot) = self.slots.get_mut(&id) else {
             return Ok(true);
         };
@@ -1853,6 +2240,11 @@ impl Engine {
         match io.send(outgoing) {
             Sent::Id(core) => {
                 ask.stage = Stage::Sent(core);
+                // A whole node reply's bound in all runs from now (D13);
+                // a call whose body streams has its from its body's end.
+                if !ask.streams_body() {
+                    ask.due = ask.total.map(|total| now.saturating_add(total));
+                }
                 let watched = ask.watched();
                 self.sent.insert(core, (id, ask_id));
                 // An upload's stream is out: its idle bound runs (D13).
@@ -1914,6 +2306,38 @@ fn changed(result: Result<ChangeAnswer, ChangeError>) -> Answer {
 /// 0001's `cancelled`.
 fn cancelled() -> Answer {
     Answer::Error(ErrorBody::new(ErrorCode::Cancelled, "Cancelled"))
+}
+
+/// Admission's `busy` for main's own methods and the chrome's (D5): the
+/// protocol error.
+fn protocol_busy() -> Answer {
+    Answer::Error(ErrorBody::new(ErrorCode::Busy, "the swarm thread is busy"))
+}
+
+/// `not_moved` for a method that touches the Swarm stores before
+/// `core.hello` names `swarm_stores` in `store_moved` (D3).
+fn stores_not_moved() -> Answer {
+    Answer::Error(
+        ErrorBody::new(
+            ErrorCode::NotMoved,
+            "main still writes the Swarm stores (they aren't in store_moved)",
+        )
+        .with_data(serde_json::json!({ "store": "swarm_stores" })),
+    )
+}
+
+/// An `invalid_argument`'s text from a reader's own (which can name a
+/// member main sent), at most 256 bytes.
+fn bounded_text(text: &str) -> String {
+    const MOST: usize = 256;
+    if text.len() <= MOST {
+        return text.to_owned();
+    }
+    let mut end = MOST;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
 }
 
 /// A machine's protocol outcome's category (D5: it ends the connection).

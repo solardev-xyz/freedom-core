@@ -57,11 +57,13 @@ impl Ask {
 
     /// Whether the upload's idle bound watches it (D13): a part, or a call
     /// whose body hasn't had its terminal, out at main and still the
-    /// machine's.
+    /// machine's; and under a parent with no total deadline, any ask of
+    /// main whose progress it sees (a readiness check, a streamed reply).
     pub(super) fn watched(&self) -> bool {
         let out = matches!(self.stage, Stage::Sent(_) | Stage::Open(_));
-        let upload =
-            matches!(self.need, Need::Part(_)) || (self.streams_body() && !self.body_ended);
+        let upload = self.idle_watch
+            || matches!(self.need, Need::Part(_))
+            || (self.streams_body() && !self.body_ended);
         out && upload && !self.cancelled && !self.closed
     }
 }
@@ -338,8 +340,17 @@ impl Engine {
         }
     }
 
-    /// The next part of a call's body, to main's `swarm.body` for it.
-    pub(super) fn body_out(&mut self, io: &mut impl Io, id: u64, ask_id: AskId, out: BodyOut) {
+    /// The next part of a call's body, to main's `swarm.body` for it. At
+    /// its terminal, the call's bound in all for its reply starts, under a
+    /// parent with no total deadline (D13).
+    pub(super) fn body_out(
+        &mut self,
+        io: &mut impl Io,
+        now: Ms,
+        id: u64,
+        ask_id: AskId,
+        out: BodyOut,
+    ) {
         let Some(body) = self.body_of.get(&(id, ask_id)).copied() else {
             // The machine writes a body only once main asked for it.
             crate::log::warn("swarm body without its swarm.body", serde_json::json!({}));
@@ -353,6 +364,7 @@ impl Engine {
                 .and_then(|slot| slot.asks.get_mut(&ask_id))
             {
                 ask.body_ended = true;
+                ask.due = ask.total.map(|total| now.saturating_add(total));
             }
         }
         io.body(body, out);
@@ -437,6 +449,49 @@ impl Engine {
         } else if slot.idle.is_none() {
             slot.idle = Some(now.saturating_add(idle_ms));
         }
+    }
+
+    /// Request `id`'s ask `ask_id` went past its bound in all (D13: a whole
+    /// node reply under a parent with no total deadline): cancelled at
+    /// main, read by the machine as `failed: error`, its answer dropped
+    /// when it comes; its charge and its slot stay until then.
+    pub(super) fn expire(
+        &mut self,
+        io: &mut impl Io,
+        now: Ms,
+        id: u64,
+        ask_id: AskId,
+    ) -> Result<(), Fault> {
+        let idle_ms = self.bounds.idle_ms;
+        let Some(ask) = self
+            .slots
+            .get_mut(&id)
+            .and_then(|slot| slot.asks.get_mut(&ask_id))
+        else {
+            return Ok(());
+        };
+        ask.due = None;
+        if ask.cancelled || ask.closed {
+            return Ok(());
+        }
+        ask.cancelled = true;
+        ask.closed = true;
+        let event = match ask.stage {
+            Stage::Open(core) => {
+                io.cancel(core);
+                self.retiring.insert(core, now.saturating_add(idle_ms));
+                Event::Abort(Abort::Stalled)
+            }
+            Stage::Sent(core) => {
+                io.cancel(core);
+                Event::Failed(Failed::Error)
+            }
+            _ => return Ok(()),
+        };
+        crate::log::info("swarm ask past its bound", serde_json::json!({}));
+        self.deliver(io, now, id, ask_id, event)?;
+        self.settle(io, now, id)?;
+        self.drive(io, now)
     }
 
     /// Request `id`'s upload made no progress for the idle bound (D13):

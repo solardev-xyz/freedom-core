@@ -260,6 +260,19 @@ impl Store {
         Some(Records::Read(meta))
     }
 
+    /// `getDerivedWallets()` read only, the file as it stands whether moved
+    /// or not, for the swarm thread's store ops (design 0015, D7): its
+    /// mnemonic accounts' addresses derived against `state` (the stored
+    /// ones while locked), the first list's default answered, not written.
+    /// A file that can't be read lists none, as before the move.
+    pub fn listed(&self, state: &VaultState) -> Result<Vec<JsValue>, ErrorBody> {
+        let meta = match read_file(&self.path(), vault_meta::MAX_FILE_BYTES) {
+            Read::Bytes(bytes) => VaultMeta::load(&bytes).unwrap_or_else(|_| VaultMeta::none()),
+            Read::Missing | Read::Unreadable => VaultMeta::none(),
+        };
+        meta.listed(|indices| derive_all(state, indices))
+    }
+
     /// `afterUnlock`'s migration, once moved: a file without `addresses`
     /// gains the unlock's (design 0013, "The unlock's migration"). A failed
     /// write doesn't fail the unlock: it is logged, and the next unlock

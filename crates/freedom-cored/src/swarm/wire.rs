@@ -169,6 +169,14 @@ pub fn subscribe_params(parent: u64, subscription: &Subscription) -> Vec<u8> {
     .into_bytes()
 }
 
+/// D6's `shell.swarm_manifest { for, url }`: main's fetch of a check's
+/// manifest, `bzz://<host>/freedom-manifest.json`.
+pub fn manifest_params(parent: u64, url: &str) -> Vec<u8> {
+    serde_json::json!({ "for": parent, "url": url })
+        .to_string()
+        .into_bytes()
+}
+
 /// `shell.swarm_unsubscribe { id }` (D16): main's id for the subscription,
 /// as it gave it. No `for`: a close can outlive its request.
 pub fn unsubscribe_params(id: &JsString) -> Vec<u8> {
@@ -280,6 +288,36 @@ fn failed_class(name: &str) -> Option<Failed> {
         "busy" => Failed::Busy,
         "stopped" => Failed::Stopped,
         _ => return None,
+    })
+}
+
+/// D6's `shell.swarm_manifest`'s answer: `{ status, body_base64 }`, at
+/// most 8 KiB and a byte of the manifest's body (main reads no more), or `{
+/// failed }` with `failed`'s closed set (the fetch threw, or its body
+/// stalled or broke), which the check reads alike.
+pub fn manifest_reply(text: &str) -> Option<fc_swarm_provider::ops::Fetch> {
+    use fc_swarm_provider::ops::Fetch;
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Fetched<'a> {
+        status: u16,
+        #[serde(borrow)]
+        body_base64: &'a str,
+    }
+    if let Some(failed) = object::<FailedReply>(text) {
+        return failed_class(&failed.failed).map(|_| Fetch::Failed);
+    }
+    let fetched: Fetched<'_> = object(text)?;
+    if !(100..=599).contains(&fetched.status) {
+        return None;
+    }
+    let body = decode_base64(fetched.body_base64)?;
+    if body.len() > super::engine::MANIFEST_MOST {
+        return None;
+    }
+    Some(Fetch::Answered {
+        status: fetched.status,
+        body,
     })
 }
 
@@ -403,6 +441,16 @@ pub fn error_typed(failure: &Failure) -> String {
     }
     let mut out = String::from(r#"{"error_typed":"#);
     typed_into(&Value::Object(members), &mut out);
+    out.push('}');
+    out
+}
+
+/// `{ error_typed: <value> }`: what main's own method threw, in today's
+/// shape (a service's `{ message, code?, status?, capacity? }`, a store's
+/// `{ name, message, code? }`).
+pub fn thrown_typed(value: &Value) -> String {
+    let mut out = String::from(r#"{"error_typed":"#);
+    typed_into(value, &mut out);
     out.push('}');
     out
 }

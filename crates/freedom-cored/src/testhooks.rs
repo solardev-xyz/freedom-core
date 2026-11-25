@@ -565,8 +565,15 @@ pub fn swarm_bounds(mut bounds: crate::swarm::engine::Bounds) -> crate::swarm::e
     if let Some(streams) = read("FREEDOM_CORED_TEST_SWARM_STREAMS") {
         bounds.streams = streams;
     }
+    // D13's 60 s figures: the idle bound, a wait for a place, a base or a
+    // charge, and `shell.swarm_manifest`'s bound.
     if let Some(idle) = millis("FREEDOM_CORED_TEST_SWARM_IDLE_MS") {
         bounds.idle_ms = idle;
+        bounds.wait_ms = idle;
+    }
+    // D13's 300 s for a whole node reply under `swarm.publish`.
+    if let Some(whole) = millis("FREEDOM_CORED_TEST_SWARM_WHOLE_MS") {
+        bounds.whole_ms = whole;
     }
     bounds
 }
