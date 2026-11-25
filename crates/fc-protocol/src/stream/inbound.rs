@@ -25,8 +25,10 @@
 //! **Codes, per request** (design 0015, Streams): each request carries the
 //! codes main may end its stream with, given when the core sends it
 //! ([`Inbound::request_with`]): a piece's three ([`Codes::Piece`], the
-//! default), or a `shell.swarm_api` body's, which adds `too_large`
-//! ([`Codes::SwarmPiece`]). A retiring stream keeps its codes. An abort for
+//! default), a `shell.swarm_api` body's, which adds `too_large`
+//! ([`Codes::SwarmPiece`]), or a `shell.swarm_part` part's, whose
+//! `body_stream_error` alone may name its file's error code
+//! ([`Codes::SwarmPart`]). A retiring stream keeps its codes. An abort for
 //! an ID the core holds no record of is checked against every code a
 //! stream of the core's may end with, before its ID is: so a code no
 //! stream takes is refused as such, as before the codes were per request.
@@ -112,7 +114,7 @@ pub struct InboundInfo {
 
 /// The codes some stream of the core's may end with: an abort for no
 /// record of the core's is checked against these.
-const ANY_INBOUND: [Codes; 2] = [Codes::Piece, Codes::SwarmPiece];
+const ANY_INBOUND: [Codes; 3] = [Codes::Piece, Codes::SwarmPiece, Codes::SwarmPart];
 
 #[derive(Debug)]
 struct Record {
@@ -243,8 +245,8 @@ impl Inbound {
         // of its takes.
         if let StreamFrame::Abort { abort, .. } = frame {
             let allowed = match self.entries.get(&id) {
-                Some(record) => record.codes.allows(abort.code),
-                None => ANY_INBOUND.iter().any(|codes| codes.allows(abort.code)),
+                Some(record) => record.codes.allows_abort(abort),
+                None => ANY_INBOUND.iter().any(|codes| codes.allows_abort(abort)),
             };
             if !allowed {
                 return Err(self.fail(StreamError::AbortCode(id)));

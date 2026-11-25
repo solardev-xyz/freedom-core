@@ -161,7 +161,8 @@ impl Duplex {
 
     /// The core sent request `id`, whose stream main ends only with
     /// `codes` ([`Inbound::request_with`]): [`Codes::SwarmPiece`] for a
-    /// `shell.swarm_api` body (design 0015). As [`Duplex::ask`] otherwise.
+    /// `shell.swarm_api` body, [`Codes::SwarmPart`] for a `shell.swarm_part`
+    /// part (design 0015). As [`Duplex::ask`] otherwise.
     pub fn ask_with(&mut self, id: u64, codes: Codes) -> Result<(), StreamError> {
         self.alive()?;
         self.inbound.request_with(id, codes)
@@ -323,7 +324,7 @@ impl Duplex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream::{Abort, AbortCode, InboundState};
+    use crate::stream::{Abort, AbortCode, InboundState, SendError};
 
     /// Both records of owed credit move together.
     fn check(d: &Duplex) {
@@ -584,6 +585,68 @@ mod tests {
             }),
             Err(StreamError::AbortCode(6))
         );
+    }
+
+    /// Design 0015: a part's `body_stream_error` may name its file's error
+    /// code; a piece's or a node body's may not, nor a part's other codes,
+    /// and a retiring part keeps its codes.
+    #[test]
+    fn only_a_part_names_its_files_error_code() {
+        let unreadable = || {
+            Abort::new(AbortCode::BodyStreamError, "read failed")
+                .with_error_code("EIO")
+                .unwrap()
+        };
+        let mut d = Duplex::swarm(512 << 10);
+        d.ask_with(1, Codes::SwarmPart).unwrap();
+        d.answered_sized(1, 3).unwrap();
+        d.receive(StreamFrame::Data { id: 1, bytes: &[7] }).unwrap();
+        assert_eq!(
+            d.receive(StreamFrame::Abort {
+                id: 1,
+                abort: unreadable()
+            }),
+            Ok(Received::Arrived(Arrived::Abort {
+                id: 1,
+                abort: unreadable()
+            }))
+        );
+        // Retiring, it keeps a part's codes: dropped.
+        d.ask_with(2, Codes::SwarmPart).unwrap();
+        d.answered_sized(2, 3).unwrap();
+        assert_eq!(d.withdraw(2), Retire::SendCancel);
+        assert_eq!(
+            d.receive(StreamFrame::Abort {
+                id: 2,
+                abort: unreadable()
+            }),
+            Ok(Received::Arrived(Arrived::Dropped { id: 2 }))
+        );
+        assert_eq!(d.failed(), None);
+        // A part's other code with a name, and a piece's or a node body's
+        // `body_stream_error` with one, are protocol errors.
+        let stalled = Abort::new(AbortCode::Stalled, "idle")
+            .with_error_code("EIO")
+            .unwrap();
+        for (codes, abort) in [
+            (Codes::SwarmPart, stalled),
+            (Codes::Piece, unreadable()),
+            (Codes::SwarmPiece, unreadable()),
+        ] {
+            let mut d = Duplex::swarm(512 << 10);
+            d.ask_with(3, codes).unwrap();
+            d.answered(3, true).unwrap();
+            assert_eq!(
+                d.receive(StreamFrame::Abort { id: 3, abort }),
+                Err(StreamError::AbortCode(3)),
+                "{codes:?}"
+            );
+        }
+        // The core's uploads never name one.
+        let mut d = Duplex::swarm(512 << 10);
+        d.request(4).unwrap();
+        d.sender_mut().head(4, b"{}".to_vec(), true).unwrap();
+        assert_eq!(d.sender_mut().abort(4, &unreadable()), Err(SendError::Code));
     }
 
     /// Design 0015: the Swarm thread's uploads end only with an upload's

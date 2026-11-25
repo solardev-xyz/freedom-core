@@ -119,9 +119,10 @@ fn frame_json(frame: &Frame) -> Result<Json, String> {
     Ok(match decoded {
         StreamFrame::Data { id, bytes } => json!(["data", id, { "hex": hex::encode(bytes) }]),
         StreamFrame::End { id } => json!(["end", id]),
-        StreamFrame::Abort { id, abort } => {
-            json!(["abort", id, abort.code.as_str(), abort.message])
-        }
+        StreamFrame::Abort { id, abort } => match abort.error_code {
+            None => json!(["abort", id, abort.code.as_str(), abort.message]),
+            Some(name) => json!(["abort", id, abort.code.as_str(), abort.message, name]),
+        },
         StreamFrame::Credit { id, bytes } => json!(["credit", id, bytes]),
     })
 }
@@ -379,6 +380,7 @@ fn ask_codes(name: &Json) -> Codes {
         None => Codes::Piece,
         Some("piece") => Codes::Piece,
         Some("swarm_piece") => Codes::SwarmPiece,
+        Some("swarm_part") => Codes::SwarmPart,
         Some(other) => panic!("codes {other}"),
     }
 }
@@ -561,10 +563,14 @@ impl Service {
                 let sent = if action[0] == "end" {
                     StreamFrame::End { id }
                 } else {
-                    StreamFrame::Abort {
-                        id,
-                        abort: Abort::new(code(&action[2]), "aborted"),
-                    }
+                    // An abort that names its part's file error code
+                    // (design 0015).
+                    let abort = Abort::new(code(&action[2]), "aborted");
+                    let abort = match action.get(3) {
+                        Some(name) => abort.with_error_code(name.as_str().unwrap()).unwrap(),
+                        None => abort,
+                    };
+                    StreamFrame::Abort { id, abort }
                 };
                 sent.encode(&mut frame).unwrap();
                 protocol(self.main_sends(&frame), |received| match received {
