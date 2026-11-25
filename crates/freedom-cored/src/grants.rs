@@ -405,3 +405,67 @@ pub fn write_swarm<T>(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     write_slot(&mut *store, path, change, false).0
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    /// D2: the loop's write of the shared Swarm store and the swarm
+    /// thread's each hold the store's lock from the copy they change to the
+    /// change put in place, the file written between: a thread's write
+    /// that comes while the loop's runs waits for it, and neither change
+    /// is lost (a copy taken, the lock let go and the copy put back would
+    /// drop the thread's).
+    #[test]
+    fn the_loop_and_the_thread_write_the_swarm_store_in_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut grants = Grants::new();
+        grants.configure(dir.path().to_path_buf(), vec![StoreKind::Swarm], 0);
+        let handle = grants.swarm_handle();
+        let path = grants.swarm_path().unwrap();
+        let mut thread = None;
+        grants
+            .write::<SwarmStore, _>(|store| {
+                // The lock is held while the change is made.
+                assert!(handle.try_lock().is_err());
+                let (handle, path) = (Arc::clone(&handle), path.clone());
+                thread = Some(std::thread::spawn(move || {
+                    write_swarm(&handle, &path, |store| {
+                        store.connect("https://b.example", 2)
+                    })
+                    .unwrap()
+                    .effect
+                }));
+                // The thread's write waits for this one.
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                store.connect("https://a.example", 1)
+            })
+            .unwrap();
+        assert_eq!(thread.unwrap().join().unwrap(), Effect::Widening);
+        let file = SwarmStore::load(&std::fs::read(&path).unwrap()).unwrap();
+        for store in [&*handle.lock().unwrap(), &file] {
+            assert!(store.entry("https://a.example").is_some());
+            assert!(store.entry("https://b.example").is_some());
+        }
+        // The thread's write holds the lock as it changes the store too.
+        write_swarm(&handle, &path, |store| {
+            assert!(handle.try_lock().is_err());
+            store.revoke("https://a.example")
+        })
+        .unwrap();
+        let file = SwarmStore::load(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(file.entry("https://a.example").is_none());
+        assert!(
+            grants
+                .view::<SwarmStore>(0)
+                .entry("https://a.example")
+                .is_none()
+        );
+        // Not moved: no path for the thread, and the loop writes nothing.
+        let mut unmoved = Grants::new();
+        unmoved.configure(dir.path().to_path_buf(), Vec::new(), 0);
+        assert!(unmoved.swarm_path().is_none());
+    }
+}

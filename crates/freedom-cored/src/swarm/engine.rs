@@ -76,9 +76,17 @@
 //!   the signature, and their callers are answered. A late signature is
 //!   dropped. The sign ask carries D15's inputs: the page's key and the
 //!   site's feed grant in the keeper's store.
+//! - **Main's own methods** (design 0015, "Methods main calls"; D5): the
+//!   shell parents (`swarm.publish`, `swarm.feed`, `swarm.stamps`,
+//!   `swarm.upload_status`, [`Engine::shell`]) run here as a page's
+//!   request does, without a page, in the same gate (past it the protocol
+//!   error `busy`), `swarm.publish` with no total deadline but D13's
+//!   bounds: 60 s for a place, its base or a charge, a whole node reply's
+//!   300 s, and the idle bound on every other ask of main. The store ops
+//!   (`swarm.identities`, `swarm.history`, `swarm.manifest`) are the
+//!   [`store_ops`] module's.
 //! - **What this step leaves for later:** the mining lane (PR 8: until it
-//!   comes every GSOC search is answered [`Mined::Off`], mining off) and
-//!   main's own methods (PR 9).
+//!   comes every GSOC search is answered [`Mined::Off`], mining off).
 //!
 //! [`memory`]: super::memory
 //! [`CLOSE_BOUND_MS`]: fc_swarm_provider::machine::CLOSE_BOUND_MS
