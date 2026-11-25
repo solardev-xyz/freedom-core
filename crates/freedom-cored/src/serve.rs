@@ -69,7 +69,7 @@ use crate::keystore::client::DesktopKeyStore;
 use crate::requests::{self, Owner, Requests};
 use crate::secrets::Secrets;
 use crate::swarm::thread as swarm;
-use crate::transport::{self, Allowance, Credits, Link, Pending, StreamKey};
+use crate::transport::{self, Allowance, Credits, Link, Pending, Route, StreamKey};
 use crate::vault::{FileSnapshot, Finished, NodeRecovery, Out, Vault};
 use crate::worker::Worker;
 use crate::{chain, gate, hardening, journal, log, naming};
@@ -695,20 +695,21 @@ pub fn run(options: &Options) -> Exit {
                     break exit;
                 }
             }
-            // A frame for a body whose route the swarm thread closed: main
-            // sent it after answering the body's call, or cancelling it
-            // (design 0015, D4).
-            Ok(Event::Stream(mark)) if core.requests.routes().closed(mark.key()) => {
-                log::error(
-                    "protocol error",
-                    serde_json::json!({ "category": "stream_closed" }),
-                );
-                break Exit::Protocol;
-            }
             // On to the stream's owner at once, in the order read, so a
-            // piece's data follows its head there (design 0015, D4).
-            Ok(Event::Stream(mark)) => match core.requests.routes().owner(mark.key()) {
-                Owner::Dweb => {
+            // piece's data follows its head there (design 0015, D4). Its
+            // route is read in one step: its owner, or closed.
+            Ok(Event::Stream(mark)) => match core.requests.routes().route(mark.key()) {
+                // A frame for a body whose route the swarm thread closed:
+                // main sent it after answering the body's call, or
+                // cancelling it (design 0015, D4).
+                Route::Closed => {
+                    log::error(
+                        "protocol error",
+                        serde_json::json!({ "category": "stream_closed" }),
+                    );
+                    break Exit::Protocol;
+                }
+                Route::Owner(Owner::Dweb) => {
                     let Some(thread) = core.dweb.as_ref() else {
                         // The reader takes stream frames only after the
                         // hello, which starts the thread.
@@ -720,7 +721,7 @@ pub fn run(options: &Options) -> Exit {
                 }
                 // Its parts, node bodies and `swarm.body` credit (design
                 // 0015, D4).
-                Owner::Swarm => {
+                Route::Owner(Owner::Swarm) => {
                     let Some(thread) = core.swarm.as_ref() else {
                         break Exit::Internal;
                     };
@@ -729,7 +730,7 @@ pub fn run(options: &Options) -> Exit {
                     }
                 }
                 // No other owner registers a route.
-                Owner::Naming | Owner::Chain | Owner::KeyStore | Owner::Eip1193 => {
+                Route::Owner(Owner::Naming | Owner::Chain | Owner::KeyStore | Owner::Eip1193) => {
                     break Exit::Internal;
                 }
             },

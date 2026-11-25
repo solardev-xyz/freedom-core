@@ -213,8 +213,11 @@ impl Receiver {
         {
             return Err(self.fail(StreamError::Frame(error)));
         }
+        // A code the other side never sends, or the error code name only a
+        // part main streams to the core may carry (design 0015), is a
+        // protocol error.
         if let StreamFrame::Abort { abort, .. } = &frame
-            && !self.codes.allows(abort.code)
+            && !self.codes.allows_abort(abort)
         {
             return Err(self.fail(StreamError::AbortCode(id)));
         }
@@ -464,6 +467,20 @@ mod tests {
                     assert_eq!(got, Err(StreamError::AbortCode(1)), "{code:?}");
                     assert_eq!(got.unwrap_err().category(), "abort_code");
                 }
+                // A part's error code name (design 0015) is never a service
+                // body's or a verified body's, whatever its code.
+                let mut r = make();
+                r.request(1).unwrap();
+                assert_eq!(r.reply(1, true), Ok(Replied::Deliver));
+                let named = Abort::new(code, "m").with_error_code("EIO").unwrap();
+                assert_eq!(
+                    r.receive(StreamFrame::Abort {
+                        id: 1,
+                        abort: named
+                    }),
+                    Err(StreamError::AbortCode(1)),
+                    "{codes:?} {code:?}"
+                );
             }
         }
     }

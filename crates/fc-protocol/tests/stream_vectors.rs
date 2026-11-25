@@ -952,12 +952,14 @@ impl Main {
             }
             "abort" => {
                 let mut frame = Vec::new();
-                StreamFrame::Abort {
-                    id,
-                    abort: Abort::new(code(&action[2]), "aborted"),
-                }
-                .encode(&mut frame)
-                .unwrap();
+                // An abort that names its part's file error code (design
+                // 0015), which no service sends.
+                let abort = Abort::new(code(&action[2]), "aborted");
+                let abort = match action.get(3) {
+                    Some(name) => abort.with_error_code(name.as_str().unwrap()).unwrap(),
+                    None => abort,
+                };
+                StreamFrame::Abort { id, abort }.encode(&mut frame).unwrap();
                 match protocol(self.feed(&frame), delivered) {
                     got if got == json!({ "abort": action[2] }) => json!("abort"),
                     got => got,

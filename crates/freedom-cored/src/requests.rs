@@ -812,8 +812,14 @@ mod tests {
             expect,
         );
         assert_eq!(swarm, Dispatch::Sent(1));
-        assert_eq!(requests.routes().owner(StreamKey::Piece(1)), Owner::Swarm);
-        assert_eq!(requests.routes().owner(StreamKey::Body(1)), Owner::Dweb);
+        assert_eq!(
+            requests.routes().route(StreamKey::Piece(1)),
+            crate::transport::Route::Owner(Owner::Swarm)
+        );
+        assert_eq!(
+            requests.routes().route(StreamKey::Body(1)),
+            crate::transport::Route::Owner(Owner::Dweb)
+        );
         assert_eq!(pending.remove(1), Some(103_384));
         // Registered before it was queued: whoever reads the queue finds it.
         assert_eq!(written(&rx), [1]);
@@ -839,7 +845,10 @@ mod tests {
             Dispatch::Sent(3)
         );
         assert_eq!(requests.routes().len(), 1);
-        assert_eq!(requests.routes().owner(StreamKey::Piece(2)), Owner::Dweb);
+        assert_eq!(
+            requests.routes().route(StreamKey::Piece(2)),
+            crate::transport::Route::Owner(Owner::Dweb)
+        );
         assert_eq!(pending.remove(2), Some(fc_protocol::frame::MAX_MESSAGE));
         assert_eq!(pending.remove(3), Some(fc_protocol::frame::MAX_MESSAGE));
         // A request that never goes registers nothing.
