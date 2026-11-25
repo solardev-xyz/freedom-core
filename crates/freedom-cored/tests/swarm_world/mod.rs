@@ -227,13 +227,11 @@ impl Main {
             "type": "request", "id": id, "method": "test.swarm_world", "params": params,
             "context": { "caller": "shell" },
         }));
-        let response = loop {
-            let message = self.recv();
-            if message["type"] == "response" && message["id"] == id {
-                break message;
-            }
-            panic!("{message}");
-        };
+        let response = self.recv();
+        assert!(
+            response["type"] == "response" && response["id"] == id,
+            "{response}"
+        );
         assert!(response["result"].is_object(), "{response}");
         response["result"].clone()
     }
