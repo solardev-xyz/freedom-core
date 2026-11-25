@@ -43,7 +43,7 @@ use fc_json::{JsString, JsValue};
 pub mod feeds;
 pub mod history;
 pub mod manifests;
-mod origin;
+pub(crate) mod origin;
 
 /// The class of an error the reference throws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -159,8 +159,9 @@ async function prepareWalks(env, methods) {
     if (size <= 4096 || size > B) continue;
     walks.set(tree.root.address, walkOf(tree.root.address, size, plainIntermediates(tree)));
   }
-  // A root whose span carries a redundancy level, over two plain leaves.
-  walks.set(env.levelRoot.address, walkOf(env.levelRoot.address, 8192, []));
+  // A root whose span carries a redundancy level: design 0009's level-1
+  // tree, its two leaves read as one stream.
+  walks.set(env.levelRoot.address, walkOf(env.levelRoot.address, env.levelRoot.size, []));
   env.walks = walks;
 }
 

@@ -706,7 +706,10 @@ name = "fc-swarm-provider"
 version = "0.28.0"
 dependencies = [
  "base64",
+ "fc-evm",
  "fc-json",
+ "fc-swarm",
+ "k256",
  "rusqlite",
  "sha2",
  "thiserror",

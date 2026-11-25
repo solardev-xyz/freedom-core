@@ -1,6 +1,6 @@
 [package]
 name = "fc-swarm-provider"
-description = "window.swarm's backend in the core (design 0015): batch choice, node error texts and the node's JSON replies, with the behavior of freedom-browser's swarm services over bee-js 13.2.0"
+description = "window.swarm's backend in the core (design 0015): the method machines, batch choice, node error texts, the node's JSON replies and the stores, with the behavior of freedom-browser's swarm services over bee-js 13.2.0"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,6 +15,19 @@ workspace = true
 # unit) and ECMAScript's number text, for the node's replies and the texts a
 # page reads (design 0015, "JSON replies": "fc-json's rules").
 fc-json = { path = "../fc-json" }
+# The method machines' chunk work (design 0015, "Crates"): the BMT and SOC
+# addresses, the file tree's geometry (`tree`), 0009's leaf checks and feed
+# update addresses (`verify`), feed topics. A logic crate of this workspace.
+fc-swarm = { path = "../fc-swarm" }
+# keccak256, the EIP-191 digest and EIP-55 owners, as fc-swarm uses them.
+# A logic crate of this workspace.
+fc-evm = { path = "../fc-evm" }
+# A single-owner chunk's owner recovered as the reference recovers it
+# (core-sdk over noble: `v` 27 is recovery 0 and any other 1, a high `s`
+# recovers), which fc-evm's stricter `recover_address` doesn't; with
+# noble's errors' texts. One of the crates AGENTS rule 7 prefers, at
+# fc-evm's and fc-swarm's version and features.
+k256 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdsa"] }
 # A permission manifest's `rawHash` and `fingerprint`, SHA-256 as the
 # reference's `crypto.createHash('sha256')` gives them (design 0015, "The
 # stores"); one of the crates AGENTS rule 7 prefers.
