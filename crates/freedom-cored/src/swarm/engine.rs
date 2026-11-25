@@ -8,9 +8,8 @@
 //!   (`not_moved`, `data.store: "swarm"`, otherwise); its params are read
 //!   strictly (`invalid_argument`); a method that touches the stores
 //!   answers `not_moved` (`data.store: "swarm_stores"`) until main hands
-//!   them over (SWM-4 PR 7), `swarm_unsubscribe` is `invalid_argument`
-//!   (main answers it itself), and the two streamed reads wait for SWM-4
-//!   PR 6 ([`Door`]).
+//!   them over (SWM-4 PR 7), and `swarm_unsubscribe` is `invalid_argument`
+//!   (main answers it itself) ([`Door`]).
 //! - **Admission** (design 0015, "Budgets"): at most
 //!   [`RUNNING_REQUESTS`] run, at most [`WAITING_REQUESTS`] wait in order,
 //!   and past that a request is `busy` at once: 4900 inside `{
@@ -43,15 +42,32 @@
 //! - **A subscription's close** (D16) is never cancelled and carries its
 //!   own bound: unanswered [`CLOSE_BOUND_MS`] after it was asked, it ends
 //!   the connection ([`Fault`]).
-//! - **What this step leaves for later:** streamed node replies, parts,
-//!   bodies and hashing (PR 6), the stores and the vault (PR 7), the mining
-//!   lane (PR 8: until it comes every GSOC search is answered
+//! - **Streams** (design 0015, "Streams"; the [`streams`] module): a
+//!   streamed node reply (`bytes`, `feed_latest`) and a part
+//!   (`shell.swarm_part`) each take one of the [`SWARM_STREAMS`] incoming
+//!   streams' slots (D4: 4 MiB of 128 KiB windows) before they go, and hold
+//!   it until main's terminal for the stream; a node reply's also holds its
+//!   call's slot. A `swarm.body` main asks for one of the thread's calls
+//!   whose body streams is answered from its machine's [`Effect::Body`],
+//!   within main's credit; its route goes once main has answered the call,
+//!   or cancelled the body (D4). An upload's part and body that make no
+//!   progress for [`IDLE_MS`] end the upload (D13), and a stream the
+//!   thread cancelled that main hasn't ended [`IDLE_MS`] later ends the
+//!   connection.
+//! - **Hashing** (D9): `readData`'s leaf checks go to the thread's own
+//!   pool ([`Io::hash`]); the request stays until each result is back.
+//! - **What this step leaves for later:** the stores and the vault (PR 7),
+//!   the mining lane (PR 8: until it comes every GSOC search is answered
 //!   [`Mined::Off`], mining off) and main's own methods (PR 9). The door
 //!   keeps every method that would need them out, so an ask of that kind
-//!   is a core bug: it is logged and its request cancelled.
+//!   is a core bug: it is logged and its request cancelled. (With the test
+//!   hooks' stand-in for the stores, [`Bounds::stub_writes`], the store
+//!   methods pass the door and every store write is answered as made,
+//!   writing nothing, so the uploads' streams run through the pipe.)
 //!
 //! [`memory`]: super::memory
 //! [`CLOSE_BOUND_MS`]: fc_swarm_provider::machine::CLOSE_BOUND_MS
+//! [`SWARM_STREAMS`]: crate::transport::SWARM_STREAMS
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -61,26 +77,37 @@ use fc_eip1193::names::{Binding, Document};
 use fc_json::JsString;
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::message::PageContext;
+use fc_protocol::stream::Codes;
 use fc_swarm_provider::budgets::ReadBudgets;
 use fc_swarm_provider::machine::node::{ERROR_BODY, b64};
 use fc_swarm_provider::machine::shell::Deadline;
 use fc_swarm_provider::machine::{
-    AskId, Call, Capability, Effect, Event, Failed, Failure, KNOWN_METHODS, Live, Mined, Need,
-    NotBuilt, Outcome, Protocol, REQUEST_CHARGE, RUNNING_REQUESTS, Reads, Request,
-    STREAMING_UPLOADS, TagOwners, WAITING_REQUESTS, World,
+    AskId, Body, BodyOut, Call, Capability, Effect, Event, Failed, Failure, Job, KNOWN_METHODS,
+    Live, Mined, Need, NotBuilt, Outcome, Protocol, REQUEST_CHARGE, RUNNING_REQUESTS, Reads,
+    Request, STREAMING_UPLOADS, StoreWrite, TagOwners, WAITING_REQUESTS, World,
 };
 use fc_swarm_provider::stores::feeds::FeedStore;
 use fc_swarm_provider::value::Value;
 
 use super::memory::{self, Pool};
+use super::stream;
 use super::wire::{self, Params, Refusal};
 use crate::eip1193::Bindings;
+use crate::transport::{SWARM_STREAMS, StreamKey};
+
+mod streams;
 
 /// Milliseconds on the thread's monotonic clock.
 pub type Ms = u64;
 
 /// Outstanding `shell.swarm_api` calls at most (design 0015, "Budgets").
 pub const API_CALLS: usize = 64;
+
+/// An upload's idle bound (design 0015, "Bounds"; D13): a part and its
+/// `swarm.body` with no bytes and no credit from main for this long end the
+/// upload, beside main's own idle bound; and a stream the thread cancelled
+/// that main hasn't ended this long after ends the connection.
+pub const IDLE_MS: Ms = 60_000;
 
 /// The bit that marks the swarm thread's name checks' tags: the event loop
 /// routes their verdicts here (a page's EIP-1193 checks are tagged with
@@ -112,6 +139,14 @@ pub struct Bounds {
     pub api: usize,
     pub memory: usize,
     pub uploads: usize,
+    /// Incoming streams at once: parts and streamed node replies (D4).
+    pub streams: usize,
+    /// The idle bound ([`IDLE_MS`]).
+    pub idle_ms: Ms,
+    /// The test hooks' stand-in for the stores until PR 7 serves them: the
+    /// store methods pass the door, and every store write is answered as
+    /// made, with nothing written. Never on outside the test hooks.
+    pub stub_writes: bool,
 }
 
 impl Default for Bounds {
@@ -122,6 +157,9 @@ impl Default for Bounds {
             api: API_CALLS,
             memory: memory::POOL,
             uploads: STREAMING_UPLOADS,
+            streams: SWARM_STREAMS,
+            idle_ms: IDLE_MS,
+            stub_writes: false,
         }
     }
 }
@@ -137,6 +175,11 @@ pub struct Outgoing {
     pub params: Vec<u8>,
     /// The most main's reply may take, serialized (D4).
     pub reply_bound: usize,
+    /// The codes main may end the stream its reply opens with, for a
+    /// request whose reply may open one (a part, a streamed node reply):
+    /// its stream is routed to the thread and registered in its duplex
+    /// before the writer has the request.
+    pub opens: Option<Codes>,
 }
 
 /// What became of an [`Outgoing`].
@@ -177,6 +220,24 @@ pub trait Io {
     fn answer(&mut self, id: u64, answer: Answer);
     /// `Date.now()`, for the machines (D14).
     fn wall_ms(&self) -> u64;
+    /// Main's reply to request `core`, sent with [`Outgoing::opens`], has
+    /// come: `head` when it opens the stream, with the exact length its
+    /// head gave it (a part's). True to hand it on; false when the thread
+    /// had cancelled the request (its stream, if it opened one, is dropped
+    /// as it comes, until its terminal). A reply the duplex refuses is
+    /// main breaking the protocol.
+    fn replied(&mut self, core: u64, head: Option<Option<u64>>) -> Result<bool, Fault>;
+    /// The machine let go of `bytes` of request `core`'s stream: its credit.
+    fn credit(&mut self, core: u64, bytes: usize);
+    /// The next part of the core's answer to main's `swarm.body` `body`.
+    fn body(&mut self, body: u64, out: BodyOut);
+    /// `swarm.body` `body` refused: its one answer.
+    fn body_refuse(&mut self, body: u64, error: ErrorBody);
+    /// No frame of stream `key` can come any more: its route goes (D4).
+    fn forget(&mut self, key: StreamKey);
+    /// Work for the thread's hashing pool (D9): its result comes to
+    /// [`Engine::hashed`] for request `id`'s ask `ask`.
+    fn hash(&mut self, id: u64, ask: AskId, job: Job);
 }
 
 /// What the swarm thread holds that every request reads (design 0015, "In
@@ -280,9 +341,6 @@ pub const STORE_METHODS: [&str; 9] = [
     "swarm_getSigningIdentity",
 ];
 
-/// The reads whose node replies stream (SWM-4 PR 6).
-pub const STREAMED_METHODS: [&str; 2] = ["swarm_readData", "swarm_readFeedEntry"];
-
 /// What the door makes of a request's method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Door {
@@ -293,8 +351,6 @@ pub enum Door {
     NotMoved,
     /// `swarm_unsubscribe`, which main answers itself (D5).
     Unsubscribe,
-    /// Not served before SWM-4 PR 6.
-    Later,
 }
 
 impl Door {
@@ -310,8 +366,6 @@ impl Door {
             Door::Unsubscribe
         } else if STORE_METHODS.contains(&name) {
             Door::NotMoved
-        } else if STREAMED_METHODS.contains(&name) {
-            Door::Later
         } else {
             Door::Run
         }
@@ -344,6 +398,12 @@ enum Stage {
     Lock([u8; 32]),
     /// Its charge held, waiting for an upload's turn.
     Turn,
+    /// Its charge (and a node reply's call slot) held, waiting for one of
+    /// the incoming streams' slots.
+    Streams,
+    /// Main's head for the core's request `core` came: its stream is open
+    /// (or, cancelled, retiring until main's terminal).
+    Open(u64),
 }
 
 /// An ask the engine holds, until its terminal answer has been handed back
@@ -357,6 +417,13 @@ struct Ask {
     api: bool,
     stage: Stage,
     cancelled: bool,
+    /// It holds one of the incoming streams' slots.
+    stream: bool,
+    /// The machine holds it no more: the engine gave it its terminal (the
+    /// idle bound), and main's answer is dropped when it comes.
+    closed: bool,
+    /// A call whose body streams: its body has had its terminal.
+    body_ended: bool,
 }
 
 enum Phase {
@@ -387,6 +454,11 @@ struct Slot {
     turn: usize,
     answered: bool,
     written: bool,
+    /// When its upload's streams, idle since, end (D13): while a part or a
+    /// call whose body streams is out.
+    idle: Option<Ms>,
+    /// Its jobs on the hashing pool, not yet back.
+    hashing: usize,
 }
 
 /// One write to a topic at a time (feed-service.js's `withWriteLock`):
@@ -490,6 +562,24 @@ pub struct Engine {
     ready: VecDeque<(u64, AskId, Event)>,
     /// Requests the engine cancels (an ask it can't serve).
     cancels: VecDeque<u64>,
+    /// Incoming streams' slots taken, cancelled ones included until main's
+    /// terminal.
+    streams_open: usize,
+    /// Asks waiting for one, in order.
+    stream_queue: VecDeque<(u64, AskId)>,
+    /// The core's requests whose stream is open (or retiring), by ID.
+    open: BTreeMap<u64, (u64, AskId)>,
+    /// Streams the thread cancelled, and when main's terminal for each is
+    /// overdue.
+    retiring: BTreeMap<u64, Ms>,
+    /// Main's `swarm.body` requests, by ID, and the call each is the body
+    /// of, until main has answered the call or cancelled the body.
+    bodies: BTreeMap<u64, (u64, AskId)>,
+    /// Each call whose body main asked for, and that `swarm.body`, until
+    /// the body has had its terminal.
+    body_of: BTreeMap<(u64, AskId), u64>,
+    /// The stand-in stores' last history row ([`Bounds::stub_writes`]).
+    stub_rows: i64,
 }
 
 impl Engine {
@@ -517,6 +607,13 @@ impl Engine {
             granted: VecDeque::new(),
             ready: VecDeque::new(),
             cancels: VecDeque::new(),
+            streams_open: 0,
+            stream_queue: VecDeque::new(),
+            open: BTreeMap::new(),
+            retiring: BTreeMap::new(),
+            bodies: BTreeMap::new(),
+            body_of: BTreeMap::new(),
+            stub_rows: 0,
         }
     }
 
@@ -583,6 +680,8 @@ impl Engine {
         };
         match Door::of(&params.method) {
             Door::Run => {}
+            // The test hooks' stand-in for the stores lets them through.
+            Door::NotMoved if self.bounds.stub_writes => {}
             Door::NotMoved => {
                 io.answer(
                     id,
@@ -602,16 +701,6 @@ impl Engine {
                     Answer::Error(ErrorBody::new(
                         ErrorCode::InvalidArgument,
                         "swarm_unsubscribe is main's own",
-                    )),
-                );
-                return Ok(());
-            }
-            Door::Later => {
-                io.answer(
-                    id,
-                    Answer::Error(ErrorBody::new(
-                        ErrorCode::Internal,
-                        "this core doesn't serve the method yet",
                     )),
                 );
                 return Ok(());
@@ -648,6 +737,8 @@ impl Engine {
                 turn: 0,
                 answered: false,
                 written: false,
+                idle: None,
+                hashing: 0,
             },
         );
         self.admission.push_back(id);
@@ -688,14 +779,7 @@ impl Engine {
             return Err(Fault("swarm_unsolicited"));
         };
         let slot = self.slots.get_mut(&id).ok_or(Fault("swarm_unsolicited"))?;
-        let ask = slot
-            .asks
-            .remove(&ask_id)
-            .ok_or(Fault("swarm_unsolicited"))?;
-        self.closes.remove(&(id, ask_id));
-        if ask.api {
-            self.api_open = self.api_open.saturating_sub(1);
-        }
+        let ask = slot.asks.get(&ask_id).ok_or(Fault("swarm_unsolicited"))?;
         let ended = slot
             .binding
             .as_ref()
@@ -704,7 +788,9 @@ impl Engine {
             Ok(text) => Some(decode(&ask.need, text).ok_or(Fault("swarm_reply"))?),
             Err(text) => match (wire::refusal(text), &ask.need) {
                 (Some(Refusal::Cancelled), _) if ask.cancelled => None,
-                (Some(Refusal::Rule(rule)), Need::Node(_)) => Some(Event::Refused(rule)),
+                (Some(Refusal::Rule(rule)), Need::Node(_) | Need::Part(_)) => {
+                    Some(Event::Refused(rule))
+                }
                 // Main refused the recheck itself: as 0012's APR-5 reads a
                 // recheck that isn't one, the effect doesn't go. Here the
                 // document isn't confirmed under its key.
@@ -726,7 +812,39 @@ impl Engine {
             })),
             other => other,
         };
-        if let Some(event) = event {
+        // A part's or a node reply's head opens its stream, which keeps
+        // the ask, its charge and its slots until main's terminal.
+        let head = match &event {
+            Some(Event::Head(_)) => Some(None),
+            Some(Event::PartHead(bytes)) => Some(Some(*bytes)),
+            _ => None,
+        };
+        let opens = ask.opens().is_some();
+        let closed = ask.closed;
+        let deliver = if opens { io.replied(core, head)? } else { true };
+        if head.is_some() {
+            self.opened(now, id, ask_id, core, deliver);
+            if let Some(event) = event.filter(|_| deliver && !closed) {
+                self.progress(now, id, ask_id);
+                self.deliver(io, now, id, ask_id, event)?;
+            }
+            self.settle(io, now, id)?;
+            return self.drive(io, now);
+        }
+        let Some(ask) = self.take_ask(id, ask_id) else {
+            return Err(Fault("swarm_unsolicited"));
+        };
+        if opens {
+            io.forget(StreamKey::Piece(core));
+        }
+        // Main has answered the call: no credit for its body can follow
+        // (D4), so the body's route goes.
+        if let Some(body) = self.body_of.get(&(id, ask_id)).copied()
+            && self.bodies.remove(&body).is_some()
+        {
+            io.forget(StreamKey::Body(body));
+        }
+        if let Some(event) = event.filter(|_| deliver && !closed) {
             self.deliver(io, now, id, ask_id, event)?;
         }
         // The step that consumed the reply has ended: its charge goes.
@@ -816,6 +934,22 @@ impl Engine {
         if self.closes.values().any(|due| *due <= now) {
             return Err(Fault("swarm_close_unanswered"));
         }
+        // A stream the thread cancelled that main hasn't ended within the
+        // idle bound: main broke the protocol (D13's rule for a cancelled
+        // ask, for the stream's own terminal).
+        if self.retiring.values().any(|due| *due <= now) {
+            return Err(Fault("swarm_stream_unterminated"));
+        }
+        // Uploads whose streams have been idle for the bound (D13).
+        let idle: Vec<u64> = self
+            .slots
+            .iter()
+            .filter(|(_, slot)| slot.idle.is_some_and(|due| due <= now))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in idle {
+            self.stall(io, now, id)?;
+        }
         let due: Vec<u64> = self
             .slots
             .iter()
@@ -852,7 +986,12 @@ impl Engine {
             .values()
             .filter(|slot| !slot.answered)
             .map(|slot| slot.deadline);
-        deadlines.chain(self.closes.values().copied()).min()
+        let idle = self.slots.values().filter_map(|slot| slot.idle);
+        deadlines
+            .chain(idle)
+            .chain(self.closes.values().copied())
+            .chain(self.retiring.values().copied())
+            .min()
     }
 
     // -----------------------------------------------------------------------
@@ -887,7 +1026,11 @@ impl Engine {
                 self.settle(io, now, id)?;
                 continue;
             }
-            if self.pump_api() || self.pump_outbox(io, now)? || self.pump_admission(io, now)? {
+            if self.pump_api()
+                || self.pump_streams()
+                || self.pump_outbox(io, now)?
+                || self.pump_admission(io, now)?
+            {
                 continue;
             }
             return Ok(());
@@ -958,7 +1101,7 @@ impl Engine {
             let granted = self.memory.withdraw(Waiter::Base(id));
             self.grant(granted);
         }
-        self.retire(id);
+        self.retire(io, id);
     }
 
     fn pump_admission(&mut self, io: &mut impl Io, now: Ms) -> Result<bool, Fault> {
@@ -1083,19 +1226,25 @@ impl Engine {
             self.end_holdings(id);
         }
         if self.slots.get(&id).is_some_and(|slot| {
-            slot.answered && slot.asks.is_empty() && matches!(slot.phase, Phase::Running(_))
+            slot.answered
+                && slot.asks.is_empty()
+                && slot.hashing == 0
+                && matches!(slot.phase, Phase::Running(_))
         }) {
-            self.retire(id);
+            self.retire(io, id);
+            return Ok(());
         }
+        self.watch(now, id);
         Ok(())
     }
 
     /// The request has ended and nothing of it is open: it goes, and the
     /// base it still holds, if any, once its answer has been written.
-    fn retire(&mut self, id: u64) {
+    fn retire(&mut self, io: &mut impl Io, id: u64) {
         let Some(slot) = self.slots.remove(&id) else {
             return;
         };
+        self.forget_bodies(io, id);
         if slot.base == 0 {
             return;
         }
@@ -1109,16 +1258,9 @@ impl Engine {
     fn effect(&mut self, io: &mut impl Io, now: Ms, id: u64, effect: Effect) {
         match effect {
             Effect::Ask(ask) => self.ask(io, now, id, ask.id, ask.need, ask.charge),
-            Effect::Cancel(ask) => self.cancel_ask(io, id, ask),
-            // Streams in either direction come with SWM-4 PR 6: no ask the
-            // door lets through opens one.
-            Effect::Credit { .. } | Effect::Body { .. } => {
-                crate::log::warn(
-                    "swarm stream effect without a stream",
-                    serde_json::json!({}),
-                );
-                self.cancels.push_back(id);
-            }
+            Effect::Cancel(ask) => self.cancel_ask(io, now, id, ask),
+            Effect::Credit { id: ask, bytes } => self.credit(io, id, ask, bytes),
+            Effect::Body { id: ask, out } => self.body_out(io, id, ask, out),
         }
     }
 
@@ -1134,6 +1276,28 @@ impl Engine {
         let Some(slot) = self.slots.get_mut(&id) else {
             return;
         };
+        let need = match need {
+            // The thread's own pool (D9): the request stays until it's back.
+            Need::Hash(job) => {
+                slot.hashing += 1;
+                io.hash(id, ask_id, job);
+                return;
+            }
+            // The test hooks' stand-in for the stores: made, nothing
+            // written ([`Bounds::stub_writes`]).
+            Need::Write(write) if self.bounds.stub_writes => {
+                let event = match write {
+                    StoreWrite::HistoryInsert(_) => {
+                        self.stub_rows += 1;
+                        Event::Inserted(Ok(self.stub_rows))
+                    }
+                    _ => Event::Written(Ok(())),
+                };
+                self.ready.push_back((id, ask_id, event));
+                return;
+            }
+            need => need,
+        };
         let stage = match &need {
             Need::Ready(_) | Need::Subscribe(_) => Stage::Outbox,
             Need::Unsubscribe {
@@ -1143,8 +1307,11 @@ impl Engine {
                     .insert((id, ask_id), now.saturating_add(*answer_within_ms));
                 Stage::Outbox
             }
-            Need::Node(call) if !call.stream() => Stage::Memory,
-            Need::Upload => Stage::Memory,
+            Need::Node(_) | Need::Upload => Stage::Memory,
+            // A part's bytes are held under its upload's turn: it needs only
+            // a stream's slot.
+            Need::Part(_) => Stage::Streams,
+            Need::Hash(_) => return,
             Need::Live => match slot.binding.clone() {
                 // A binding already ended, by any family's check, or a
                 // transport key that isn't `ipns://<key>`: the name fails,
@@ -1177,12 +1344,7 @@ impl Engine {
                 self.ready.push_back((id, ask_id, Event::Mined(Mined::Off)));
                 return;
             }
-            Need::Node(_)
-            | Need::Hash(_)
-            | Need::Part(_)
-            | Need::Sign(_)
-            | Need::Owner(_)
-            | Need::Write(_) => {
+            Need::Sign(_) | Need::Owner(_) | Need::Write(_) => {
                 crate::log::warn(
                     "swarm ask this core doesn't serve yet",
                     serde_json::json!({}),
@@ -1200,10 +1362,15 @@ impl Engine {
                 api: false,
                 stage,
                 cancelled: false,
+                stream: false,
+                closed: false,
+                body_ended: false,
             },
         );
         if stage == Stage::Outbox {
             self.outbox.push_back((id, ask_id));
+        } else if stage == Stage::Streams {
+            self.stream_queue.push_back((id, ask_id));
         } else if stage == Stage::Memory && self.memory.reserve(Waiter::Ask(id, ask_id), charge) {
             self.charged(id, ask_id);
         }
@@ -1285,7 +1452,7 @@ impl Engine {
     /// The machine no longer waits for an ask: withdrawn where it waits,
     /// cancelled at main where it went. A cancelled call keeps its charge
     /// and its slot until main's answer (D13).
-    fn cancel_ask(&mut self, io: &mut impl Io, id: u64, ask_id: AskId) {
+    fn cancel_ask(&mut self, io: &mut impl Io, now: Ms, id: u64, ask_id: AskId) {
         let Some(slot) = self.slots.get_mut(&id) else {
             return;
         };
@@ -1300,6 +1467,18 @@ impl Engine {
                 }
                 return;
             }
+            // Its stream retires: its frames are dropped as they come, and
+            // its slots and charge stay until main's terminal, which must
+            // come within the idle bound.
+            Stage::Open(core) => {
+                if !ask.cancelled {
+                    ask.cancelled = true;
+                    io.cancel(core);
+                    self.retiring
+                        .insert(core, now.saturating_add(self.bounds.idle_ms));
+                }
+                return;
+            }
             Stage::Naming(tag) => {
                 io.name_cancel(tag);
                 self.names.remove(&tag);
@@ -1310,15 +1489,11 @@ impl Engine {
                 self.grant(granted);
                 return;
             }
-            Stage::Slot | Stage::Outbox | Stage::Lock(_) | Stage::Turn => {}
+            Stage::Slot | Stage::Outbox | Stage::Lock(_) | Stage::Turn | Stage::Streams => {}
         }
-        let (held, api) = (ask.held, ask.api);
-        slot.asks.remove(&ask_id);
-        self.closes.remove(&(id, ask_id));
-        if api {
-            self.api_open = self.api_open.saturating_sub(1);
+        if let Some(ask) = self.take_ask(id, ask_id) {
+            self.release(ask.held);
         }
-        self.release(held);
     }
 
     /// Node calls with their charge take free slots, in order.
@@ -1338,8 +1513,14 @@ impl Engine {
             };
             self.api_open += 1;
             ask.api = true;
-            ask.stage = Stage::Outbox;
-            self.outbox.push_back((id, ask_id));
+            // A node reply that streams needs a stream's slot too (D4).
+            if ask.opens().is_some() {
+                ask.stage = Stage::Streams;
+                self.stream_queue.push_back((id, ask_id));
+            } else {
+                ask.stage = Stage::Outbox;
+                self.outbox.push_back((id, ask_id));
+            }
             moved = true;
         }
         moved
@@ -1368,16 +1549,27 @@ impl Engine {
                 method: "shell.swarm_ready",
                 params: wire::ready_params(id, *check),
                 reply_bound: SMALL_REPLY,
+                opens: None,
             },
+            // A streamed reply's head, or an error status's whole body:
+            // the reply's bound is the larger, the error body's.
             Need::Node(call) => Outgoing {
                 method: "shell.swarm_api",
                 params: wire::api_params(id, call),
                 reply_bound: b64(call.max_bytes.max(ERROR_BODY)).saturating_add(ENVELOPE),
+                opens: ask.opens(),
+            },
+            Need::Part(part) => Outgoing {
+                method: "shell.swarm_part",
+                params: stream::part_params(id, *part),
+                reply_bound: SMALL_REPLY,
+                opens: ask.opens(),
             },
             Need::Subscribe(subscription) => Outgoing {
                 method: "shell.swarm_subscribe",
                 params: wire::subscribe_params(id, subscription),
                 reply_bound: SMALL_REPLY,
+                opens: None,
             },
             Need::Unsubscribe {
                 id: subscription, ..
@@ -1385,18 +1577,25 @@ impl Engine {
                 method: "shell.swarm_unsubscribe",
                 params: wire::unsubscribe_params(subscription),
                 reply_bound: SMALL_REPLY,
+                opens: None,
             },
             Need::Live => Outgoing {
                 method: "approval.recheck",
                 params: wire::recheck_params(id, &slot.page_json),
                 reply_bound: SMALL_REPLY,
+                opens: None,
             },
             _ => return Ok(true),
         };
         match io.send(outgoing) {
             Sent::Id(core) => {
                 ask.stage = Stage::Sent(core);
+                let watched = ask.watched();
                 self.sent.insert(core, (id, ask_id));
+                // An upload's stream is out: its idle bound runs (D13).
+                if watched {
+                    self.progress(now, id, ask_id);
+                }
             }
             Sent::Wait => {
                 self.outbox.push_front((id, ask_id));
@@ -1407,12 +1606,7 @@ impl Engine {
             // a dial would; anything else ends its request.
             Sent::Refused => {
                 let node = matches!(ask.need, Need::Node(_));
-                let (held, api) = (ask.held, ask.api);
-                slot.asks.remove(&ask_id);
-                self.closes.remove(&(id, ask_id));
-                if api {
-                    self.api_open = self.api_open.saturating_sub(1);
-                }
+                let held = self.take_ask(id, ask_id).map_or(0, |ask| ask.held);
                 if node {
                     self.deliver(io, now, id, ask_id, Event::Failed(Failed::Error))?;
                 } else {
@@ -1458,6 +1652,7 @@ fn decode(need: &Need, text: &str) -> Option<Event> {
     match need {
         Need::Ready(_) => wire::ready_reply(text).map(Event::Ready),
         Need::Node(call) => wire::api_reply(text, call.stream()),
+        Need::Part(_) => stream::part_head(text).map(Event::PartHead),
         Need::Subscribe(_) => wire::subscribe_reply(text).map(Event::Opened),
         Need::Unsubscribe { .. } => wire::unsubscribe_reply(text).then_some(Event::Closed),
         Need::Live => fc_eip1193::Recheck::parse(text).ok().map(|recheck| {

@@ -2,13 +2,28 @@
 //! its own thread, beside naming's, chain's and dweb's. The event loop
 //! starts it once a hello settles protocol 2, and forwards it, in the
 //! order the reader read them, `swarm.request` with its `PageContext`,
-//! main's cancels, main's answers to the thread's own requests
-//! ([`Owner::Swarm`]'s), and the naming thread's verdicts on its name
-//! checks (tagged [`NAME_TAG`]).
+//! `swarm.body`, main's cancels, main's answers to the thread's own
+//! requests ([`Owner::Swarm`]'s), the stream frames routed to it (D4), and
+//! the naming thread's verdicts on its name checks (tagged [`NAME_TAG`]).
 //!
 //! - **Its requests to main** (`shell.swarm_ready`, `shell.swarm_api`,
-//!   `shell.swarm_subscribe`, `shell.swarm_unsubscribe`, `approval.recheck`)
-//!   go through the core's one gate, each with its reply's bound (D4).
+//!   `shell.swarm_part`, `shell.swarm_subscribe`, `shell.swarm_unsubscribe`,
+//!   `approval.recheck`) go through the core's one gate, each with its
+//!   reply's bound (D4).
+//! - **Its streams are one [`Duplex`]** ([`Duplex::swarm`]), as the dweb
+//!   thread's are: the `swarm.body` answers it sends main, under main's
+//!   request IDs, ending only with an upload's codes; and the parts and
+//!   node bodies main streams to it, under the core's own, each request
+//!   registered with its stream's codes before main can answer it (a
+//!   part's, [`Codes::SwarmPart`], whose `body_stream_error` may name its
+//!   file's error code; a node body's, [`Codes::SwarmPiece`], which may end
+//!   `too_large`), and routed to this thread (D4). A part's head gives its
+//!   exact length: one that breaks it, or any frame the duplex refuses, is
+//!   main breaking the protocol, which ends the connection. Main's credit
+//!   for a `swarm.body` is routed here from its request until the thread
+//!   lets the route go (the engine's rule, D4).
+//! - **Its hashing pool** (D9) is its own: two threads for `readData`'s
+//!   leaf checks ([`crate::pool::swarm`]), whose results wake it.
 //!   Main's answer is read strictly ([`wire`]); one the thread can't read,
 //!   or one a machine reads as main breaking the protocol, ends the
 //!   connection (D5), as the reader's own do.
@@ -19,24 +34,28 @@
 //!   ends the document's binding in the record the loop's page requests
 //!   share ([`crate::eip1193::Bindings`]), for both families.
 //! - **Its shares of the writer** are two, as the chain thread's: its
-//!   requests, cancels and small answers within
-//!   [`transport::MAX_QUEUED_SWARM_CONTROL_BYTES`], ahead of its large
-//!   answers within [`transport::MAX_QUEUED_SWARM_BYTES`]. What waits for
+//!   requests, cancels, small answers and the duplex's frames (credit
+//!   first, then the bodies' heads and bytes, within main's windows: 4
+//!   bodies' 128 KiB) within [`transport::MAX_QUEUED_SWARM_CONTROL_BYTES`],
+//!   ahead of its large answers within [`transport::MAX_QUEUED_SWARM_BYTES`]. What waits for
 //!   room waits here; the allowances and the gate wake the thread. Each
 //!   answer's hold carries a notice ([`Written`]), so a request's base
 //!   charge goes only once the writer has written its answer (design 0015,
 //!   "The swarm thread's memory").
 //! - **Its waker** is the chain thread's: room in its shares of the
-//!   writer, or a free slot at main, marks its mailbox through a weak
-//!   reference, so dropping the event loop's [`Handle`] ends the thread.
+//!   writer, a free slot at main, or a hashing result marks its mailbox
+//!   through a weak reference, so dropping the event loop's [`Handle`] ends
+//!   the thread.
 //! - **Stopping:** when the event loop has gone (shutdown, EOF or a
-//!   protocol error), the thread hands the writer the frames it had made.
-//!   A panic is reported ([`transport::DeathNotice`]).
+//!   protocol error), the thread hands the writer the frames it had made,
+//!   drops the bodies still queued (main fails them as it closes), and
+//!   stops and joins its hashing pool. A panic is reported
+//!   ([`transport::DeathNotice`]).
 //! - **The clocks** (D14): deadlines run on the thread's monotonic clock;
 //!   the machines' `Date.now()` is the wall clock, which the test hooks fix
 //!   (`test.swarm_world`, D11).
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::ops::Range;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, Weak};
@@ -45,20 +64,33 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use fc_approval::stores::SwarmStore;
 use fc_eip1193::names::Binding;
 use fc_protocol::error::{ErrorBody, ErrorCode};
+use fc_protocol::frame::Frame;
 use fc_protocol::message::{self, PageContext};
+use fc_protocol::stream::{
+    Arrived, Credited, Duplex, Received, Replied, Retire, SendError, StreamFrame,
+};
+use fc_swarm_provider::machine::{AskId, BodyOut, Job};
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
 use super::engine::{Answer, Bounds, Engine, Fault, Io, Ms, NAME_TAG, Outgoing, Sent, Shared};
-use super::wire;
+use super::{stream, wire};
 use crate::eip1193::Verdict;
 use crate::naming;
+use crate::pool::{self, SwarmHashing};
 use crate::requests::{self, Dispatch, Expect, Owner, Requests, Start};
 use crate::serve::Event;
-use crate::transport::{self, Allowance, Credit, Link, Out, Reply};
+use crate::transport::{
+    self, Allowance, Credit, Link, Out, Reply, StreamEntry, StreamKey, StreamMark, StreamRoutes,
+};
 
-/// The methods this thread serves (design 0015, SWM-4's D5).
-pub const METHODS: &[&str] = &["swarm.request"];
+/// The methods this thread serves (design 0015, SWM-4's D5): a page's
+/// request, and main's ask for the body of one of the thread's calls.
+pub const METHODS: &[&str] = &["swarm.request", "swarm.body"];
+
+/// The `swarm.body` answers the duplex's sender holds unwritten, across
+/// every body: the 4 uploads' 128 KiB windows (design 0015, Streams).
+pub const WRITER_DATA_CAP: usize = transport::SWARM_BODIES * fc_protocol::stream::WINDOW;
 
 pub fn handles(method: &str) -> bool {
     METHODS.contains(&method)
@@ -77,6 +109,15 @@ pub enum In {
         params: Option<Box<RawValue>>,
         page: Option<PageContext>,
     },
+    /// `swarm.body` `id`, its params as main sent them: its stream's route
+    /// is the thread's from now on (D4).
+    Body {
+        id: u64,
+        params: Option<Box<RawValue>>,
+    },
+    /// A stream's entry of frames, coalesced under the reader's stream cap:
+    /// taken here, and charged until handled.
+    Stream(StreamMark),
     Cancel {
         id: u64,
     },
@@ -94,7 +135,7 @@ pub enum In {
     },
     /// The writer has written `swarm.request` `id`'s answer, or dropped it.
     Written(u64),
-    /// Room in the writer, or a free slot at main.
+    /// Room in the writer, a free slot at main, or a hashing result.
     Drained,
     /// `test.swarm_world` (D11).
     #[cfg(feature = "testhooks")]
@@ -107,6 +148,9 @@ pub enum In {
 /// A message, with the reader's credit for the frame it came in, held
 /// until it is handled.
 type Mail = (In, Option<Credit>);
+
+// A stream mark's slot here is within what the reader charges its entry.
+const _: () = assert!(transport::stream_slot_fits(std::mem::size_of::<Mail>()));
 
 /// The event loop's side of the swarm thread. The wake-ups hold only weak
 /// references, so dropping this ends the thread.
@@ -121,8 +165,8 @@ impl Handle {
     }
 }
 
-/// What wakes the thread: room in its shares of the writer, or a free slot
-/// at main.
+/// What wakes the thread: room in its shares of the writer, a free slot at
+/// main, or a result in the hashing pool.
 fn waker(tx: &Arc<Sender<Mail>>) -> impl Fn() + Send + Sync + 'static {
     let wake: Weak<Sender<Mail>> = Arc::downgrade(tx);
     move || {
@@ -175,6 +219,7 @@ pub fn spawn(start: Spawn) -> std::io::Result<Handle> {
     let control = Allowance::new(usize::MAX, transport::MAX_QUEUED_SWARM_CONTROL_BYTES);
     control.on_room(waker(&tx));
     start.requests.on_room(Owner::Swarm, waker(&tx));
+    let hashing = pool::swarm(waker(&tx), start.events.clone())?;
     let written = Arc::downgrade(&tx);
     let Spawn {
         out,
@@ -191,6 +236,7 @@ pub fn spawn(start: Spawn) -> std::io::Result<Handle> {
         .spawn(move || {
             let _notice = transport::DeathNotice::new(events.clone(), "swarm");
             let wire = Wire {
+                routes: Arc::clone(requests.routes()),
                 out,
                 link,
                 requests,
@@ -202,6 +248,10 @@ pub fn spawn(start: Spawn) -> std::io::Result<Handle> {
                 large: VecDeque::new(),
                 clock: None,
                 stop: None,
+                duplex: Duplex::swarm(WRITER_DATA_CAP),
+                made: None,
+                unpushed: BTreeMap::new(),
+                hashing: Some(hashing),
             };
             let thread = Thread {
                 engine: Engine::new(
@@ -238,6 +288,10 @@ type Flow = Result<(), Stop>;
 
 fn fault(f: Fault) -> Stop {
     Stop::Protocol(f.0)
+}
+
+fn read(frame: &Frame) -> Result<StreamFrame<'_>, Fault> {
+    StreamFrame::from_frame(frame).map_err(|e| Fault(e.category()))
 }
 
 /// The thread's loop, until it has to stop.
@@ -278,9 +332,15 @@ impl Thread {
         u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
-    /// The deadlines due, and what can be written; then whatever stopped
-    /// the thread meanwhile.
+    /// The hashing pool's results, the deadlines due, and what can be
+    /// written; then whatever stopped the thread meanwhile.
     fn turn(&mut self) -> Flow {
+        while let Some((id, ask, done)) = self.wire.hashing.as_mut().and_then(SwarmHashing::take) {
+            let now = self.now();
+            self.engine
+                .hashed(&mut self.wire, now, id, ask, done)
+                .map_err(fault)?;
+        }
         let now = self.now();
         if self.engine.next_due().is_some_and(|at| at <= now) {
             self.engine.tick(&mut self.wire, now).map_err(fault)?;
@@ -294,6 +354,28 @@ impl Thread {
             In::Request { id, params, page } => {
                 let params = wire::request_params(params.as_deref().map(RawValue::get));
                 self.engine.request(&mut self.wire, now, id, params, page)
+            }
+            In::Body { id, params } => {
+                self.wire
+                    .duplex
+                    .request(id)
+                    .map_err(|e| Stop::Protocol(e.category()))?;
+                let params = params.as_deref().map(RawValue::get);
+                self.engine.body_request(&mut self.wire, now, id, params)
+            }
+            In::Stream(mark) => match mark.take() {
+                Some(taken) => self.stream(now, taken.entry()),
+                None => Ok(()),
+            },
+            // Every cancel main sends reaches this thread: a body's goes to
+            // its sender, which writes its `cancelled`; a request's to the
+            // engine; any other changes nothing.
+            In::Cancel { id } if self.wire.duplex.sender().is_live(id) => {
+                self.wire
+                    .duplex
+                    .cancel(id)
+                    .map_err(|e| Stop::Protocol(e.category()))?;
+                self.engine.body_cancelled(&mut self.wire, now, id)
             }
             In::Cancel { id } => self.engine.cancel(&mut self.wire, now, id),
             In::Response {
@@ -326,17 +408,87 @@ impl Thread {
         self.wire.flush()
     }
 
-    /// `test.swarm_world { reset?, clock?, grants?, tags? }` (D11): one core
-    /// plays every case, its world set between them. `reset` starts the
-    /// read budgets and the tags' owners afresh; `clock` fixes the
-    /// machines' `Date.now()`; `grants` replaces the Swarm grants in memory
-    /// (the file's form); `tags` sets tags' owners (`[[uid, key], …]`). It
-    /// answers `{ memory, requests }`: the pool's charges and the requests
-    /// the thread holds, as they stand.
+    /// A stream's entry from main: a part's or a node body's data in frames
+    /// the duplex takes (at most 64 KiB each), then its terminal; or a
+    /// `swarm.body`'s credit, summed.
+    fn stream(&mut self, now: Ms, entry: &StreamEntry) -> Result<(), Fault> {
+        match entry {
+            StreamEntry::Piece { id, data, terminal } => {
+                for bytes in data.chunks(fc_protocol::stream::MAX_DATA) {
+                    self.frame(now, StreamFrame::Data { id: *id, bytes })?;
+                }
+                match terminal {
+                    Some(frame) => self.frame(now, read(frame)?),
+                    None => Ok(()),
+                }
+            }
+            // Past a `u32`, credit is past any window: refused as such.
+            StreamEntry::Credit { id, bytes } => self.frame(
+                now,
+                StreamFrame::Credit {
+                    id: *id,
+                    bytes: u32::try_from(*bytes).unwrap_or(u32::MAX),
+                },
+            ),
+        }
+    }
+
+    /// One stream frame from main, through the duplex, to the engine.
+    fn frame(&mut self, now: Ms, parsed: StreamFrame<'_>) -> Result<(), Fault> {
+        let terminal = matches!(parsed, StreamFrame::End { .. } | StreamFrame::Abort { .. });
+        let (credit, data) = match &parsed {
+            StreamFrame::Credit { bytes, .. } => (Some(*bytes), None),
+            StreamFrame::Data { bytes, .. } => (None, Some(*bytes)),
+            _ => (None, None),
+        };
+        let received = self
+            .wire
+            .duplex
+            .receive(parsed)
+            .map_err(|e| Fault(e.category()))?;
+        let wire = &mut self.wire;
+        match received {
+            Received::Credited(Credited::Taken(id)) => {
+                let bytes = credit.map_or(0, |n| n as usize);
+                self.engine.body_credit(wire, now, id, bytes)
+            }
+            // Crossed the body's terminal.
+            Received::Credited(Credited::Late) => Ok(()),
+            Received::Arrived(Arrived::Data { id, .. }) => match data {
+                Some(bytes) => self.engine.stream_data(wire, now, id, bytes.to_vec()),
+                None => Ok(()),
+            },
+            Received::Arrived(Arrived::End { id }) => self.engine.stream_end(wire, now, id, None),
+            Received::Arrived(Arrived::Abort { id, abort }) => {
+                let abort = stream::abort_of(&abort).ok_or(Fault("swarm_abort"))?;
+                self.engine.stream_end(wire, now, id, Some(abort))
+            }
+            // A stream the thread cancelled: its data goes, and its
+            // terminal lets go of what it held.
+            Received::Arrived(Arrived::Dropped { id }) if terminal => {
+                self.engine.stream_retired(wire, now, id)
+            }
+            Received::Arrived(Arrived::Dropped { .. }) => Ok(()),
+            // A part that isn't the length its head gave: main broke the
+            // protocol, as the machine reads one (`PartLength`).
+            Received::Arrived(Arrived::Mismatch { .. }) => Err(Fault("swarm_part_length")),
+        }
+    }
+
+    /// `test.swarm_world { reset?, clock?, grants?, tags?, feeds? }` (D11):
+    /// one core plays every case, its world set between them. `reset`
+    /// starts the read budgets, the tags' owners and the feed store
+    /// afresh; `clock` fixes the machines' `Date.now()`; `grants` replaces
+    /// the Swarm grants in memory (the file's form); `tags` sets tags'
+    /// owners (`[[uid, key], …]`); `feeds` replaces the feed store with the
+    /// one a `swarm-feeds.json` text loads, until PR 7 loads the file. It answers `{ memory, requests, streams }`: the pool's charges,
+    /// the requests the thread holds and the incoming streams' slots taken,
+    /// as they stand.
     #[cfg(feature = "testhooks")]
     fn world(&mut self, id: u64, params: Option<&str>) {
         use fc_swarm_provider::budgets::ReadBudgets;
         use fc_swarm_provider::machine::TagOwners;
+        use fc_swarm_provider::stores::feeds::FeedStore;
 
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -346,6 +498,7 @@ impl Thread {
             clock: Option<u64>,
             grants: Option<Box<RawValue>>,
             tags: Option<Vec<(u64, String)>>,
+            feeds: Option<String>,
         }
         let parsed = params.and_then(|p| serde_json::from_str::<WorldParams>(p).ok());
         let Some(world) = parsed else {
@@ -362,6 +515,7 @@ impl Thread {
         if world.reset {
             shared.budgets = ReadBudgets::new();
             shared.tags = TagOwners::new();
+            shared.feeds = FeedStore::empty();
         }
         if let Some(grants) = world.grants {
             let store = SwarmStore::load(grants.get().as_bytes()).unwrap_or_default();
@@ -373,6 +527,9 @@ impl Thread {
         for (uid, key) in world.tags.unwrap_or_default() {
             shared.tags.set(uid, fc_json::JsString::from(key));
         }
+        if let Some(text) = world.feeds {
+            shared.feeds = FeedStore::load(Some(text.as_bytes()), 0, |_| false).store;
+        }
         if world.clock.is_some() {
             self.wire.clock = world.clock;
         }
@@ -380,6 +537,7 @@ impl Thread {
         let held = serde_json::json!({
             "memory": self.engine.memory_used(),
             "requests": self.engine.requests(),
+            "streams": self.engine.streams_held(),
         });
         self.wire.answer(id, Answer::Result(held.to_string()));
     }
@@ -406,6 +564,24 @@ struct Wire {
     clock: Option<u64>,
     /// Why the thread must stop, found while acting for the engine.
     stop: Option<Stop>,
+    /// The thread's streams, both ways.
+    duplex: Duplex,
+    /// The stream routes, for the routes the thread lets go of (D4).
+    routes: Arc<StreamRoutes>,
+    /// A frame the duplex made that the writer had no room for yet.
+    made: Option<Zeroizing<Vec<u8>>>,
+    /// Body bytes the duplex's cap didn't take yet, by `swarm.body` ID.
+    unpushed: BTreeMap<u64, Unpushed>,
+    /// `None` once stopped.
+    hashing: Option<SwarmHashing>,
+}
+
+/// A body's bytes the duplex's sender didn't take yet, and whether its end
+/// follows them.
+#[derive(Default)]
+struct Unpushed {
+    bytes: VecDeque<u8>,
+    end: bool,
 }
 
 /// An answer this size or under (its frame) goes with the control frames.
@@ -413,7 +589,8 @@ const SMALL_ANSWER: usize = 64 * 1024;
 
 impl Wire {
     /// Hands the writer what its shares have room for: control frames
-    /// first, then the large answers.
+    /// first, then the duplex's (credit, then the bodies), then the large
+    /// answers.
     fn flush(&mut self) -> Flow {
         if let Some(stop) = self.stop {
             return Err(stop);
@@ -429,6 +606,34 @@ impl Wire {
             self.out
                 .send(Out::Frame { frame, hold })
                 .map_err(|_| Stop::Writer)?;
+        }
+        loop {
+            self.push_unpushed();
+            let mut wrote = false;
+            loop {
+                let frame = match self.made.take() {
+                    Some(frame) => frame,
+                    None => {
+                        let mut frame = Zeroizing::new(Vec::new());
+                        if self.duplex.next_frame(&mut frame).is_none() {
+                            break;
+                        }
+                        frame
+                    }
+                };
+                let Some(hold) = self.control.take(frame.len()) else {
+                    self.made = Some(frame);
+                    return Ok(());
+                };
+                self.out
+                    .send(Out::Frame { frame, hold })
+                    .map_err(|_| Stop::Writer)?;
+                wrote = true;
+            }
+            // Frames written free the sender's cap for bytes that waited.
+            if !wrote || self.unpushed.is_empty() {
+                break;
+            }
         }
         while let Some((reply, _)) = self.large.front() {
             let Some(hold) = self.bulk.take(reply.len()) else {
@@ -456,17 +661,60 @@ impl Wire {
         }
     }
 
-    /// Hands the writer everything made, past the allowances: the event
-    /// loop has gone, and the writer's drain is bounded by time.
+    /// Hands the writer everything made, past the allowances, and stops the
+    /// pool: the event loop has gone, and the writer's drain is bounded by
+    /// time. The bodies still queued are dropped: main fails them as it
+    /// closes.
     fn close(&mut self) {
         while let Some((frame, answer)) = self.small.pop_front() {
             let hold = self.notice(self.control.force(frame.len()), answer);
+            let _ = self.out.send(Out::Frame { frame, hold });
+        }
+        if let Some(frame) = self.made.take() {
+            let hold = self.control.force(frame.len());
             let _ = self.out.send(Out::Frame { frame, hold });
         }
         while let Some((reply, id)) = self.large.pop_front() {
             let hold = self.notice(self.bulk.force(reply.len()), Some(id));
             let _ = self.out.send(reply.into_out(hold));
         }
+        if let Some(hashing) = self.hashing.take() {
+            hashing.shutdown();
+        }
+    }
+
+    /// Body bytes that waited for the sender's cap, as far as it takes
+    /// them; a body whose bytes have all gone gets its end.
+    fn push_unpushed(&mut self) {
+        let sender = self.duplex.sender_mut();
+        self.unpushed.retain(|&id, u| {
+            let pushed = match sender.push(id, u.bytes.make_contiguous()) {
+                Ok(n) => n,
+                // Cancelled or aborted meanwhile: its bytes go.
+                Err(_) => return false,
+            };
+            u.bytes.drain(..pushed);
+            if !u.bytes.is_empty() {
+                return true;
+            }
+            if u.end {
+                settled(id, sender.finish(id));
+            }
+            false
+        });
+    }
+}
+
+/// What a call on the duplex's sender did. Main's cancel came first when
+/// the body is gone: the machine's part after it is dropped, as the cancel
+/// settled the body. Anything else is the core's own bug, logged.
+fn settled(id: u64, result: Result<(), SendError>) {
+    match result {
+        Ok(()) | Err(SendError::Gone) => {}
+        Err(error) => crate::log::warn(
+            "swarm body refused",
+            serde_json::json!({ "id": id, "error": error.name() }),
+        ),
     }
 }
 
@@ -476,6 +724,7 @@ impl Io for Wire {
             method,
             params,
             reply_bound,
+            opens,
         } = outgoing;
         let dispatch = self.requests.send_with(
             Owner::Swarm,
@@ -485,11 +734,23 @@ impl Io for Wire {
             || Start::Anytime,
             Expect {
                 reply_bound: Some(reply_bound),
-                streams: false,
+                streams: opens.is_some(),
             },
         );
         match dispatch {
-            Dispatch::Sent(id) => Sent::Id(id),
+            Dispatch::Sent(id) => {
+                // Before main's answer can be handled: this thread handles
+                // it, after this.
+                if let Some(codes) = opens
+                    && let Err(error) = self.duplex.ask_with(id, codes)
+                {
+                    crate::log::warn(
+                        "swarm stream not registered",
+                        serde_json::json!({ "error": error.category() }),
+                    );
+                }
+                Sent::Id(id)
+            }
             // The gate's room, or the writer's, wakes the thread.
             Dispatch::Full | Dispatch::NoRoom => Sent::Wait,
             Dispatch::TooLarge | Dispatch::Closed | Dispatch::Late => Sent::Refused,
@@ -501,8 +762,13 @@ impl Io for Wire {
     }
 
     fn cancel(&mut self, core: u64) {
-        // Watched from now on (D13); one main has answered needs none.
-        if !self.requests.cancelled(core, Instant::now()) {
+        // A stream retires: what is owed for it goes, and its frames are
+        // dropped as they come.
+        let retire = self.duplex.withdraw(core);
+        // Watched from now on (D13); one main has answered needs none,
+        // unless its stream is still open.
+        let watched = self.requests.cancelled(core, Instant::now());
+        if !watched && retire != Retire::SendCancel {
             return;
         }
         let cancel = format!(r#"{{"type":"cancel","id":{core}}}"#);
@@ -568,6 +834,91 @@ impl Io for Wire {
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         })
+    }
+
+    fn replied(&mut self, core: u64, head: Option<Option<u64>>) -> Result<bool, Fault> {
+        let replied = match head {
+            None => self.duplex.answered(core, false),
+            Some(None) => self.duplex.answered(core, true),
+            Some(Some(len)) => self.duplex.answered_sized(core, len),
+        };
+        match replied.map_err(|e| Fault(e.category()))? {
+            Replied::Deliver => Ok(true),
+            Replied::Retired => Ok(false),
+        }
+    }
+
+    fn credit(&mut self, core: u64, bytes: usize) {
+        if let Err(overcredit) = self.duplex.release(core, bytes) {
+            // A machine credited more than its stream holds: the core's own
+            // bug, refused without failing the connection.
+            crate::log::warn(
+                "swarm stream overcredited",
+                serde_json::json!({ "credit": overcredit.credit, "held": overcredit.held }),
+            );
+        }
+    }
+
+    fn body(&mut self, body: u64, out: BodyOut) {
+        let sender = self.duplex.sender_mut();
+        match out {
+            BodyOut::Head { bytes } => {
+                settled(
+                    body,
+                    sender.head(body, stream::body_head(body, bytes), true),
+                );
+            }
+            BodyOut::Data(bytes) => {
+                if let Some(u) = self.unpushed.get_mut(&body) {
+                    u.bytes.extend(bytes);
+                    return;
+                }
+                let pushed = match sender.push(body, &bytes) {
+                    Ok(n) => n,
+                    Err(error) => return settled(body, Err(error)),
+                };
+                if pushed < bytes.len() {
+                    let mut u = Unpushed::default();
+                    u.bytes.extend(&bytes[pushed..]);
+                    self.unpushed.insert(body, u);
+                }
+            }
+            BodyOut::End => {
+                if let Some(u) = self.unpushed.get_mut(&body) {
+                    u.end = true;
+                    return;
+                }
+                settled(body, sender.finish(body));
+            }
+            // Its abort if the body is open, else its one answer in place of
+            // the head.
+            BodyOut::Abort(why) => {
+                self.unpushed.remove(&body);
+                let (abort, error) = stream::body_abort(why);
+                let Some(reply) = stream::body_error(body, &error) else {
+                    return;
+                };
+                if let Err(error) = sender.settle(body, reply, &abort) {
+                    settled(body, Err(error));
+                }
+            }
+        }
+    }
+
+    fn body_refuse(&mut self, body: u64, error: ErrorBody) {
+        if let Some(reply) = stream::body_error(body, &error) {
+            settled(body, self.duplex.sender_mut().reply(body, reply));
+        }
+    }
+
+    fn forget(&mut self, key: StreamKey) {
+        self.routes.forget(key);
+    }
+
+    fn hash(&mut self, id: u64, ask: AskId, job: Job) {
+        if let Some(hashing) = self.hashing.as_mut() {
+            hashing.submit((id, ask, job));
+        }
     }
 }
 

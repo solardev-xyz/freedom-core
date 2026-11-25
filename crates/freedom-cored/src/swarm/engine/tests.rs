@@ -22,6 +22,20 @@ struct Fake {
     answers: Vec<(u64, Answer)>,
     /// The gate is full: nothing goes.
     full: bool,
+    /// The core's requests that may open a stream, with its codes.
+    opens: BTreeMap<u64, Codes>,
+    /// Main's replies to those, and whether each opened its stream.
+    replied: Vec<(u64, Option<Option<u64>>)>,
+    /// Credit for the core's requests' streams.
+    credits: Vec<(u64, usize)>,
+    /// The parts of the core's `swarm.body` answers.
+    bodies: Vec<(u64, BodyOut)>,
+    /// `swarm.body` refusals.
+    refused: Vec<(u64, ErrorBody)>,
+    /// The stream routes let go of.
+    forgotten: Vec<StreamKey>,
+    /// Work handed to the hashing pool.
+    hashes: Vec<(u64, AskId, Job)>,
 }
 
 impl Io for Fake {
@@ -33,6 +47,9 @@ impl Io for Fake {
         let params = serde_json::from_slice(&outgoing.params).unwrap();
         self.sent
             .push((self.next, outgoing.method, params, outgoing.reply_bound));
+        if let Some(codes) = outgoing.opens {
+            self.opens.insert(self.next, codes);
+        }
         Sent::Id(self.next)
     }
     fn cancel(&mut self, core: u64) {
@@ -50,6 +67,27 @@ impl Io for Fake {
     }
     fn wall_ms(&self) -> u64 {
         1_767_225_600_123
+    }
+    fn replied(&mut self, core: u64, head: Option<Option<u64>>) -> Result<bool, Fault> {
+        assert!(self.opens.contains_key(&core), "a reply that opens nothing");
+        self.replied.push((core, head));
+        // As the duplex: a request the core cancelled retires.
+        Ok(!self.cancels.contains(&core))
+    }
+    fn credit(&mut self, core: u64, bytes: usize) {
+        self.credits.push((core, bytes));
+    }
+    fn body(&mut self, body: u64, out: BodyOut) {
+        self.bodies.push((body, out));
+    }
+    fn body_refuse(&mut self, body: u64, error: ErrorBody) {
+        self.refused.push((body, error));
+    }
+    fn forget(&mut self, key: StreamKey) {
+        self.forgotten.push(key);
+    }
+    fn hash(&mut self, id: u64, ask: AskId, job: Job) {
+        self.hashes.push((id, ask, job));
     }
 }
 
@@ -228,8 +266,6 @@ fn the_door_answers_what_the_core_doesnt_run() {
         ("swarm_publishData", ErrorCode::NotMoved),
         ("swarm_getSigningIdentity", ErrorCode::NotMoved),
         ("swarm_unsubscribe", ErrorCode::InvalidArgument),
-        ("swarm_readData", ErrorCode::Internal),
-        ("swarm_readFeedEntry", ErrorCode::Internal),
     ];
     for (id, (method, code)) in (10..).zip(cases) {
         engine

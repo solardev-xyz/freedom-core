@@ -35,10 +35,17 @@
 //!   64 MiB pool, `FREEDOM_CORED_TEST_SWARM_RUNNING` its 64 running
 //!   requests and `FREEDOM_CORED_TEST_SWARM_WAITING` the 256 that wait
 //!   (design 0015, "Budgets"), so a test reaches `busy` with a few
-//!   requests. With `FREEDOM_CORED_TEST_METHODS`, `test.swarm_world` sets
-//!   the swarm thread's world between the cases one core plays (D11): its
-//!   read budgets and tags' owners afresh, its `Date.now()`, the Swarm
-//!   grants in memory and tags' owners.
+//!   requests. `FREEDOM_CORED_TEST_SWARM_STREAMS` replaces its 32 incoming
+//!   streams (D4), and `FREEDOM_CORED_TEST_SWARM_IDLE_MS` the 60 s idle
+//!   bound of an upload's streams and of a cancelled stream's terminal
+//!   (D13). `FREEDOM_CORED_TEST_SWARM_WRITES=accept` stands in for the
+//!   Swarm stores until SWM-4 PR 7 serves them: the store methods pass the
+//!   door, and every store write is answered as made, with nothing
+//!   written, so an upload's part and body run through the pipe. With
+//!   `FREEDOM_CORED_TEST_METHODS`, `test.swarm_world` sets the swarm
+//!   thread's world between the cases one core plays (D11): its read
+//!   budgets, tags' owners and feed store afresh, its `Date.now()`, the
+//!   Swarm grants in memory, tags' owners and the feed store.
 //! - `FREEDOM_CORED_TEST_DWEB_WRITER_MARKER` names a file the dweb thread
 //!   rewrites with the most verified-body bytes its writer has held queued
 //!   at once (the duplex sender's `held`, capped at 0009's 8 MiB), each
@@ -537,6 +544,15 @@ pub fn swarm_bounds(mut bounds: crate::swarm::engine::Bounds) -> crate::swarm::e
     }
     if let Some(waiting) = read("FREEDOM_CORED_TEST_SWARM_WAITING") {
         bounds.waiting = waiting;
+    }
+    if let Some(streams) = read("FREEDOM_CORED_TEST_SWARM_STREAMS") {
+        bounds.streams = streams;
+    }
+    if let Some(idle) = millis("FREEDOM_CORED_TEST_SWARM_IDLE_MS") {
+        bounds.idle_ms = idle;
+    }
+    if std::env::var_os("FREEDOM_CORED_TEST_SWARM_WRITES").is_some_and(|v| v == "accept") {
+        bounds.stub_writes = true;
     }
     bounds
 }
