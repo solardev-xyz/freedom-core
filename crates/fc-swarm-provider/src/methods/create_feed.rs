@@ -12,9 +12,9 @@ use fc_json::{JsString, JsValue};
 
 use super::permitted;
 use super::writes::{
-    Ended, Ending, Fail, add_row, admit, batch, bee_upload, closing, feed_manifest,
-    feed_not_granted, guard, holds_key, inserted, owner, row as fields, s, signer_key, stamps_call,
-    unavailable, written,
+    Ended, Ending, Fail, add_row, batch, bee_upload, closing, feed_manifest, feed_not_granted,
+    guard, holds_key, inserted, owner, row as fields, s, signer_key, stamps_call, unavailable,
+    written,
 };
 use crate::chunks::hex;
 use crate::js::concat;
@@ -63,7 +63,6 @@ impl CreateFeed {
         approval: Option<Approval>,
     ) -> Result<Self, Outcome> {
         permitted(cx)?;
-        admit(cx, approval, Capability::Feeds)?;
         require_params(params)?;
         let name = feed_name(params.get("name"))
             .map_err(|m| Failure::invalid_params(m, "invalid_feed_name"))?

@@ -32,9 +32,8 @@ use fc_swarm::verify::soc_address;
 
 use super::permitted;
 use super::writes::{
-    Ended, Ending, Fail, add_row, admit, batch, closing, feed_not_granted, guard, inserted, owner,
-    row, s, signature, signer_key, soc_up, soc_uploaded, stamps_call, still_here, unavailable,
-    written,
+    Ended, Ending, Fail, add_row, batch, closing, feed_not_granted, guard, inserted, owner, row, s,
+    signature, signer_key, soc_up, soc_uploaded, stamps_call, still_here, unavailable, written,
 };
 use crate::chunks::hex;
 use crate::machine::params::{bytes32, empty_options, hex_string, require_params};
@@ -118,7 +117,6 @@ impl SocWrite {
         approval: Option<Approval>,
     ) -> Result<Self, Outcome> {
         permitted(cx)?;
-        admit(cx, approval, Capability::Signing)?;
         require_params(params)?;
         empty_options(params.get("options"))?;
         let identifier = hex_string(

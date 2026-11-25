@@ -37,9 +37,9 @@ use super::body::{BodyWriter, Fault, Piece};
 use super::feed_index::{Next, NextIndex, wrapping_index};
 use super::permitted;
 use super::writes::{
-    Ended, Ending, Fail, add_row, admit, batch, bytes_up, bytes_uploaded, closing,
-    feed_not_granted, guard, holds_key, inserted, owner, row, s, signature, signer_key, soc_up,
-    soc_uploaded, stamps_call, still_here, unavailable, written,
+    Ended, Ending, Fail, add_row, batch, bytes_up, bytes_uploaded, closing, feed_not_granted,
+    guard, holds_key, inserted, owner, row, s, signature, signer_key, soc_up, soc_uploaded,
+    stamps_call, still_here, unavailable, written,
 };
 use crate::chunks::single_owner;
 use crate::machine::node::BodyAbort;
@@ -176,7 +176,6 @@ impl FeedWrite {
         approval: Option<Approval>,
     ) -> Result<Self, Outcome> {
         permitted(cx)?;
-        admit(cx, approval, Capability::Feeds)?;
         require_params(params)?;
         let name = match params.get("feedId") {
             Value::String(id) if !id.is_empty() => id.clone(),
@@ -219,7 +218,6 @@ impl FeedWrite {
         approval: Option<Approval>,
     ) -> Result<Self, Outcome> {
         permitted(cx)?;
-        admit(cx, approval, Capability::Feeds)?;
         require_params(params)?;
         let name = feed_name(params.get("name"))
             .map_err(|m| Failure::invalid_params(m, "invalid_feed_name"))?

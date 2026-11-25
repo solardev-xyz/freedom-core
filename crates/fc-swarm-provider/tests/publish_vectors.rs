@@ -2387,3 +2387,60 @@ fn an_end_racing_the_last_write_keeps_its_retry() {
         }
     }
 }
+
+/// An upload a site's rule approved is admitted by its guard, where the
+/// reference admits it: custody taken, or the rule turned off, between
+/// main's check and the hand-off answers `agent_custody` or
+/// `not_auto_approved` there, after the readiness check, the row's insert
+/// and `/stamps`, and nothing is uploaded; the row ends `failed`.
+#[test]
+fn an_auto_upload_is_admitted_at_its_guard() {
+    for (what, custody, rule_on, want) in [
+        ("custody taken", true, true, "agent_custody"),
+        ("rule turned off", false, false, "not_auto_approved"),
+    ] {
+        let node = Node {
+            stamps: Some(usable_stamps()),
+            ..Node::new()
+        };
+        let mut world = site_world();
+        world.custody = custody;
+        if rule_on {
+            world.rules.insert((JsString::from(KEY), "publish"));
+        }
+        let db = HistoryDb::open(CLOCK);
+        let key = JsString::from(KEY);
+        let main = MainSide {
+            node: &node,
+            db: &db,
+            readiness: Ok(()),
+            parts: &BTreeMap::new(),
+            case_key: &key,
+            fail_updates: std::cell::Cell::new(0),
+        };
+        let call = Call {
+            method: Value::str("swarm_publishData"),
+            params: Value::object([
+                ("data", bytes_value(b"x".to_vec())),
+                ("contentType", Value::str("text/plain")),
+            ]),
+            key: key.clone(),
+            approval: Some(Approval::Auto),
+        };
+        let played = play(&mut world, &main, &call, what);
+        assert_eq!(
+            played.ran.outcome,
+            Outcome::Error(Failure::not_authorized(want)),
+            "{what}"
+        );
+        assert_eq!(played.ran.ready.len(), 1, "{what}: the readiness first");
+        let forms: Vec<Form> = played.ran.calls.iter().map(|c| c.call.form).collect();
+        assert_eq!(forms, vec![Form::Stamps], "{what}: nothing uploaded");
+        let rows = db.entries();
+        assert!(rows.contains("\"status\":\"failed\""), "{what}: {rows}");
+        assert!(
+            rows.contains("\"errorMessage\":\"The origin is not authorized for this operation\""),
+            "{what}: {rows}"
+        );
+    }
+}

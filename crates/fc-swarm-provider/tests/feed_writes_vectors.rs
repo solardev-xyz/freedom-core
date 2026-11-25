@@ -2795,3 +2795,61 @@ fn an_end_racing_the_rows_last_write_keeps_its_retry() {
         );
     }
 }
+
+/// A feed write a site's rule approved is admitted by its guard, where the
+/// reference admits it: custody taken, or the rule turned off, between
+/// main's check and the hand-off answers `agent_custody` or
+/// `not_auto_approved` there, after the readiness check, the row's insert
+/// and `/stamps`; no manifest is uploaded, nothing is signed, the feed
+/// store is unchanged, and the row ends `failed`.
+#[test]
+fn an_auto_feed_write_is_admitted_at_its_guard() {
+    let text = text_of("keys.json");
+    let index = Index::new(&text).unwrap();
+    let keys = keys(&index);
+    for (what, custody, rule_on, want) in [
+        ("custody taken", true, true, "agent_custody"),
+        ("rule turned off", false, false, "not_auto_approved"),
+    ] {
+        let (key, store) = feed_site();
+        let mut world = site_world(&key, store.clone());
+        world.custody = custody;
+        if rule_on {
+            world.rules.insert((key.clone(), "feeds".to_owned()));
+        }
+        let mut thread = Thread::new(world, &keys, WriteNode::new());
+        thread.node.stamps = Some(STAMPS.to_owned());
+        thread.start(&Call {
+            method: Value::str("swarm_createFeed"),
+            params: Value::object([("name", Value::str("blog"))]),
+            key,
+            approval: Some(Approval::Auto),
+        });
+        assert_eq!(
+            thread.run(),
+            Outcome::Error(Failure::not_authorized(want)),
+            "{what}"
+        );
+        assert_eq!(thread.ready.len(), 1, "{what}: the readiness first");
+        let forms: Vec<Form> = thread.calls.iter().map(|c| c.call.form).collect();
+        assert_eq!(forms, vec![Form::Stamps], "{what}: no manifest uploaded");
+        assert!(thread.vault.signed.is_empty(), "{what}: nothing signed");
+        assert_eq!(
+            *thread.world.keeper.store(),
+            store,
+            "{what}: the store unchanged"
+        );
+        let rows = thread.history();
+        let row = &rows.as_array().unwrap()[0];
+        assert_eq!(
+            row.get("status").and_then(JsValue::as_str),
+            Some("failed"),
+            "{what}"
+        );
+        assert_eq!(
+            row.get("errorMessage").and_then(JsValue::as_str),
+            Some("The origin is not authorized for this operation"),
+            "{what}"
+        );
+    }
+}
