@@ -39,6 +39,14 @@ struct Fake {
     forgotten: Vec<StreamKey>,
     /// Work handed to the hashing pool.
     hashes: Vec<(u64, AskId, Job)>,
+    /// `swarm-feeds.json`'s texts written, in order.
+    feed_texts: Vec<String>,
+    /// The next feed store write fails.
+    fail_feeds: bool,
+    /// The history's statements run, in order.
+    statements: Vec<Statement>,
+    /// The vault's asks, by tag.
+    vaults: Vec<(u64, VaultAsk)>,
 }
 
 impl Io for Fake {
@@ -91,6 +99,27 @@ impl Io for Fake {
     }
     fn hash(&mut self, id: u64, ask: AskId, job: Job) {
         self.hashes.push((id, ask, job));
+    }
+    fn write_feeds(&mut self, text: &str) -> Result<(), JsString> {
+        if std::mem::take(&mut self.fail_feeds) {
+            return Err(JsString::from("disk full"));
+        }
+        self.feed_texts.push(text.to_owned());
+        Ok(())
+    }
+    fn save_manifests(&mut self, _save: &Save) -> Result<(), JsString> {
+        Ok(())
+    }
+    fn history(&mut self, statements: &[Statement]) -> Result<(), JsString> {
+        self.statements.extend_from_slice(statements);
+        Ok(())
+    }
+    fn history_insert(&mut self, statement: &Statement) -> Result<i64, JsString> {
+        self.statements.push(statement.clone());
+        Ok(i64::try_from(self.statements.len()).unwrap_or(i64::MAX))
+    }
+    fn vault(&mut self, tag: u64, ask: VaultAsk) {
+        self.vaults.push((tag, ask));
     }
 }
 
@@ -1173,7 +1202,7 @@ fn a_topic_and_an_upload_turn_go_in_order() {
     assert!(stages(&engine, 2).contains("Turn"));
     // The first's answer hands both on to the second, and frees its
     // upload's charge.
-    engine.end_holdings(1);
+    engine.end_holdings(&mut io, 1);
     let ready: Vec<_> = engine
         .ready
         .iter()

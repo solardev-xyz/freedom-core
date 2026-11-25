@@ -1466,6 +1466,21 @@ impl Approvals {
             )),
         }
     }
+
+    /// Design 0015's D15: a page's SOC that the swarm thread hands the
+    /// vault, decided again as 0012 decides one (`page_soc`), over the
+    /// Swarm grants as they stand, though the machine already checked. The
+    /// swarm thread names the page's key, its custody as main last reported
+    /// it, how the request was approved, the SOC's kind and the site's feed
+    /// grant, which the core's own feed store holds from SWM-4. The reason
+    /// it isn't covered, if it isn't.
+    pub fn swarm_soc_covered(&self, ask: &SocAsk<'_>, clocks: Clocks) -> Result<(), &'static str> {
+        let store = self.grants.view::<SwarmStore>(clocks.wall_ms / 1000);
+        match page_soc(&store, ask) {
+            Decision::Covered => Ok(()),
+            Decision::NotCovered(reason) => Err(reason.name()),
+        }
+    }
 }
 
 /// `sign.transaction`'s `authorization.kind`: one of the token kinds'

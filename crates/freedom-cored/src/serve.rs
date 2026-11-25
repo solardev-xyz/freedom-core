@@ -180,6 +180,12 @@ pub enum Event {
         tag: u64,
         verdict: crate::eip1193::Verdict,
     },
+    /// The swarm thread's ask of the vault under `tag` (design 0015, D15):
+    /// a key's owner or a page's SOC's signature, answered back to it.
+    SwarmVault {
+        tag: u64,
+        ask: Box<crate::swarm::engine::VaultAsk>,
+    },
 }
 
 // A stream mark's slot here is within what the reader charges its entry.
@@ -551,6 +557,7 @@ pub fn run(options: &Options) -> Exit {
         grant_root_arg: options.grant_root.clone(),
         user_data_dir_arg: options.user_data_dir.clone(),
         handover: setup.handover,
+        history_handover: setup.history_handover,
         confinement: report.to_json(),
         secrets,
         worker,
@@ -773,6 +780,17 @@ pub fn run(options: &Options) -> Exit {
                     break exit;
                 }
             }
+            // The vault answers at once, on this thread, which holds it.
+            Ok(Event::SwarmVault { tag, ask }) => {
+                let answer = Box::new(core.vault.swarm_vault(&ask));
+                let sent = core
+                    .swarm
+                    .as_ref()
+                    .is_some_and(|thread| thread.send(swarm::In::Vault { tag, answer }, None));
+                if !sent {
+                    break Exit::Internal;
+                }
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break Exit::Ok,
         }
@@ -857,6 +875,8 @@ struct Setup {
     prepared: journal::Prepared,
     /// The legacy receipts' hand-over, with `--user-data-dir` (C5).
     handover: Option<crate::payments_store::Handover>,
+    /// The legacy publish history's, beside it (design 0015, D10).
+    history_handover: Option<crate::payments_store::Handover>,
     /// C2's `read_write`.
     read_write: Vec<PathBuf>,
 }
@@ -872,7 +892,8 @@ struct Setup {
 /// - **The legacy receipts handed over** (C5) when `--user-data-dir` is
 ///   given, whatever the hello's `store_moved` will say: the profile's
 ///   root is out of reach once confined. Nothing is done when it is the
-///   Freedom root (the old layout).
+///   Freedom root (the old layout). The legacy `publish-history.json` the
+///   same way (design 0015, D10), for the Swarm stores.
 ///
 /// The vault's tightening at start stays on the snapshot thread, after the
 /// node, delete and metadata journals' recovery that may replace the vault
@@ -906,6 +927,13 @@ fn setup(options: &Options, gate: &gate::Gate) -> Result<Setup, Exit> {
         .user_data_dir
         .as_deref()
         .map(|dir| crate::payments_store::hand_over_legacy(dir, &options.grant_root));
+    let history_handover = options.user_data_dir.as_deref().map(|dir| {
+        crate::payments_store::hand_over_file(
+            &crate::payments_store::PUBLISH_HISTORY,
+            dir,
+            &options.grant_root,
+        )
+    });
     let mut read_write = vec![gate.identity_dir.clone(), options.grant_root.clone()];
     for (node, root) in [
         ("bee", &options.node_roots.bee),
@@ -924,6 +952,7 @@ fn setup(options: &Options, gate: &gate::Gate) -> Result<Setup, Exit> {
     Ok(Setup {
         prepared,
         handover,
+        history_handover,
         read_write,
     })
 }
@@ -1006,6 +1035,9 @@ struct Core {
     /// The legacy receipts' hand-over before `confine` (design 0017, C5),
     /// with `--user-data-dir`: where the payments import reads.
     handover: Option<crate::payments_store::Handover>,
+    /// The legacy `publish-history.json`'s hand-over beside it (design
+    /// 0015, D10): where the publish history's import reads.
+    history_handover: Option<crate::payments_store::Handover>,
     /// What `confine` reported (design 0017): the hello's `confinement`.
     confinement: serde_json::Value,
     worker: Worker,
@@ -1091,6 +1123,7 @@ const STORES: &[&str] = &[
     "payments",
     "safe_pending",
     "rpc_api_keys",
+    crate::swarm::stores::STORE,
 ];
 
 /// The stores this core serves once named: the echo holds only these.
@@ -1100,6 +1133,7 @@ const STORES_SERVED: &[&str] = &[
     "safe_pending",
     "payments",
     "rpc_api_keys",
+    crate::swarm::stores::STORE,
 ];
 
 /// The hello's `store_moved`, each name once, in the hello's order. A name
@@ -1857,9 +1891,15 @@ impl Core {
                     Some(Err(_)) => return Flow::Exit(Exit::Internal),
                     None => None,
                 };
-                let sent = self.swarm.as_ref().is_some_and(|thread| {
-                    thread.send(swarm::In::World { id, params }, self.credit.take())
-                });
+                let message = if method == "test.swarm_feed_change" {
+                    swarm::In::FeedChange { id, params }
+                } else {
+                    swarm::In::World { id, params }
+                };
+                let sent = self
+                    .swarm
+                    .as_ref()
+                    .is_some_and(|thread| thread.send(message, self.credit.take()));
                 if sent {
                     Flow::Continue
                 } else {
@@ -2107,9 +2147,25 @@ impl Core {
                     self.vault.configure_payments(root.clone(), import);
                     true
                 }
+                // The swarm thread loads them as it starts, below (design
+                // 0015, D3).
+                crate::swarm::stores::STORE => true,
                 _ => false,
             })
             .collect();
+        // The Swarm stores under the Freedom root; the legacy history's
+        // import where its hand-over left it (design 0015, D10), as the
+        // receipts' is.
+        let swarm_stores = self
+            .stores_echo
+            .contains(&crate::swarm::stores::STORE)
+            .then(|| crate::swarm::stores::Place {
+                root: root.clone(),
+                history_import: match (self.history_handover, user_data_dir.as_deref()) {
+                    (Some(handover), Some(dir)) => handover.import(dir, &root),
+                    _ => crate::payments_store::Import::at(root.clone()),
+                },
+            });
         // The dweb thread, and stream frames from now on: before the reply,
         // so nothing main sends after reading it is refused.
         let Some(start) = self.dweb_start.take() else {
@@ -2126,6 +2182,7 @@ impl Core {
                 grants,
                 grants_moved,
                 bindings: self.connects.bindings(),
+                stores: swarm_stores,
             }
         };
         match dweb::spawn(start.out, start.events, Arc::clone(&self.requests)) {

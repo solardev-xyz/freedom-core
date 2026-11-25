@@ -54,6 +54,11 @@
 //! - **The clocks** (D14): deadlines run on the thread's monotonic clock;
 //!   the machines' `Date.now()` is the wall clock, which the test hooks fix
 //!   (`test.swarm_world`, D11).
+//! - **The stores** (D3; [`super::stores`]): loaded as the thread starts,
+//!   once the hello named `swarm_stores` in `store_moved`, and written by
+//!   the thread alone, synchronously, as the engine asks.
+//! - **The vault** (D15): its asks go to the event loop, which holds it
+//!   ([`Event::SwarmVault`]); the answer comes back here ([`In::Vault`]).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::Range;
@@ -73,7 +78,10 @@ use fc_swarm_provider::machine::{AskId, BodyOut, Job};
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
-use super::engine::{Answer, Bounds, Engine, Fault, Io, Ms, NAME_TAG, Outgoing, Sent, Shared};
+use super::engine::{
+    Answer, Bounds, Engine, Fault, Io, Ms, NAME_TAG, Outgoing, Sent, Shared, VaultAsk,
+};
+use super::stores::{Files, Place};
 use super::{stream, wire};
 use crate::eip1193::Verdict;
 use crate::naming;
@@ -99,7 +107,7 @@ pub fn handles(method: &str) -> bool {
 /// The test hooks' methods this thread answers (D11), with the `testhooks`
 /// feature and its hook only.
 #[cfg(feature = "testhooks")]
-pub const TEST_METHODS: &[&str] = &["test.swarm_world"];
+pub const TEST_METHODS: &[&str] = &["test.swarm_world", "test.swarm_feed_change"];
 
 /// What the event loop forwards.
 pub enum In {
@@ -133,6 +141,12 @@ pub enum In {
         tag: u64,
         verdict: Verdict,
     },
+    /// The vault's answer to the ask under `tag`: [`fc_swarm_provider::machine::Event::Owner`]
+    /// or [`fc_swarm_provider::machine::Event::Signed`].
+    Vault {
+        tag: u64,
+        answer: Box<fc_swarm_provider::machine::Event>,
+    },
     /// The writer has written `swarm.request` `id`'s answer, or dropped it.
     Written(u64),
     /// Room in the writer, a free slot at main, or a hashing result.
@@ -140,6 +154,12 @@ pub enum In {
     /// `test.swarm_world` (D11).
     #[cfg(feature = "testhooks")]
     World {
+        id: u64,
+        params: Option<Box<RawValue>>,
+    },
+    /// `test.swarm_feed_change` (D11).
+    #[cfg(feature = "testhooks")]
+    FeedChange {
         id: u64,
         params: Option<Box<RawValue>>,
     },
@@ -206,6 +226,9 @@ pub struct Spawn {
     /// The ended name bindings, shared with the event loop's page requests
     /// (D1).
     pub bindings: crate::eip1193::Bindings,
+    /// Where the Swarm stores are, once the hello named `swarm_stores` in
+    /// `store_moved` (D3); `None` before.
+    pub stores: Option<Place>,
 }
 
 /// Starts the swarm thread. It writes to `out`, sends its requests through
@@ -230,13 +253,16 @@ pub fn spawn(start: Spawn) -> std::io::Result<Handle> {
         grants,
         grants_moved,
         bindings,
+        stores,
     } = start;
     std::thread::Builder::new()
         .name("swarm".into())
         .spawn(move || {
             let _notice = transport::DeathNotice::new(events.clone(), "swarm");
-            let wire = Wire {
+            let mut wire = Wire {
                 routes: Arc::clone(requests.routes()),
+                events: events.clone(),
+                files: None,
                 out,
                 link,
                 requests,
@@ -253,14 +279,25 @@ pub fn spawn(start: Spawn) -> std::io::Result<Handle> {
                 unpushed: BTreeMap::new(),
                 hashing: Some(hashing),
             };
+            let mut shared = Shared::new(grants, bindings);
+            // The stores load as the thread starts (D3), off the event loop.
+            if let Some(place) = stores {
+                let loaded = Files::load(place, wire.wall_ms());
+                shared.keeper = fc_swarm_provider::machine::keeper::Keeper::new(loaded.feeds);
+                shared.manifests = loaded.manifests;
+                shared.stores_moved = true;
+                wire.files = Some(loaded.files);
+            }
             let thread = Thread {
                 engine: Engine::new(
                     crate::testhooks::swarm_bounds(Bounds::default()),
-                    Shared::new(grants, bindings),
+                    shared,
                     grants_moved,
                 ),
                 wire,
                 started: Instant::now(),
+                #[cfg(feature = "testhooks")]
+                parked: VecDeque::new(),
             };
             let event = match run(&rx, thread) {
                 Stop::Protocol(category) => Event::ProtocolError(category),
@@ -306,6 +343,13 @@ fn run(rx: &Receiver<Mail>, mut thread: Thread) -> Stop {
             .map_or(Duration::from_secs(3600), |at| {
                 Duration::from_millis(at.saturating_sub(thread.now()))
             });
+        // A vault answer the test hooks park is polled for its release.
+        #[cfg(feature = "testhooks")]
+        let wait = if thread.parked.is_empty() {
+            wait
+        } else {
+            wait.min(Duration::from_millis(10))
+        };
         let flow = match rx.recv_timeout(wait) {
             // The frame's credit goes once its message is handled.
             Ok((message, _credit)) => thread.handle(message),
@@ -324,6 +368,10 @@ struct Thread {
     engine: Engine,
     wire: Wire,
     started: Instant,
+    /// Vault answers the test hooks hold back (`FREEDOM_CORED_TEST_SWARM_HOLD`,
+    /// D11), in order, until the hook's release.
+    #[cfg(feature = "testhooks")]
+    parked: VecDeque<(u64, fc_swarm_provider::machine::Event)>,
 }
 
 impl Thread {
@@ -335,6 +383,15 @@ impl Thread {
     /// The hashing pool's results, the deadlines due, and what can be
     /// written; then whatever stopped the thread meanwhile.
     fn turn(&mut self) -> Flow {
+        #[cfg(feature = "testhooks")]
+        if !self.parked.is_empty() && crate::testhooks::swarm_hold_released() {
+            while let Some((tag, answer)) = self.parked.pop_front() {
+                let now = self.now();
+                self.engine
+                    .vaulted(&mut self.wire, now, tag, answer)
+                    .map_err(fault)?;
+            }
+        }
         while let Some((id, ask, done)) = self.wire.hashing.as_mut().and_then(SwarmHashing::take) {
             let now = self.now();
             self.engine
@@ -396,6 +453,7 @@ impl Thread {
                 self.engine.response(&mut self.wire, now, id, outcome)
             }
             In::Name { tag, verdict } => self.engine.named(&mut self.wire, now, tag, verdict),
+            In::Vault { tag, answer } => self.vaulted(now, tag, *answer),
             In::Written(id) => self.engine.written(&mut self.wire, now, id),
             In::Drained => self.engine.room(&mut self.wire, now),
             #[cfg(feature = "testhooks")]
@@ -403,9 +461,48 @@ impl Thread {
                 self.world(id, params.as_deref().map(RawValue::get));
                 Ok(())
             }
+            #[cfg(feature = "testhooks")]
+            In::FeedChange { id, params } => {
+                match feed_change_params(params.as_deref().map(RawValue::get)) {
+                    Some(change) => self.engine.feed_change(&mut self.wire, now, id, change),
+                    None => {
+                        self.wire.answer(
+                            id,
+                            Answer::Error(ErrorBody::new(
+                                ErrorCode::InvalidArgument,
+                                "test.swarm_feed_change's params",
+                            )),
+                        );
+                        Ok(())
+                    }
+                }
+            }
         };
         flow.map_err(fault)?;
         self.wire.flush()
+    }
+
+    /// The vault's answer under `tag`, to the engine; or, while the test
+    /// hooks hold that kind back, parked until their release (D11).
+    fn vaulted(
+        &mut self,
+        now: Ms,
+        tag: u64,
+        answer: fc_swarm_provider::machine::Event,
+    ) -> Result<(), Fault> {
+        #[cfg(feature = "testhooks")]
+        {
+            use fc_swarm_provider::machine::Event;
+            let kind = match &answer {
+                Event::Owner(_) => "owner",
+                _ => "sign",
+            };
+            if !self.parked.is_empty() || crate::testhooks::swarm_hold_parks(kind) {
+                self.parked.push_back((tag, answer));
+                return Ok(());
+            }
+        }
+        self.engine.vaulted(&mut self.wire, now, tag, answer)
     }
 
     /// A stream's entry from main: a part's or a node body's data in frames
@@ -477,15 +574,19 @@ impl Thread {
         }
     }
 
-    /// `test.swarm_world { reset?, clock?, grants?, tags?, feeds? }` (D11):
-    /// one core plays every case, its world set between them. `reset`
-    /// starts the read budgets, the tags' owners and the feed store
-    /// afresh; `clock` fixes the machines' `Date.now()`; `grants` replaces
-    /// the Swarm grants in memory (the file's form); `tags` sets tags'
-    /// owners (`[[uid, key], …]`); `feeds` replaces the feed store with the
-    /// one a `swarm-feeds.json` text loads, until PR 7 loads the file. It answers `{ memory, requests, streams }`: the pool's charges,
-    /// the requests the thread holds and the incoming streams' slots taken,
-    /// as they stand.
+    /// `test.swarm_world { reset?, clock?, grants?, tags?, feeds?, reload? }`
+    /// (D11): one core plays every case, its world set between them.
+    /// `reset` starts the read budgets and the tags' owners afresh, and the
+    /// stores: once they have moved, `swarm-feeds.json` removed and the
+    /// publish history a new, empty database (before the move, the feed
+    /// store empty in memory); `clock` fixes the machines' `Date.now()`;
+    /// `grants` replaces the Swarm grants in memory (the file's form);
+    /// `tags` sets tags' owners (`[[uid, key], …]`); `feeds` replaces
+    /// `swarm-feeds.json` with the text and loads it as a start does (before
+    /// the move, the store in memory); `reload` reads the feed store and the
+    /// manifest store again from their files, as a start does. It answers
+    /// `{ memory, requests, streams }`: the pool's charges, the requests the
+    /// thread holds and the incoming streams' slots taken, as they stand.
     #[cfg(feature = "testhooks")]
     fn world(&mut self, id: u64, params: Option<&str>) {
         use fc_swarm_provider::budgets::ReadBudgets;
@@ -501,6 +602,8 @@ impl Thread {
             grants: Option<Box<RawValue>>,
             tags: Option<Vec<(u64, String)>>,
             feeds: Option<String>,
+            #[serde(default)]
+            reload: bool,
         }
         let parsed = params.and_then(|p| serde_json::from_str::<WorldParams>(p).ok());
         let Some(world) = parsed else {
@@ -513,11 +616,19 @@ impl Thread {
             );
             return;
         };
+        use fc_swarm_provider::machine::keeper::Keeper;
+        let wall = self.wire.wall_ms();
         let shared = self.engine.shared_mut();
         if world.reset {
             shared.budgets = ReadBudgets::new();
             shared.tags = TagOwners::new();
-            shared.feeds = FeedStore::empty();
+            shared.keeper = Keeper::new(match self.wire.files.as_mut() {
+                Some(files) => {
+                    files.reset_history(wall);
+                    files.reset_feeds(None, wall)
+                }
+                None => FeedStore::empty(),
+            });
         }
         if let Some(grants) = world.grants {
             let store = SwarmStore::load(grants.get().as_bytes()).unwrap_or_default();
@@ -530,7 +641,17 @@ impl Thread {
             shared.tags.set(uid, fc_json::JsString::from(key));
         }
         if let Some(text) = world.feeds {
-            shared.feeds = FeedStore::load(Some(text.as_bytes()), 0, |_| false).store;
+            shared.keeper = Keeper::new(match self.wire.files.as_mut() {
+                Some(files) => files.reset_feeds(Some(&text), wall),
+                None => FeedStore::load(Some(text.as_bytes()), 0, |_| false).store,
+            });
+        }
+        if world.reload
+            && let Some(files) = self.wire.files.as_mut()
+        {
+            let (feeds, manifests) = files.reload(wall);
+            shared.keeper = Keeper::new(feeds);
+            shared.manifests = manifests;
         }
         if world.clock.is_some() {
             self.wire.clock = world.clock;
@@ -545,9 +666,79 @@ impl Thread {
     }
 }
 
+/// `test.swarm_feed_change`'s params (D11): a feed store operation by its
+/// reference name and its arguments, as `swarm.identities` will name them:
+/// `{ op, key?, data?, options?, index?, identityId?, name?, reference? }`.
+#[cfg(feature = "testhooks")]
+fn feed_change_params(
+    params: Option<&str>,
+) -> Option<fc_swarm_provider::stores::feeds::FeedChange> {
+    use fc_json::{JsString, JsValue};
+    use fc_swarm_provider::stores::feeds::{FeedChange, Source};
+    let params = fc_json::parse(params?).ok()?;
+    let member = |name: &str| params.get(name).cloned().unwrap_or(JsValue::Undefined);
+    let text = |name: &str| match params.get(name) {
+        Some(JsValue::String(s)) => Some(s.clone()),
+        _ => None,
+    };
+    let key = || text("key");
+    let source = Source::User;
+    Some(match text("op")?.as_str() {
+        "setOriginEntry" => FeedChange::SetOriginEntry {
+            key: key()?,
+            data: member("data"),
+        },
+        "allocatePublisherKeyIndex" => FeedChange::AllocatePublisherKeyIndex,
+        "createAppScopedIdentity" => FeedChange::CreateAppScopedIdentity {
+            key: key()?,
+            options: member("options"),
+            source,
+        },
+        "createAppScopedIdentityAt" => FeedChange::CreateAppScopedIdentityAt {
+            key: key()?,
+            index: member("index"),
+            options: member("options"),
+            source,
+        },
+        "ensureAntWalletIdentity" => FeedChange::EnsureAntWalletIdentity {
+            key: key()?,
+            options: member("options"),
+            source,
+        },
+        "activateIdentity" => FeedChange::ActivateIdentity {
+            key: key()?,
+            identity_id: member("identityId"),
+            source,
+        },
+        "grantFeedAccess" => FeedChange::GrantFeedAccess {
+            key: key()?,
+            source,
+        },
+        "revokeFeedAccess" => FeedChange::RevokeFeedAccess {
+            key: key()?,
+            source,
+        },
+        "setFeed" => FeedChange::SetFeed {
+            key: key()?,
+            name: text("name").unwrap_or_else(|| JsString::from("")),
+            data: member("data"),
+        },
+        "updateFeedReference" => FeedChange::UpdateFeedReference {
+            key: key()?,
+            name: text("name")?,
+            reference: member("reference"),
+        },
+        _ => return None,
+    })
+}
+
 /// The engine's [`Io`]: the gate, the writer and the naming thread.
 struct Wire {
     out: Sender<Out>,
+    /// The event loop, for the vault's asks (D15).
+    events: Sender<Event>,
+    /// The Swarm stores' files, once they have moved (D3).
+    files: Option<Files>,
     link: Arc<Link>,
     requests: Arc<Requests>,
     /// The share of the writer for large answers.
@@ -928,6 +1119,53 @@ impl Io for Wire {
         if let Some(hashing) = self.hashing.as_mut() {
             hashing.submit((id, ask, job));
         }
+    }
+
+    fn write_feeds(&mut self, text: &str) -> Result<(), fc_json::JsString> {
+        self.files_mut()?.write_feeds(text)
+    }
+
+    fn save_manifests(
+        &mut self,
+        save: &fc_swarm_provider::stores::manifests::Save,
+    ) -> Result<(), fc_json::JsString> {
+        self.files_mut()?.save_manifests(save)
+    }
+
+    fn history(
+        &mut self,
+        statements: &[fc_swarm_provider::stores::history::Statement],
+    ) -> Result<(), fc_json::JsString> {
+        let now = self.wall_ms();
+        self.files_mut()?.history(statements, now)
+    }
+
+    fn history_insert(
+        &mut self,
+        statement: &fc_swarm_provider::stores::history::Statement,
+    ) -> Result<i64, fc_json::JsString> {
+        let now = self.wall_ms();
+        self.files_mut()?.history_insert(statement, now)
+    }
+
+    fn vault(&mut self, tag: u64, ask: VaultAsk) {
+        // The event loop outlives this thread: it drops the thread first.
+        let _ = self.events.send(Event::SwarmVault {
+            tag,
+            ask: Box::new(ask),
+        });
+    }
+}
+
+impl Wire {
+    /// The stores' files: the engine asks for a write only once they have
+    /// moved (its door), so their absence is the core's own bug, answered
+    /// as a failed write.
+    fn files_mut(&mut self) -> Result<&mut Files, fc_json::JsString> {
+        self.files.as_mut().ok_or_else(|| {
+            crate::log::warn("swarm store write before the move", serde_json::json!({}));
+            fc_json::JsString::from(super::stores::HISTORY_FAILED)
+        })
     }
 }
 

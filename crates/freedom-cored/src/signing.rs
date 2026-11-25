@@ -169,6 +169,48 @@ fn sign_with(state: &VaultState, key: KeyRef, digest: &[u8; 32]) -> Result<[u8; 
     fc_evm::sign_digest(derived.signing_key(), digest).map_err(evm_error)
 }
 
+/// A chunk key's reference, as `swarm.request`'s machines name it (design
+/// 0015, SWM-4): the Bee wallet, or a publisher key at a hardened index.
+fn chunk_key(key: fc_swarm_provider::machine::SignKey) -> Result<KeyRef, ErrorBody> {
+    match key {
+        fc_swarm_provider::machine::SignKey::BeeWallet => Ok(KeyRef::BeeWallet),
+        fc_swarm_provider::machine::SignKey::Publisher(index) if index <= 0x7fff_ffff => {
+            Ok(KeyRef::Publisher(index))
+        }
+        fc_swarm_provider::machine::SignKey::Publisher(_) => Err(invalid("Index out of range")),
+    }
+}
+
+/// The owner of a chunk key (design 0015, `Need::Owner`): the key derived
+/// only to take its address, then dropped (wiped).
+pub(crate) fn chunk_owner(
+    state: &VaultState,
+    key: fc_swarm_provider::machine::SignKey,
+) -> Result<[u8; 20], ErrorBody> {
+    let derived = derive(state, chunk_key(key)?)?;
+    Ok(fc_evm::address_of(derived.signing_key()))
+}
+
+/// A page's SOC inside `swarm.request` (design 0015, `Need::Sign`): its
+/// public work first (fc-swarm's preparation, whose digest covers the
+/// chunk the core computed), then the key derived only to sign that digest
+/// and take its address. The signature and the owner.
+pub(crate) fn chunk_signature(
+    state: &VaultState,
+    key: fc_swarm_provider::machine::SignKey,
+    identifier: &[u8; 32],
+    span: u64,
+    payload: &[u8],
+) -> Result<([u8; 65], [u8; 20]), ErrorBody> {
+    let key = chunk_key(key)?;
+    let prepared = fc_swarm::prepare_soc(identifier, Some(span), payload)
+        .map_err(|e| invalid(e.to_string()))?;
+    let derived = derive(state, key)?;
+    let signature =
+        fc_evm::sign_digest(derived.signing_key(), &prepared.digest()).map_err(evm_error)?;
+    Ok((signature, fc_evm::address_of(derived.signing_key())))
+}
+
 /// `{ domain, types, message }`, exactly.
 fn typed_data(value: &Value) -> Result<(&Value, &Value, &Value), ErrorBody> {
     let object = object(value, &["domain", "types", "message"], &[])?;

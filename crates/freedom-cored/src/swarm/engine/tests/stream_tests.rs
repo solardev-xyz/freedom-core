@@ -12,8 +12,10 @@ const OWNER: &str = "1111111111111111111111111111111111111111";
 
 /// An engine with `bounds` (the tests' `engine`, which a test's own
 /// `engine` would hide).
+/// An engine whose stores have moved (D3): `readFeedEntry` and the uploads
+/// pass the door.
 fn fresh(bounds: Bounds) -> Engine {
-    engine(bounds)
+    moved(bounds)
 }
 
 /// A `readFeedEntry` of the latest entry of topic `t` (one byte, repeated)
@@ -369,10 +371,17 @@ const BODY: u64 = 900;
 
 fn stubbed() -> Bounds {
     Bounds {
-        stub_writes: true,
         idle_ms: 1000,
         ..Bounds::default()
     }
+}
+
+/// An engine whose stores have moved (D3): the uploads pass the door, and
+/// their history's statements go to the fake's files.
+fn moved(bounds: Bounds) -> Engine {
+    let mut shared = Shared::new(grants(), Bindings::default());
+    shared.stores_moved = true;
+    Engine::new(bounds, shared, true)
 }
 
 /// Request 1, a `publishData` of `n` bytes from part 0, to its streamed

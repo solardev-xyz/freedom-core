@@ -90,6 +90,9 @@ const MSG_NO_VAULT: &str = "No vault found. Create one first.";
 const MSG_NO_VAULT_SHORT: &str = "No vault found";
 const MSG_INCORRECT: &str = "Incorrect password";
 const MSG_LOCKED: &str = "Vault is locked";
+/// What a page's SOC reads when D15's check refuses it at the vault (design
+/// 0015): the text `swarm.sign_soc` gives the same refusal.
+const SOC_NOT_COVERED: &str = "the page's Swarm grant doesn't cover this SOC";
 const MSG_WEAK: &str = "Password must be at least 8 characters";
 const MSG_INVALID_MNEMONIC: &str = "Invalid mnemonic";
 const MSG_EXISTS_CREATE: &str = "Vault already exists. Use importVault to replace.";
@@ -1354,6 +1357,81 @@ impl Vault {
             .as_str()
             .map(str::to_owned)
             .ok_or_else(internal)
+    }
+
+    /// The swarm thread's ask of the vault (design 0015, SWM-4; D15), on
+    /// this thread, which holds it: [`Vault::swarm_owner`] or
+    /// [`Vault::swarm_sign`].
+    pub fn swarm_vault(
+        &mut self,
+        ask: &crate::swarm::engine::VaultAsk,
+    ) -> fc_swarm_provider::machine::Event {
+        use crate::swarm::engine::VaultAsk;
+        use fc_swarm_provider::machine::Event;
+        match ask {
+            VaultAsk::Owner(key) => Event::Owner(self.swarm_owner(*key)),
+            VaultAsk::Sign(sign) => Event::Signed(self.swarm_sign(sign)),
+        }
+    }
+
+    /// A chunk key's owner (swarm-signer.js's `resolveSwarmSigner`): `None`
+    /// while the vault is locked, for which the machine gives the
+    /// reference's text for each key; another failure's text. The key is
+    /// derived for its address alone, and wiped.
+    pub fn swarm_owner(
+        &self,
+        key: fc_swarm_provider::machine::SignKey,
+    ) -> Result<Option<[u8; 20]>, fc_json::JsString> {
+        match crate::signing::chunk_owner(&self.state, key) {
+            Ok(owner) => Ok(Some(owner)),
+            Err(body) if body.code == ErrorCode::VaultLocked => Ok(None),
+            Err(body) => Err(fc_json::JsString::from(body.message.as_str())),
+        }
+    }
+
+    /// A page's SOC's signature and its key's owner. It signs only once
+    /// 0012's page-SOC decision, run again over the Swarm grants as they
+    /// stand with the custody, approval and feed grant the swarm thread
+    /// sends, covers it, though the machine already checked (D15); a
+    /// refusal, a locked vault or a failure is the text the machine reads.
+    /// The key is derived for the one digest and its address, and wiped.
+    pub fn swarm_sign(
+        &self,
+        sign: &crate::swarm::engine::SignAsk,
+    ) -> Result<fc_swarm_provider::machine::Signed, fc_json::JsString> {
+        use fc_approval::standing::{SocApproval, SocAsk, SocRequest};
+        use fc_swarm_provider::machine::{Approval, Signed, SocKind};
+        let decision = SocAsk {
+            key: &sign.key,
+            agent: sign.agent,
+            approval: match sign.approval {
+                Approval::User => SocApproval::User,
+                Approval::Auto => SocApproval::Auto,
+            },
+            request: match sign.soc.kind {
+                SocKind::Feed => SocRequest::Feed,
+                SocKind::Raw => SocRequest::Raw,
+            },
+            feed_grant: sign.feed_grant,
+        };
+        if let Err(reason) = self.approvals.swarm_soc_covered(&decision, self.clocks()) {
+            crate::log::warn(
+                "swarm: a page SOC the grants don't cover reached the vault",
+                serde_json::json!({ "reason": reason }),
+            );
+            return Err(fc_json::JsString::from(SOC_NOT_COVERED));
+        }
+        let soc = &sign.soc;
+        let (signature, owner) = crate::signing::chunk_signature(
+            &self.state,
+            soc.key,
+            &soc.identifier,
+            soc.span,
+            &soc.payload,
+        )
+        .map_err(|body| fc_json::JsString::from(body.message.as_str()))?;
+        crate::testhooks::swarm_signed();
+        Ok(Signed { signature, owner })
     }
 
     /// Main asked for `chain.fee_reference`: its reply is the chain's fee

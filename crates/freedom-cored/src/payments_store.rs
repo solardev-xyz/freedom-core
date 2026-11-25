@@ -97,7 +97,8 @@ struct Roots {
 /// The legacy import at the database's first open, as the hello set it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Import {
-    /// Where `x402-receipts.json` and its `.migrated` are: the hello's
+    /// Where the legacy file (`x402-receipts.json`, or the publish
+    /// history's `publish-history.json`) and its `.migrated` are: the hello's
     /// `grant_root` without `user_data_dir`; with it, the profile's root in
     /// the old layout, or the Freedom root once the hand-over ran
     /// ([`Handover::import`]).
@@ -316,15 +317,23 @@ impl Store {
 /// Today's stray branch: `file` removed beside a `.migrated`
 /// ([`fsx::remove`]), logged as the reference logs it. Whether it went.
 fn drop_stray(file: &Path) -> bool {
+    drop_stray_of(&RECEIPTS, file)
+}
+
+/// [`drop_stray`] for `legacy`'s file, logged under its store.
+pub(crate) fn drop_stray_of(legacy: &LegacyFile, file: &Path) -> bool {
     let removed = matches!(fsx::remove(file, || true), Ok(Some(_)));
     if removed {
         crate::log::info(
-            "payments: dropped a stray x402-receipts.json (already migrated)",
+            &format!(
+                "{}: dropped a stray {} (already migrated)",
+                legacy.store, legacy.file
+            ),
             serde_json::json!({}),
         );
     } else {
         crate::log::error(
-            "payments: cannot remove a stray x402-receipts.json",
+            &format!("{}: cannot remove a stray {}", legacy.store, legacy.file),
             serde_json::json!({}),
         );
     }
@@ -333,14 +342,67 @@ fn drop_stray(file: &Path) -> bool {
 
 /// The import's line for a file left in place, nothing imported.
 fn not_imported(why: &str) {
+    not_imported_of(&RECEIPTS, why);
+}
+
+/// [`not_imported`] for `legacy`'s file.
+pub(crate) fn not_imported_of(legacy: &LegacyFile, why: &str) {
     crate::log::error(
-        "payments: x402-receipts.json not imported",
+        &format!("{}: {} not imported", legacy.store, legacy.file),
         serde_json::json!({ "reason": why }),
     );
 }
 
+/// A legacy file at the profile's `userData` root that a moved profile
+/// hands over to the Freedom root before `confine` (design 0017, C5; design
+/// 0015's D10 extends it to `publish-history.json`): its name, its name
+/// once imported, the most its import reads, the test hooks' store name for
+/// the copy's writes, and the store its log lines name. Only these fixed
+/// names are ever logged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegacyFile {
+    pub file: &'static str,
+    pub migrated: &'static str,
+    pub max_bytes: usize,
+    /// `FREEDOM_CORED_TEST_GRANT_WRITE_FAIL`'s store name for the copy.
+    pub hooks: &'static str,
+    /// The store whose import reads it, as its log lines name it.
+    pub store: &'static str,
+}
+
+/// `x402-receipts.json`, imported into `payment-history.sqlite`.
+pub const RECEIPTS: LegacyFile = LegacyFile {
+    file: LEGACY_FILE,
+    migrated: MIGRATED_FILE,
+    max_bytes: MAX_LEGACY_BYTES,
+    hooks: "receipts",
+    store: "payments",
+};
+
+/// `publish-history.json`, imported into `publish-history.sqlite` (design
+/// 0015, D10). The reference reads it whole (`publish-history.js`); the
+/// core reads at most 16 MiB, as for the receipts, and leaves a larger file
+/// in place, unread (the history serves without it). The legacy store kept
+/// at most a few hundred entries.
+pub const PUBLISH_HISTORY: LegacyFile = LegacyFile {
+    file: fc_swarm_provider::stores::history::LEGACY_FILE,
+    migrated: "publish-history.json.migrated",
+    max_bytes: 16 << 20,
+    hooks: "publish_history",
+    store: "swarm_stores",
+};
+
+// The migrated name is the reference's: the legacy name and its suffix.
+const _: () = assert!(
+    PUBLISH_HISTORY.migrated.len()
+        == PUBLISH_HISTORY.file.len() + fc_swarm_provider::stores::history::MIGRATED_SUFFIX.len()
+);
+
 /// What [`hand_over_legacy`] did with a moved profile's
-/// `x402-receipts.json` (design 0017, C5), by the step that decided it.
+/// `x402-receipts.json` (design 0017, C5), or [`hand_over_file`] with
+/// another [`LegacyFile`] (design 0015, D10: `publish-history.json`), by
+/// the step that decided it. The steps' texts name the receipts; each is
+/// the same for any legacy file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Handover {
     /// The profile's root and the Freedom root are one directory (the old
@@ -406,10 +468,6 @@ impl Handover {
     }
 }
 
-/// The test hooks' store name for the hand-over's writes and syncs
-/// (`FREEDOM_CORED_TEST_GRANT_WRITE_FAIL`'s `receipts`).
-const HANDOVER_HOOKS: &str = "receipts";
-
 /// Design 0017, C5: a moved profile's legacy receipts handed over from its
 /// root (`user_data_dir`) to the Freedom root (`grant_root`), as a copy
 /// the import then reads there, the original dropped only at a later start,
@@ -418,10 +476,18 @@ const HANDOVER_HOOKS: &str = "receipts";
 /// store is configured; [`Handover::import`] says where the import reads.
 /// Nothing is done when both are one directory.
 pub fn hand_over_legacy(user_data_dir: &Path, grant_root: &Path) -> Handover {
-    hand_over(
+    hand_over_file(&RECEIPTS, user_data_dir, grant_root)
+}
+
+/// [`hand_over_legacy`] for `legacy`'s file (design 0015, D10:
+/// [`PUBLISH_HISTORY`] too), its copy's writes failing under its own test
+/// hooks' name.
+pub fn hand_over_file(legacy: &LegacyFile, user_data_dir: &Path, grant_root: &Path) -> Handover {
+    hand_over_of(
+        legacy,
         user_data_dir,
         grant_root,
-        &crate::testhooks::GrantWrite(HANDOVER_HOOKS),
+        &crate::testhooks::GrantWrite(legacy.hooks),
     )
 }
 
@@ -439,31 +505,41 @@ enum Found {
 /// [`hand_over_legacy`], with `hooks` failing the copy's write steps, and
 /// step 4's sync as its `flush`.
 fn hand_over(user_data_dir: &Path, grant_root: &Path, hooks: &dyn Hooks) -> Handover {
+    hand_over_of(&RECEIPTS, user_data_dir, grant_root, hooks)
+}
+
+/// [`hand_over`] for `legacy`'s file.
+fn hand_over_of(
+    legacy: &LegacyFile,
+    user_data_dir: &Path,
+    grant_root: &Path,
+    hooks: &dyn Hooks,
+) -> Handover {
     if same_dir(user_data_dir, grant_root) {
         return Handover::Same;
     }
-    let original = user_data_dir.join(LEGACY_FILE);
+    let original = user_data_dir.join(legacy.file);
     // 1. As the import's existence check finds it.
     if std::fs::metadata(&original).is_err() {
         return Handover::Absent;
     }
     // 2. A stray beside the profile's root's own `.migrated`: dropped there,
     //    as the import drops it. That `.migrated` never moves.
-    if std::fs::metadata(user_data_dir.join(MIGRATED_FILE)).is_ok() {
-        return Handover::Stray(drop_stray(&original));
+    if std::fs::metadata(user_data_dir.join(legacy.migrated)).is_ok() {
+        return Handover::Stray(drop_stray_of(legacy, &original));
     }
     // 3. Read as the import reads it: anything refused stays.
-    let bytes = match read_file(&original, MAX_LEGACY_BYTES) {
+    let bytes = match read_file(&original, legacy.max_bytes) {
         Read::Bytes(bytes) => bytes,
         Read::Missing => return Handover::Absent,
         Read::Unreadable => {
-            not_imported("unreadable");
+            not_imported_of(legacy, "unreadable");
             return Handover::Kept;
         }
     };
-    let copy = grant_root.join(LEGACY_FILE);
-    let marker = grant_root.join(MIGRATED_FILE);
-    let found = |path: &Path| match read_file(path, MAX_LEGACY_BYTES) {
+    let copy = grant_root.join(legacy.file);
+    let marker = grant_root.join(legacy.migrated);
+    let found = |path: &Path| match read_file(path, legacy.max_bytes) {
         Read::Missing => Found::Missing,
         Read::Bytes(theirs) if theirs == bytes => Found::Same,
         Read::Bytes(_) | Read::Unreadable => Found::Other,
@@ -477,7 +553,10 @@ fn hand_over(user_data_dir: &Path, grant_root: &Path, hooks: &dyn Hooks) -> Hand
     //    import that reads what today's never would.
     if marker_found == Found::Other || copy_found == Found::Other {
         crate::log::error(
-            "payments: x402-receipts.json conflicts with the Freedom root's; legacy import skipped",
+            &format!(
+                "{}: {} conflicts with the Freedom root's; legacy import skipped",
+                legacy.store, legacy.file
+            ),
             serde_json::json!({}),
         );
         return Handover::Conflict;
@@ -492,7 +571,10 @@ fn hand_over(user_data_dir: &Path, grant_root: &Path, hooks: &dyn Hooks) -> Hand
         };
         if let Err(e) = synced {
             crate::log::error(
-                "payments: cannot sync x402-receipts.json.migrated in the Freedom root; the original stays",
+                &format!(
+                    "{}: cannot sync {} in the Freedom root; the original stays",
+                    legacy.store, legacy.migrated
+                ),
                 serde_json::json!({ "error": e.kind().to_string() }),
             );
             return Handover::Dropped(false);
@@ -500,12 +582,18 @@ fn hand_over(user_data_dir: &Path, grant_root: &Path, hooks: &dyn Hooks) -> Hand
         let removed = matches!(fsx::remove(&original, || true), Ok(Some(_)));
         if removed {
             crate::log::info(
-                "payments: dropped x402-receipts.json at the profile's root (imported from its copy)",
+                &format!(
+                    "{}: dropped {} at the profile's root (imported from its copy)",
+                    legacy.store, legacy.file
+                ),
                 serde_json::json!({}),
             );
         } else {
             crate::log::error(
-                "payments: cannot remove x402-receipts.json at the profile's root",
+                &format!(
+                    "{}: cannot remove {} at the profile's root",
+                    legacy.store, legacy.file
+                ),
                 serde_json::json!({}),
             );
         }
@@ -514,30 +602,42 @@ fn hand_over(user_data_dir: &Path, grant_root: &Path, hooks: &dyn Hooks) -> Hand
     // 5. Copied already, not imported yet: the import retries on the copy.
     if copy_found == Found::Same {
         crate::log::info(
-            "payments: x402-receipts.json's copy in the Freedom root awaits its import",
+            &format!(
+                "{}: {}'s copy in the Freedom root awaits its import",
+                legacy.store, legacy.file
+            ),
             serde_json::json!({}),
         );
         return Handover::Waiting;
     }
     // 7. The copy: a crashed copy's temps first (nothing else calls this
     //    for the name), then the bytes read, by fc-store's atomic write.
-    if let Err(e) = fsx::remove_temps(grant_root, LEGACY_FILE) {
+    if let Err(e) = fsx::remove_temps(grant_root, legacy.file) {
         crate::log::warn(
-            "payments: cannot remove x402-receipts.json's temp files in the Freedom root",
+            &format!(
+                "{}: cannot remove {}'s temp files in the Freedom root",
+                legacy.store, legacy.file
+            ),
             serde_json::json!({ "error": e.kind().to_string() }),
         );
     }
     match write_file(&copy, &bytes, hooks) {
         Ok(done) => {
             crate::log::info(
-                "payments: copied x402-receipts.json into the Freedom root",
+                &format!(
+                    "{}: copied {} into the Freedom root",
+                    legacy.store, legacy.file
+                ),
                 serde_json::json!({ "durable": done == Done::Durable }),
             );
             Handover::Copied(done)
         }
         Err(e) => {
             crate::log::error(
-                "payments: cannot copy x402-receipts.json into the Freedom root",
+                &format!(
+                    "{}: cannot copy {} into the Freedom root",
+                    legacy.store, legacy.file
+                ),
                 serde_json::json!({ "error": e.kind().to_string() }),
             );
             Handover::CopyFailed

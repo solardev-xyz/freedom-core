@@ -7,9 +7,10 @@
 //! - **At the door** (D2, D3, D5): a request needs the Swarm grants moved
 //!   (`not_moved`, `data.store: "swarm"`, otherwise); its params are read
 //!   strictly (`invalid_argument`); a method that touches the stores
-//!   answers `not_moved` (`data.store: "swarm_stores"`) until main hands
-//!   them over (SWM-4 PR 7), and `swarm_unsubscribe` is `invalid_argument`
-//!   (main answers it itself) ([`Door`]).
+//!   answers `not_moved` (`data.store: "swarm_stores"`) until `core.hello`
+//!   names `swarm_stores` in `store_moved` ([`Shared::stores_moved`]), and
+//!   `swarm_unsubscribe` is `invalid_argument` (main answers it itself)
+//!   ([`Door`]).
 //! - **Admission** (design 0015, "Budgets"): at most
 //!   [`RUNNING_REQUESTS`] run, at most [`WAITING_REQUESTS`] wait in order,
 //!   and past that a request is `busy` at once: 4900 inside `{
@@ -57,14 +58,29 @@
 //!   connection.
 //! - **Hashing** (D9): `readData`'s leaf checks go to the thread's own
 //!   pool ([`Io::hash`]); the request stays until each result is back.
-//! - **What this step leaves for later:** the stores and the vault (PR 7),
-//!   the mining lane (PR 8: until it comes every GSOC search is answered
-//!   [`Mined::Off`], mining off) and main's own methods (PR 9). The door
-//!   keeps every method that would need them out, so an ask of that kind
-//!   is a core bug: it is logged and its request cancelled. (With the test
-//!   hooks' stand-in for the stores, [`Bounds::stub_writes`], the store
-//!   methods pass the door and every store write is answered as made,
-//!   writing nothing, so the uploads' streams run through the pipe.)
+//! - **The stores** (design 0015, "The stores"; [`super::stores`]): every
+//!   write is made at its ask, synchronously and in the order asked, and
+//!   answered in that order ("SWM-4 must apply feed-store writes in
+//!   order"). A feed store change goes through SW-1's keeper
+//!   ([`Shared::keeper`]), which keeps it in memory only once its durable
+//!   write ([`Io::write_feeds`]) succeeded; the history's statements and
+//!   the manifest store's saves go to the files ([`Io::history`],
+//!   [`Io::history_insert`], [`Io::save_manifests`]).
+//! - **The vault** (D15; [`VaultAsk`]): a key's owner and a SOC's
+//!   signature are asked of the event loop, which holds the vault
+//!   ([`Io::vault`]), and answered to [`Engine::vaulted`]. A raw SOC's
+//!   signature holds its site's key in the keeper (SW-1's hold,
+//!   [`SignSoc::hold`]) from its ask until the vault answers, or the
+//!   machine cancels the ask (its request's cancel or deadline): the
+//!   changes the hold defers apply then, in order, before the machine takes
+//!   the signature, and their callers are answered. A late signature is
+//!   dropped. The sign ask carries D15's inputs: the page's key, its
+//!   custody as main last reported it (the latest live facts, else its
+//!   `PageContext`), how main approved the request, and the site's feed
+//!   grant in the keeper's store.
+//! - **What this step leaves for later:** the mining lane (PR 8: until it
+//!   comes every GSOC search is answered [`Mined::Off`], mining off) and
+//!   main's own methods (PR 9).
 //!
 //! [`memory`]: super::memory
 //! [`CLOSE_BOUND_MS`]: fc_swarm_provider::machine::CLOSE_BOUND_MS
@@ -80,14 +96,18 @@ use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::message::PageContext;
 use fc_protocol::stream::Codes;
 use fc_swarm_provider::budgets::ReadBudgets;
+use fc_swarm_provider::machine::keeper::{ChangeAnswer, ChangeError, HoldId, Keeper, Ran, Ticket};
 use fc_swarm_provider::machine::node::{ERROR_BODY, b64};
 use fc_swarm_provider::machine::shell::Deadline;
 use fc_swarm_provider::machine::{
-    AskId, Body, BodyOut, Call, Capability, Effect, Event, Failed, Failure, Job, KNOWN_METHODS,
-    Live, Mined, Need, NotBuilt, Outcome, Protocol, REQUEST_CHARGE, RUNNING_REQUESTS, Reads,
-    Request, STREAMING_UPLOADS, StoreWrite, TagOwners, WAITING_REQUESTS, World,
+    Approval, AskId, Body, BodyOut, Call, Capability, Effect, Event, Failed, Failure, Job,
+    KNOWN_METHODS, Live, Mined, Need, NotBuilt, Outcome, Protocol, REQUEST_CHARGE,
+    RUNNING_REQUESTS, Reads, Request, STREAMING_UPLOADS, SignKey, SignSoc, StoreWrite, TagOwners,
+    WAITING_REQUESTS, World,
 };
-use fc_swarm_provider::stores::feeds::FeedStore;
+use fc_swarm_provider::stores::feeds::{FeedChange, FeedStore};
+use fc_swarm_provider::stores::history::Statement;
+use fc_swarm_provider::stores::manifests::{ManifestStore, Save};
 use fc_swarm_provider::value::Value;
 
 use super::memory::{self, Pool};
@@ -144,10 +164,6 @@ pub struct Bounds {
     pub streams: usize,
     /// The idle bound ([`IDLE_MS`]).
     pub idle_ms: Ms,
-    /// The test hooks' stand-in for the stores until PR 7 serves them: the
-    /// store methods pass the door, and every store write is answered as
-    /// made, with nothing written. Never on outside the test hooks.
-    pub stub_writes: bool,
 }
 
 impl Default for Bounds {
@@ -160,7 +176,6 @@ impl Default for Bounds {
             uploads: STREAMING_UPLOADS,
             streams: SWARM_STREAMS,
             idle_ms: IDLE_MS,
-            stub_writes: false,
         }
     }
 }
@@ -241,28 +256,81 @@ pub trait Io {
     /// Work for the thread's hashing pool (D9): its result comes to
     /// [`Engine::hashed`] for request `id`'s ask `ask`.
     fn hash(&mut self, id: u64, ask: AskId, job: Job);
+    /// `swarm-feeds.json`'s durable write of `text` (0013), which the
+    /// keeper makes before it keeps a change: `Err` with the text a caller
+    /// reads.
+    fn write_feeds(&mut self, text: &str) -> Result<(), JsString>;
+    /// `swarm-manifest-grants.json`'s save.
+    fn save_manifests(&mut self, save: &Save) -> Result<(), JsString>;
+    /// `publish-history.sqlite`'s statements, in order.
+    fn history(&mut self, statements: &[Statement]) -> Result<(), JsString>;
+    /// One `INSERT` into `publish-history.sqlite`: the new row's rowid.
+    fn history_insert(&mut self, statement: &Statement) -> Result<i64, JsString>;
+    /// An ask of the vault, which the event loop holds: its answer comes
+    /// to [`Engine::vaulted`] under `tag`.
+    fn vault(&mut self, tag: u64, ask: VaultAsk);
+}
+
+/// What the swarm thread asks of the vault (design 0015, "SW-1 in the
+/// core", D15), through the event loop.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VaultAsk {
+    /// [`Need::Owner`]: the key's owner, answered [`Event::Owner`] (`None`
+    /// while the vault is locked).
+    Owner(SignKey),
+    /// [`Need::Sign`]: the SOC's signature and its key's owner, answered
+    /// [`Event::Signed`], once 0012's page-SOC decision, run again over
+    /// the grants as they stand, covers it (D15).
+    Sign(Box<SignAsk>),
+}
+
+/// A SOC to sign, with D15's inputs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SignAsk {
+    pub soc: SignSoc,
+    /// `PageContext.origin`: the site's key.
+    pub key: String,
+    /// The page's custody as main last reported it: the request's latest
+    /// live facts, else its `PageContext.agent`.
+    pub agent: Option<bool>,
+    /// How main approved the request (a method that signs always carries
+    /// one; none reads as the user's).
+    pub approval: Approval,
+    /// The site holds its feed grant in the keeper's store as the
+    /// signature is asked (`hasFeedGrant`).
+    pub feed_grant: bool,
 }
 
 /// What the swarm thread holds that every request reads (design 0015, "In
 /// the core"): the Swarm grants, shared with the event loop (D2), the
-/// ended name bindings, shared with it too (D1), the feed store (read only
-/// until PR 7 serves it), the read budgets and the tags' owners.
+/// ended name bindings, shared with it too (D1), the feed store in SW-1's
+/// keeper and the manifest store (D3: the core's once `swarm_stores` is in
+/// `store_moved`), the read budgets and the tags' owners.
 pub struct Shared {
     pub grants: Arc<Mutex<SwarmStore>>,
     /// The documents whose name binding has ended, shared with the event
     /// loop's page requests (D1): one record for every method family.
     pub bindings: Bindings,
-    pub feeds: FeedStore,
+    /// The feed store and SW-1's holds: every change goes through it.
+    pub keeper: Keeper,
+    pub manifests: ManifestStore,
+    /// `core.hello` named `swarm_stores` in `store_moved` (D3): the stores
+    /// are loaded, and the methods that touch them pass the door.
+    pub stores_moved: bool,
     pub budgets: ReadBudgets,
     pub tags: TagOwners,
 }
 
 impl Shared {
+    /// The stores not moved: the feed store empty, the manifest store not
+    /// loaded.
     pub fn new(grants: Arc<Mutex<SwarmStore>>, bindings: Bindings) -> Self {
         Shared {
             grants,
             bindings,
-            feeds: FeedStore::empty(),
+            keeper: Keeper::new(FeedStore::empty()),
+            manifests: ManifestStore::new(),
+            stores_moved: false,
             budgets: ReadBudgets::new(),
             tags: TagOwners::new(),
         }
@@ -286,7 +354,7 @@ impl<'a> StepWorld<'a> {
                 .grants
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
-            feeds: &shared.feeds,
+            feeds: shared.keeper.store(),
             budgets: &mut shared.budgets,
             tags: &mut shared.tags,
             now,
@@ -331,9 +399,11 @@ impl World for StepWorld<'_> {
 }
 
 /// The methods that read or write the stores (D3): `not_moved` until main
-/// hands them over.
-pub const STORE_METHODS: [&str; 9] = [
+/// hands them over. `readFeedEntry` reads a feed by its name from the feed
+/// store.
+pub const STORE_METHODS: [&str; 10] = [
     "swarm_listFeeds",
+    "swarm_readFeedEntry",
     "swarm_publishData",
     "swarm_publishFiles",
     "swarm_publishChunk",
@@ -407,6 +477,8 @@ enum Stage {
     /// Main's head for the core's request `core` came: its stream is open
     /// (or, cancelled, retiring until main's terminal).
     Open(u64),
+    /// Asked of the vault under this tag.
+    Vault(u64),
 }
 
 /// An ask the engine holds, until its terminal answer has been handed back
@@ -427,6 +499,9 @@ struct Ask {
     closed: bool,
     /// A call whose body streams: its body has had its terminal.
     body_ended: bool,
+    /// A raw SOC's signature: SW-1's hold on its site's key, until the
+    /// vault answers or the ask is cancelled.
+    hold: Option<HoldId>,
 }
 
 enum Phase {
@@ -442,6 +517,11 @@ enum Phase {
 struct Slot {
     phase: Phase,
     page: PageContext,
+    /// How main approved it.
+    approval: Option<Approval>,
+    /// Its page's custody as main last reported it (D15's input): its
+    /// latest live facts, else its `PageContext`.
+    agent: Option<bool>,
     /// The `PageContext` as JSON, for `approval.recheck`.
     page_json: String,
     /// The page's name binding (D1), when its transport key binds its key,
@@ -590,8 +670,23 @@ pub struct Engine {
     /// loop remembers them: a credit for one that was routed here before
     /// its route closed is refused here too.
     closed_bodies: VecDeque<u64>,
-    /// The stand-in stores' last history row ([`Bounds::stub_writes`]).
-    stub_rows: i64,
+    /// Vault asks out, by tag.
+    vaults: BTreeMap<u64, (u64, AskId)>,
+    next_vault: u64,
+    next_hold: u64,
+    next_ticket: u64,
+    /// Feed store changes a hold defers, and whom to answer.
+    tickets: BTreeMap<Ticket, Asker>,
+}
+
+/// Who waits for a feed store change a hold deferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asker {
+    /// A request's write.
+    Ask(u64, AskId),
+    /// `test.swarm_feed_change` `id` (D11).
+    #[cfg(any(test, feature = "testhooks"))]
+    Test(u64),
 }
 
 impl Engine {
@@ -626,7 +721,11 @@ impl Engine {
             bodies: BTreeMap::new(),
             body_of: BTreeMap::new(),
             closed_bodies: VecDeque::new(),
-            stub_rows: 0,
+            vaults: BTreeMap::new(),
+            next_vault: 0,
+            next_hold: 0,
+            next_ticket: 0,
+            tickets: BTreeMap::new(),
         }
     }
 
@@ -694,8 +793,7 @@ impl Engine {
         };
         match Door::of(&params.method) {
             Door::Run => {}
-            // The test hooks' stand-in for the stores lets them through.
-            Door::NotMoved if self.bounds.stub_writes => {}
+            Door::NotMoved if self.shared.stores_moved => {}
             Door::NotMoved => {
                 io.answer(
                     id,
@@ -737,11 +835,15 @@ impl Engine {
             (binding, document)
         });
         let page_json = serde_json::to_string(&page).unwrap_or_else(|_| "{}".to_owned());
+        let approval = params.approval;
+        let agent = page.agent;
         self.slots.insert(
             id,
             Slot {
                 phase: Phase::Waiting(params),
                 page,
+                approval,
+                agent,
                 page_json,
                 binding,
                 deadline: now.saturating_add(total),
@@ -916,6 +1018,85 @@ impl Engine {
                     request.cancel();
                 }
                 self.settle(io, now, id)?;
+            }
+        }
+        self.drive(io, now)
+    }
+
+    /// The vault's answer to the ask under `tag`: an owner
+    /// ([`Event::Owner`]) or a signature ([`Event::Signed`]). One for an ask
+    /// the machine cancelled, or whose request ended, is dropped: a late
+    /// signature signs nothing that goes out. A signature's hold ends first,
+    /// so every change it deferred lands before the machine's next step
+    /// reads the store (design 0015, "The change waits").
+    pub fn vaulted(
+        &mut self,
+        io: &mut impl Io,
+        now: Ms,
+        tag: u64,
+        event: Event,
+    ) -> Result<(), Fault> {
+        self.deadlines(io, now)?;
+        let Some((id, ask_id)) = self.vaults.remove(&tag) else {
+            return Ok(());
+        };
+        let hold = self
+            .slots
+            .get_mut(&id)
+            .and_then(|slot| slot.asks.remove(&ask_id))
+            .and_then(|ask| ask.hold);
+        if let Some(hold) = hold {
+            self.release_hold(io, hold);
+        }
+        self.drive(io, now)?;
+        self.deliver(io, now, id, ask_id, event)?;
+        self.settle(io, now, id)?;
+        self.drive(io, now)
+    }
+
+    /// SW-1's hold `hold` ends: the changes it deferred, which no other
+    /// hold blocks, apply in their order, and each caller is answered.
+    fn release_hold(&mut self, io: &mut impl Io, hold: HoldId) {
+        let wall = io.wall_ms();
+        let mut durable = |text: &str| io.write_feeds(text);
+        let answers = self.shared.keeper.release(hold, wall, &mut durable);
+        for (ticket, result) in answers {
+            match self.tickets.remove(&ticket) {
+                Some(Asker::Ask(id, ask_id)) => {
+                    self.ready
+                        .push_back((id, ask_id, Event::Written(written(result))));
+                }
+                #[cfg(any(test, feature = "testhooks"))]
+                Some(Asker::Test(id)) => io.answer(id, changed(result)),
+                None => {}
+            }
+        }
+    }
+
+    /// `test.swarm_feed_change` `id` (D11): a change to the feed store
+    /// through SW-1's keeper, as `swarm.identities` will make one (PR 9),
+    /// answered once made, or once the hold that defers it ends.
+    #[cfg(any(test, feature = "testhooks"))]
+    pub fn feed_change(
+        &mut self,
+        io: &mut impl Io,
+        now: Ms,
+        id: u64,
+        change: FeedChange,
+    ) -> Result<(), Fault> {
+        self.deadlines(io, now)?;
+        self.next_ticket += 1;
+        let ticket = Ticket(self.next_ticket);
+        let wall = io.wall_ms();
+        let mut durable = |text: &str| io.write_feeds(text);
+        match self
+            .shared
+            .keeper
+            .change(ticket, change, wall, &mut durable)
+        {
+            Ran::Applied(result) => io.answer(id, changed(result)),
+            Ran::Deferred => {
+                self.tickets.insert(ticket, Asker::Test(id));
             }
         }
         self.drive(io, now)
@@ -1206,11 +1387,19 @@ impl Engine {
     ) -> Result<(), Fault> {
         let Some(Slot {
             phase: Phase::Running(request),
+            agent,
             ..
         }) = self.slots.get_mut(&id)
         else {
             return Ok(());
         };
+        // The custody main reports for a document whose name still binds
+        // it: D15's input for a signature that follows.
+        if let Event::Live(live) = &event
+            && live.name
+        {
+            *agent = Some(live.agent);
+        }
         let mut world = StepWorld::new(&mut self.shared, io.wall_ms());
         request.answer(&mut world, ask, event);
         Ok(())
@@ -1257,7 +1446,7 @@ impl Engine {
                 slot.placed = false;
                 self.running = self.running.saturating_sub(1);
             }
-            self.end_holdings(id);
+            self.end_holdings(io, id);
         }
         if self.slots.get(&id).is_some_and(|slot| {
             slot.answered
@@ -1311,6 +1500,7 @@ impl Engine {
         let Some(slot) = self.slots.get_mut(&id) else {
             return;
         };
+        let mut hold = None;
         let need = match need {
             // The thread's own pool (D9): the request stays until it's back.
             Need::Hash(job) => {
@@ -1318,15 +1508,33 @@ impl Engine {
                 io.hash(id, ask_id, job);
                 return;
             }
-            // The test hooks' stand-in for the stores: made, nothing
-            // written ([`Bounds::stub_writes`]).
-            Need::Write(write) if self.bounds.stub_writes => {
+            // Made now, synchronously, and answered in the order asked: a
+            // write finishes before the thread takes the next store change.
+            Need::Write(write) => {
                 let event = match write {
-                    StoreWrite::HistoryInsert(_) => {
-                        self.stub_rows += 1;
-                        Event::Inserted(Ok(self.stub_rows))
+                    StoreWrite::Feeds(change) => {
+                        self.next_ticket += 1;
+                        let ticket = Ticket(self.next_ticket);
+                        let wall = io.wall_ms();
+                        let mut durable = |text: &str| io.write_feeds(text);
+                        match self
+                            .shared
+                            .keeper
+                            .change(ticket, change, wall, &mut durable)
+                        {
+                            Ran::Applied(result) => Event::Written(written(result)),
+                            // Answered as the hold that defers it ends.
+                            Ran::Deferred => {
+                                self.tickets.insert(ticket, Asker::Ask(id, ask_id));
+                                return;
+                            }
+                        }
                     }
-                    _ => Event::Written(Ok(())),
+                    StoreWrite::History(statements) => Event::Written(io.history(&statements)),
+                    StoreWrite::HistoryInsert(statement) => {
+                        Event::Inserted(io.history_insert(&statement))
+                    }
+                    StoreWrite::Manifests(save) => Event::Written(io.save_manifests(&save)),
                 };
                 self.ready.push_back((id, ask_id, event));
                 return;
@@ -1379,14 +1587,38 @@ impl Engine {
                 self.ready.push_back((id, ask_id, Event::Mined(Mined::Off)));
                 return;
             }
-            Need::Sign(_) | Need::Owner(_) | Need::Write(_) => {
-                crate::log::warn(
-                    "swarm ask this core doesn't serve yet",
-                    serde_json::json!({}),
-                );
-                self.cancels.push_back(id);
-                return;
+            Need::Owner(key) => {
+                self.next_vault += 1;
+                let tag = self.next_vault;
+                io.vault(tag, VaultAsk::Owner(*key));
+                self.vaults.insert(tag, (id, ask_id));
+                Stage::Vault(tag)
             }
+            // SW-1's hold from this ask until the vault answers (design
+            // 0015, "SW-1 in the core"), and D15's inputs with the SOC.
+            Need::Sign(soc) => {
+                let key = JsString::from(slot.page.origin.as_str());
+                if let Some(held) = &soc.hold {
+                    self.next_hold += 1;
+                    hold = Some(HoldId(self.next_hold));
+                    self.shared
+                        .keeper
+                        .hold(HoldId(self.next_hold), held.clone());
+                }
+                let ask = SignAsk {
+                    soc: soc.clone(),
+                    key: slot.page.origin.clone(),
+                    agent: slot.agent,
+                    approval: slot.approval.unwrap_or(Approval::User),
+                    feed_grant: self.shared.keeper.store().has_feed_grant(&key),
+                };
+                self.next_vault += 1;
+                let tag = self.next_vault;
+                io.vault(tag, VaultAsk::Sign(Box::new(ask)));
+                self.vaults.insert(tag, (id, ask_id));
+                Stage::Vault(tag)
+            }
+            Need::Write(_) => return,
         };
         slot.asks.insert(
             ask_id,
@@ -1400,6 +1632,7 @@ impl Engine {
                 stream: false,
                 closed: false,
                 body_ended: false,
+                hold,
             },
         );
         if stage == Stage::Outbox {
@@ -1445,7 +1678,22 @@ impl Engine {
 
     /// The request's answer has gone: its upload's turn and its topics go
     /// to the next in line.
-    fn end_holdings(&mut self, id: u64) {
+    fn end_holdings(&mut self, io: &mut impl Io, id: u64) {
+        // A hold its request still has (never: the machine waits for the
+        // signature, or cancels it, before it ends) goes with its answer.
+        let holds: Vec<HoldId> = self
+            .slots
+            .get_mut(&id)
+            .map(|slot| {
+                slot.asks
+                    .values_mut()
+                    .filter_map(|ask| ask.hold.take())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for hold in holds {
+            self.release_hold(io, hold);
+        }
         let turn = self
             .slots
             .get_mut(&id)
@@ -1517,6 +1765,14 @@ impl Engine {
             Stage::Naming(tag) => {
                 io.name_cancel(tag);
                 self.names.remove(&tag);
+            }
+            // The vault's answer is dropped when it comes; a signature's
+            // hold ends now, and what it deferred applies.
+            Stage::Vault(tag) => {
+                self.vaults.remove(&tag);
+                if let Some(hold) = ask.hold.take() {
+                    self.release_hold(io, hold);
+                }
             }
             Stage::Memory => {
                 let granted = self.memory.withdraw(Waiter::Ask(id, ask_id));
@@ -1659,6 +1915,28 @@ impl Engine {
     fn topics_held(&self) -> usize {
         self.locks.held()
     }
+}
+
+/// A feed store change's answer, as a machine's write reads it.
+fn written(result: Result<ChangeAnswer, ChangeError>) -> Result<(), JsString> {
+    result.map(drop).map_err(|e| e.message())
+}
+
+/// `test.swarm_feed_change`'s answer: `{ value }`, the change's own (`null`
+/// for `undefined`), or `{ error }`, the text its caller reads.
+#[cfg(any(test, feature = "testhooks"))]
+fn changed(result: Result<ChangeAnswer, ChangeError>) -> Answer {
+    let json = match result {
+        Ok(answer) => {
+            let value = match answer.value {
+                fc_json::JsValue::Undefined => "null".to_owned(),
+                value => value.stringify(),
+            };
+            format!(r#"{{"value":{value}}}"#)
+        }
+        Err(e) => serde_json::json!({ "error": e.message().as_str() }).to_string(),
+    };
+    Answer::Result(json)
 }
 
 /// 0001's `cancelled`.
