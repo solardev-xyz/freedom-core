@@ -167,7 +167,8 @@ use Callers::{
     PageOrShell as PS, Shell as SHELL,
 };
 use Deadline::{
-    Head as HEAD, Immediate as NOW, Session as SESSION, Steps as STEPS, Vault as VAULT,
+    Head as HEAD, Immediate as NOW, Session as SESSION, Steps as STEPS, Swarm as SWARM,
+    Vault as VAULT,
 };
 
 /// Every method, in `core.hello`'s capability order, then the `chain.*`
@@ -330,6 +331,11 @@ pub const METHODS: &[Method] = &[
     // Design 0009: verified fetches, whose bodies stream; protocol 2 only.
     row_v2("dweb.verify", SHELL, false, HEAD),
     row_v2("dweb.forget", SHELL, false, NOW),
+    // Design 0015 (SWM-4, D5): a page's `window.swarm` request, run by the
+    // core's swarm thread under the `swarm` deadline; no other caller
+    // reaches it. Its answer is whole: the bodies that stream are its own
+    // asks' (`shell.swarm_api`, `shell.swarm_part`) and `swarm.body`'s.
+    row("swarm.request", PAGE, false, SWARM),
     row("chain.configure", CS, false, NOW),
     row("chain.availability", CS, false, NOW),
     row("chain.request", CS, false, SESSION),
@@ -447,7 +453,8 @@ mod tests {
                 "{caller:?}"
             );
         }
-        // A page reaches only design 0012's rows.
+        // A page reaches only design 0012's rows, and design 0015's
+        // `swarm.request`.
         let page_callers = [
             Callers::PageChromeOrShell,
             Callers::Page,
@@ -486,6 +493,7 @@ mod tests {
                 "phone.sent",
                 "phone.result",
                 "eip1193.request",
+                "swarm.request",
             ]
         );
         // Design 0012, API: who reaches each grant method, and
@@ -502,8 +510,10 @@ mod tests {
             ("approval.forget_account", false, false, true),
             ("approval.remember", true, false, false),
             ("eip1193.request", true, false, false),
-            // Design 0015 (SWM-4): the chrome signs no SOC.
+            // Design 0015 (SWM-4): the chrome signs no SOC; a page's
+            // `window.swarm` request is the page's alone (D5).
             ("swarm.sign_soc", true, false, true),
+            ("swarm.request", true, false, false),
         ] {
             for (caller, allowed) in [
                 (CallerKind::Page, page),

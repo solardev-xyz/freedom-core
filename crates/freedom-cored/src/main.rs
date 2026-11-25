@@ -59,6 +59,7 @@ mod serve;
 mod signing;
 mod sqlite;
 mod storage;
+mod swarm;
 mod testhooks;
 // The `testhooks` feature only (build.rs refuses it in a release build):
 // otherwise no test method is compiled at all.

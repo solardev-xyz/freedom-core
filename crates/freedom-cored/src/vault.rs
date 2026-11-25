@@ -1133,6 +1133,17 @@ impl Vault {
         self.approvals.dapp_moved()
     }
 
+    /// The Swarm grants' shared handle and whether they have moved
+    /// (design 0015's D2), for the swarm thread the hello starts.
+    pub fn swarm_grants(
+        &self,
+    ) -> (
+        std::sync::Arc<std::sync::Mutex<fc_approval::stores::SwarmStore>>,
+        bool,
+    ) {
+        self.approvals.swarm_grants()
+    }
+
     /// A page's approved connect (design 0012, APR-5c): whether the grant
     /// was written, and its `approval.changed`, to send after the reply.
     pub fn eip1193_connect(&mut self, key: &str, account: u32, chain_id: u64) -> (bool, Vec<Out>) {
