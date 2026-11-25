@@ -499,6 +499,31 @@ impl FeedStore {
         Ok(())
     }
 
+    /// swarm-provider-ipc.js's `getActiveOriginIdentity(getOriginEntry(key))`:
+    /// the decorated entry's active identity (a copy), or, without one, the
+    /// entry's own `identityMode` as an identity.
+    pub fn active_origin_identity(&self, key: &JsString) -> Option<JsValue> {
+        active_of_decorated(self.origin_entry(key).as_ref())
+    }
+
+    /// swarm-provider-ipc.js's `getFeedIdentity(getOriginEntry(key), feed)`:
+    /// the identity a feed was created under, while the site still has it,
+    /// else the active one.
+    pub fn feed_identity(&self, key: &JsString, feed: &JsValue) -> Option<JsValue> {
+        let entry = self.origin_entry(key);
+        if let Some(id) = feed.get("identityId").filter(|id| id.truthy())
+            && let Ok(id) = property_key(id)
+            && let Some(identity) = entry
+                .as_ref()
+                .and_then(|entry| entry.get("identities"))
+                .and_then(|identities| get(identities, &id))
+                .filter(|identity| identity.truthy())
+        {
+            return Some(identity.clone());
+        }
+        active_of_decorated(entry.as_ref())
+    }
+
     // --- changes -------------------------------------------------------------
 
     /// Runs `change` on a copy of the store, and keeps the copy only once
@@ -872,6 +897,153 @@ impl FeedStore {
             write: Some(text),
             detach: (source == Source::User).then_some(Projection::FeedGrant),
         })
+    }
+}
+
+/// `getActiveOriginIdentity(originEntry)` over a decorated entry.
+fn active_of_decorated(entry: Option<&JsValue>) -> Option<JsValue> {
+    let entry = entry?;
+    if let Some(active) = entry.get("activeIdentityId").filter(|a| a.truthy())
+        && let Ok(id) = property_key(active)
+        && let Some(identity) = entry
+            .get("identities")
+            .and_then(|identities| get(identities, &id))
+            .filter(|identity| identity.truthy())
+    {
+        return Some(identity.clone());
+    }
+    let mode = entry.get("identityMode").filter(|m| m.truthy())?;
+    let mut identity = object();
+    identity.set(
+        "id",
+        or_falsy(entry.get("activeIdentityId"), JsValue::Null),
+    );
+    identity.set("mode", mode.clone());
+    identity.set(
+        "publisherKeyIndex",
+        or_nullish(entry.get("publisherKeyIndex"), JsValue::Null),
+    );
+    Some(identity)
+}
+
+/// swarm-signer.js's `getIdentityMode(identity)`: `identity?.mode ||
+/// identity?.identityMode || null`.
+pub fn identity_mode(identity: Option<&JsValue>) -> JsValue {
+    or_falsy(
+        field(identity, "mode"),
+        or_falsy(field(identity, "identityMode"), JsValue::Null),
+    )
+}
+
+/// A change to the feed store: each of the store's operations that writes,
+/// as the swarm thread routes every change through SW-1's keeper
+/// ([`crate::machine::keeper`]), whoever asks for it (a method machine, the
+/// chrome's `swarm.identities`, a permission manifest's projection).
+#[derive(Debug, Clone, PartialEq)]
+pub enum FeedChange {
+    /// [`FeedStore::set_origin_entry`].
+    SetOriginEntry { key: JsString, data: JsValue },
+    /// [`FeedStore::allocate_publisher_key_index`].
+    AllocatePublisherKeyIndex,
+    /// [`FeedStore::create_app_scoped_identity`].
+    CreateAppScopedIdentity {
+        key: JsString,
+        options: JsValue,
+        source: Source,
+    },
+    /// [`FeedStore::create_app_scoped_identity_at`].
+    CreateAppScopedIdentityAt {
+        key: JsString,
+        index: JsValue,
+        options: JsValue,
+        source: Source,
+    },
+    /// [`FeedStore::ensure_ant_wallet_identity`].
+    EnsureAntWalletIdentity {
+        key: JsString,
+        options: JsValue,
+        source: Source,
+    },
+    /// [`FeedStore::activate_identity`].
+    ActivateIdentity {
+        key: JsString,
+        identity_id: JsValue,
+        source: Source,
+    },
+    /// [`FeedStore::set_feed`].
+    SetFeed {
+        key: JsString,
+        name: JsString,
+        data: JsValue,
+    },
+    /// [`FeedStore::update_feed_reference`].
+    UpdateFeedReference {
+        key: JsString,
+        name: JsString,
+        reference: JsValue,
+    },
+    /// [`FeedStore::grant_feed_access`].
+    GrantFeedAccess { key: JsString, source: Source },
+    /// [`FeedStore::revoke_feed_access`].
+    RevokeFeedAccess { key: JsString, source: Source },
+}
+
+impl FeedChange {
+    /// The change, made on `store` at `now_ms`: its answer as a JSON value
+    /// (`undefined` for one that answers nothing), the text to write and
+    /// what a manifest lets go of. A refused change leaves `store` as it was.
+    pub fn apply(&self, store: &mut FeedStore, now_ms: u64) -> Result<Changed<JsValue>, StoreError> {
+        let unit = |changed: Changed<()>| Changed {
+            value: JsValue::Undefined,
+            write: changed.write,
+            detach: changed.detach,
+        };
+        match self {
+            FeedChange::SetOriginEntry { key, data } => store.set_origin_entry(key, data, now_ms),
+            FeedChange::AllocatePublisherKeyIndex => {
+                let changed = store.allocate_publisher_key_index()?;
+                Ok(Changed {
+                    value: JsValue::Number(changed.value),
+                    write: changed.write,
+                    detach: changed.detach,
+                })
+            }
+            FeedChange::CreateAppScopedIdentity {
+                key,
+                options,
+                source,
+            } => store.create_app_scoped_identity(key, options, *source, now_ms),
+            FeedChange::CreateAppScopedIdentityAt {
+                key,
+                index,
+                options,
+                source,
+            } => store.create_app_scoped_identity_at(key, index, options, *source, now_ms),
+            FeedChange::EnsureAntWalletIdentity {
+                key,
+                options,
+                source,
+            } => store.ensure_ant_wallet_identity(key, options, *source, now_ms),
+            FeedChange::ActivateIdentity {
+                key,
+                identity_id,
+                source,
+            } => store.activate_identity(key, identity_id, *source, now_ms),
+            FeedChange::SetFeed { key, name, data } => store.set_feed(key, name, data, now_ms),
+            FeedChange::UpdateFeedReference {
+                key,
+                name,
+                reference,
+            } => store
+                .update_feed_reference(key, name, reference, now_ms)
+                .map(unit),
+            FeedChange::GrantFeedAccess { key, source } => {
+                store.grant_feed_access(key, *source).map(unit)
+            }
+            FeedChange::RevokeFeedAccess { key, source } => {
+                store.revoke_feed_access(key, *source).map(unit)
+            }
+        }
     }
 }
 
