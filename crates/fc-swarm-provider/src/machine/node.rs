@@ -404,7 +404,7 @@ impl Head {
 }
 
 /// Why a call failed before any reply (`{ failed }`): 0009's closed set
-/// plus `busy`.
+/// plus `busy` and `stopped`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failed {
     Unreachable,
@@ -412,6 +412,9 @@ pub enum Failed {
     Aborted,
     TooLarge,
     Busy,
+    /// Main has no node to dial: the node stopped, or its URL went, after
+    /// a readiness answer.
+    Stopped,
 }
 
 /// A streamed reply's end before its last byte: main's abort codes.
@@ -440,13 +443,14 @@ pub enum Rule {
 
 /// The text the reference gives a transport failure of each class
 /// (deviation `transport-error-text`: one text a class, where undici's
-/// message names its cause): `unreachable`, `error` and `aborted`. Each
-/// call site answers `too_large` and `busy` itself; here they read as
-/// `error`.
+/// message names its cause): `unreachable`, `error` and `aborted`; and
+/// `stopped`'s, the reference's own for a node with no URL. Each call site
+/// answers `too_large` and `busy` itself; here they read as `error`.
 pub fn transport_text(failed: Failed) -> &'static str {
     match failed {
         Failed::Unreachable => UNREACHABLE_TEXT,
         Failed::Aborted => ABORTED_TEXT,
+        Failed::Stopped => STOPPED_TEXT,
         Failed::Error | Failed::TooLarge | Failed::Busy => ERROR_TEXT,
     }
 }
@@ -458,6 +462,10 @@ pub const UNREACHABLE_TEXT: &str = "fetch failed";
 pub const ERROR_TEXT: &str = "fetch failed: other side closed";
 /// The `AbortError`'s.
 pub const ABORTED_TEXT: &str = "This operation was aborted";
+/// The reference's text when there is no node to call
+/// (publish-service.js's `publishPageData`, swarm-service.js's `getBee`):
+/// every method answers a `stopped` call -32603 with it.
+pub const STOPPED_TEXT: &str = "Swarm node is not ready";
 
 /// What strict reading refuses in a reply (a protocol error).
 pub(crate) fn reply_in_bounds(

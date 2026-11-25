@@ -44,8 +44,8 @@ use fc_json::JsString;
 use fc_json::index::{Index, KeyOrder, Kind, Value as V};
 use fc_swarm_provider::machine::node::{BodyOut, MAX_FRAME, WINDOW};
 use fc_swarm_provider::machine::{
-    Approval, AskId, Body, Call, Effect, Event, Failure, Form, Need, Outcome, ReadyCheck, Request,
-    StoreWrite, UPLOAD_CHARGE, whole_charge,
+    Approval, AskId, Body, Call, Effect, Event, Failed, Failure, Form, Need, Outcome, ReadyCheck,
+    Request, StoreWrite, UPLOAD_CHARGE, whole_charge,
 };
 use fc_swarm_provider::stamps::STAMPS_REPLY_CAP;
 use fc_swarm_provider::stores::history::{self, Bind, Cell, Statement};
@@ -61,14 +61,7 @@ const FOUR: [&str; 4] = [
 
 /// Cases of the four methods this test doesn't play, each with why. The
 /// test fails on any case of the four it neither plays nor names here.
-const LEFT_OUT: &[(&str, &str)] = &[(
-    "publish-data-node-stopped-after-ready",
-    "main holds the node: with no node URL after a passing pre-flight, the reference throws \
-     `Swarm node is not ready` before any request (publishPageData's getAntApiUrl()); in the \
-     core that is main's answer to the core's `stamps` call, for which `failed` has no class \
-     (`unreachable` reads `fetch failed`). The design is silent and the case records no core \
-     answer.",
-)];
+const LEFT_OUT: &[(&str, &str)] = &[];
 
 /// The deviations a case of the four marks, and what the core answers.
 fn core_answer(deviation: &str, core: V<'_, '_>) -> Want {
@@ -198,6 +191,9 @@ struct Played {
     ran: Ran,
     /// The body each call carried.
     sent: Vec<Option<Vec<u8>>>,
+    /// Whether each call reached the node (main answers `stopped` to one
+    /// it has no node for).
+    dialed: Vec<bool>,
     /// The parts asked, in order.
     parts: Vec<u32>,
     turns: usize,
@@ -225,6 +221,7 @@ fn play(world: &mut TestWorld, main: &MainSide<'_>, call: &Call, sid: &str) -> P
             cancels_after_outcome: 0,
         },
         sent: Vec::new(),
+        dialed: Vec::new(),
         parts: Vec::new(),
         turns: 0,
         closing: 0,
@@ -273,7 +270,10 @@ fn play(world: &mut TestWorld, main: &MainSide<'_>, call: &Call, sid: &str) -> P
                             "{sid}: no publish call streams its reply"
                         );
                         // The world changes as the request arrives.
-                        if let Some(rule) = main.node.matching(node_call.method(), &node_call.path)
+                        if let Some(rule) = main
+                            .node
+                            .matching(node_call.method(), &node_call.path)
+                            .filter(|_| !main.node.stopped)
                         {
                             for (what, value) in &rule.world {
                                 world.apply(main.case_key, what, value);
@@ -286,6 +286,13 @@ fn play(world: &mut TestWorld, main: &MainSide<'_>, call: &Call, sid: &str) -> P
                             charge: ask.charge,
                             body: None,
                         });
+                        played.dialed.push(!main.node.stopped);
+                        if main.node.stopped {
+                            // No node to dial: `{ failed: "stopped" }`.
+                            played.sent.push(None);
+                            give!(ask.id, Event::Failed(Failed::Stopped));
+                            continue;
+                        }
                         match &node_call.body {
                             Some(Body::Stream { bytes }) => {
                                 played.sent.push(None);
@@ -975,7 +982,8 @@ fn publish_methods() {
                     scenarios_used.insert(sid.clone());
                 }
                 None => assert!(
-                    played.ran.calls.is_empty(),
+                    // A call main answered `stopped` never reached the node.
+                    played.dialed.iter().all(|d| !d),
                     "{sid}: calls, and no honest scenario"
                 ),
             }
@@ -1028,9 +1036,9 @@ fn publish_methods() {
             );
         }
     }
-    // Every case of the four but the one left out; every step of theirs
+    // Every case of the four; every step of theirs
     // but main's own answers; every honest scenario of their rows.
-    assert_eq!((cases, played_steps, main_answered), (177, 176, 10));
+    assert_eq!((cases, played_steps, main_answered), (178, 177, 10));
     assert_eq!(scenarios_used.len(), 86);
     assert!(uploads > 60 && streamed > 20, "{uploads} {streamed}");
 }
@@ -1702,4 +1710,113 @@ fn body_answers_are_read_strictly() {
         request.answer(&mut world, upload, event);
         assert_eq!(request.outcome(), Some(&Outcome::Protocol(want)), "{what}");
     }
+}
+
+/// The effect's guard in page-swarm.js's order: the name, then for a
+/// request the site's rule approved custody and the rule, then the
+/// document's key, then the connection. A document that lost its key
+/// while the agent took its tab answers `agent_custody`, as the reference
+/// does; with the agent away, `no_address`; a name that moved,
+/// `no_address` first.
+#[test]
+fn the_guard_keeps_the_references_order() {
+    let custody_at_stamps = |custody: bool| Node {
+        stamps: Some(usable_stamps()),
+        rules: vec![Rule {
+            world: vec![("custody".to_owned(), custody.to_string())],
+            ..rule(
+                "GET",
+                "/stamps",
+                ReplySpec::ok(usable_stamps(), "application/json"),
+            )
+        }],
+        ..Node::new()
+    };
+    for (what, custody, name_holds, want) in [
+        ("key gone, agent in", true, true, "agent_custody"),
+        ("key gone, agent away", false, true, "no_address"),
+        ("name moved, agent in", true, false, "no_address"),
+    ] {
+        let node = custody_at_stamps(custody);
+        let mut world = site_world();
+        world.rules.insert((JsString::from(KEY), "publish"));
+        world.key_holds = false;
+        world.name_holds = name_holds;
+        let db = HistoryDb::open(CLOCK);
+        let key = JsString::from(KEY);
+        let main = MainSide {
+            node: &node,
+            db: &db,
+            readiness: Ok(()),
+            parts: &BTreeMap::new(),
+            case_key: &key,
+        };
+        let call = Call {
+            method: Value::str("swarm_publishData"),
+            params: Value::object([
+                ("data", bytes_value(b"x".to_vec())),
+                ("contentType", Value::str("text/plain")),
+            ]),
+            key: key.clone(),
+            approval: Some(Approval::Auto),
+        };
+        let played = play(&mut world, &main, &call, what);
+        let Outcome::Error(failure) = &played.ran.outcome else {
+            panic!("{what}: {:?}", played.ran.outcome)
+        };
+        assert_eq!(failure.code, 4100, "{what}");
+        assert_eq!(
+            failure.data,
+            Some(Value::object([("reason", Value::str(want))])),
+            "{what}"
+        );
+        assert_eq!(played.ran.calls.len(), 1, "{what}: nothing uploaded");
+    }
+}
+
+/// `tag-owners-bound`: past 4,096 tags held at once the oldest is
+/// forgotten, and answers as another site's tag does.
+#[test]
+fn a_forgotten_tag_is_another_sites() {
+    use fc_swarm_provider::methods::upload_status::MAX_TAG_OWNERS;
+    let mut tags = BTreeMap::new();
+    tags.insert(
+        "2".to_owned(),
+        br#"{"uid":2,"split":1,"seen":0,"stored":1,"sent":1,"synced":1,"address":"","startedAt":"x"}"#
+            .to_vec(),
+    );
+    let node = Node {
+        tags,
+        ..Node::new()
+    };
+    let mut world = site_world();
+    for tag in 1..=MAX_TAG_OWNERS as u64 + 1 {
+        world.tags.set(tag, JsString::from(KEY));
+    }
+    assert_eq!(world.tags.len(), MAX_TAG_OWNERS);
+    let status = |world: &mut TestWorld, uid: u64| {
+        run_site(
+            &node,
+            world,
+            "swarm_getUploadStatus",
+            Value::object([("tagUid", Value::int(uid))]),
+            &BTreeMap::new(),
+            "tag-owners-bound",
+        )
+        .0
+    };
+    let forgotten = status(&mut world, 1);
+    assert_eq!(
+        forgotten.ran.outcome,
+        Outcome::Error(Failure::not_authorized("tag_ownership_mismatch"))
+    );
+    assert!(forgotten.ran.calls.is_empty());
+    let kept = status(&mut world, 2);
+    assert!(
+        matches!(&kept.ran.outcome, Outcome::Result(v) if v.get("done") == &Value::Bool(true)),
+        "{:?}",
+        kept.ran.outcome
+    );
+    // Done: forgotten, as the reference forgets it.
+    assert_eq!(world.tags.get(2), None);
 }

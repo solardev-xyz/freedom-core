@@ -480,6 +480,7 @@ impl Publish {
         ];
         if self.method == Method::Files {
             if let Some(tag) = tag_uid
+                && cx.name_holds()
                 && cx.key_holds()
             {
                 // `afterEffect`: held under the key only while the document
@@ -630,11 +631,12 @@ fn admit<W: World>(cx: &Cx<'_, W>, approval: Option<Approval>) -> Result<(), Out
 }
 
 /// The effect's guard (page-swarm.js's `guardEffect`, then the provider's
-/// `whileGranted`), after the upload's last wait: the document still holds
-/// its key; for a request the site's rule approved, the agent doesn't hold
-/// its tab and the rule stands; the site is still connected.
+/// `whileGranted`), after the upload's last wait, in its order: the name
+/// still binds the key; for a request the site's rule approved, the agent
+/// doesn't hold its tab and the rule stands; the document is still under
+/// its key; the site is still connected.
 fn guard<W: World>(cx: &Cx<'_, W>, approval: Option<Approval>) -> Result<(), Failure> {
-    if !cx.key_holds() {
+    if !cx.name_holds() {
         return Err(no_address());
     }
     if approval == Some(Approval::Auto) {
@@ -644,6 +646,9 @@ fn guard<W: World>(cx: &Cx<'_, W>, approval: Option<Approval>) -> Result<(), Fai
         if !cx.auto_approve(Capability::Publish) {
             return Err(Failure::not_authorized("not_auto_approved"));
         }
+    }
+    if !cx.key_holds() {
+        return Err(no_address());
     }
     if !cx.connected() {
         return Err(Failure::not_connected());

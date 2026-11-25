@@ -95,16 +95,21 @@ pub trait World: Reads {
     fn now(&self) -> u64;
     /// The read budgets (`READ_BUDGETS`' buckets), one for every request.
     fn budgets(&mut self) -> &mut ReadBudgets;
-    /// Whether the document that sent the request under `key` still holds
-    /// it: 0012's `transport_key` check, which the core makes again before
-    /// each effect (design 0015, "Methods main calls": name checks), as
-    /// page-swarm.js's `nameHolds` and `holdsKey` do.
+    /// Whether the page's name still binds `key`: 0012's `transport_key`
+    /// check, which the core makes again before each effect (design 0015,
+    /// "Methods main calls": name checks), as page-swarm.js's `nameHolds`
+    /// does.
+    fn name_holds(&self, key: &JsString) -> bool;
+    /// Whether the document that sent the request is current and still
+    /// under `key` (page-documents.js's `holdsKey`), read in the same run
+    /// as an effect.
     fn key_holds(&self, key: &JsString) -> bool;
     /// Whether the agent holds that document's tab now (0012's `agent`,
     /// read live): a request a site's rule approved reads it again before
     /// its effect (design 0015, "What moves into the core": the rules).
     fn agent(&self, key: &JsString) -> bool;
-    /// Which site owns each upload's tag (`tagOwnership`, session-scoped).
+    /// Which site owns each upload's tag (`tagOwnership`, session-scoped,
+    /// at most 4,096: deviation `tag-owners-bound`).
     fn tags(&mut self) -> &mut TagOwners;
 }
 
@@ -727,8 +732,13 @@ impl<W: World> Cx<'_, W> {
         self.world.auto_approve(self.origin, capability)
     }
 
-    /// The document still holds the request's key (0012's
+    /// The page's name still binds the request's key (0012's
     /// `transport_key`).
+    pub fn name_holds(&self) -> bool {
+        self.world.name_holds(self.origin)
+    }
+
+    /// The document is current and still under the request's key.
     pub fn key_holds(&self) -> bool {
         self.world.key_holds(self.origin)
     }
@@ -968,6 +978,9 @@ mod tests {
         fn budgets(&mut self) -> &mut ReadBudgets {
             &mut self.budgets
         }
+        fn name_holds(&self, _key: &JsString) -> bool {
+            true
+        }
         fn key_holds(&self, _key: &JsString) -> bool {
             true
         }
@@ -1096,6 +1109,19 @@ mod tests {
         let (mut r, _) = latest(&mut w);
         r.busy();
         assert_eq!(r.outcome(), Some(&Outcome::Error(Failure::busy())));
+    }
+
+    #[test]
+    fn a_stopped_node_answers_the_references_text() {
+        let mut w = world();
+        let (mut r, id) = latest(&mut w);
+        r.answer(&mut w, id, Event::Failed(Failed::Stopped));
+        assert_eq!(
+            r.outcome(),
+            Some(&Outcome::Error(Failure::internal(
+                "Swarm node is not ready"
+            )))
+        );
     }
 
     #[test]
