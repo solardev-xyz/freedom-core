@@ -467,7 +467,7 @@ node ◀──POST (transport)─────┤◀───────swarm.bo
 
 **The interleaving gate:** SWM-3 on the machine, which is sans-I/O so every interleaving is a fixed script, and SWM-4 again through the pipe, with the swarm thread's pause points as test hooks. The vault counts signatures and the node counts `POST /soc`. Each case is deterministic:
 - **The change wins:** pause a raw SOC after its first SW-1 check; another site takes its index; resume. 4100 `shared_identity`, no signature, no upload. The same for a switch of the site's active identity to a shared one, and for a revoke of the grant (today's no-grant error).
-- **The change waits:** pause after the re-check, with the vault's answer held back. The other site's change doesn't complete and writes nothing. Release the vault: the SOC is uploaded, then the change applies, and the site's next raw SOC is refused. A held revoke applies when the hold ends, before the SOC's batch read and upload, so the upload's guard refuses that SOC, as it refuses one signed just before a revoke.
+- **The change waits:** pause after the re-check, with the vault's answer held back. The other site's change doesn't complete and writes nothing. Release the vault: every held change applies as the signature ends the hold, before the SOC's batch read and upload. An index or identity change leaves the signed SOC to be uploaded, and the site's next raw SOC is refused; a held revoke makes the upload's guard refuse that SOC, as it refuses one signed just before a revoke.
 - **Cancel during the hold:** the deferred change completes at once, the late signature is dropped, and nothing is uploaded.
 - **A write failure during the hold:** the deferred change's write fails, so its caller gets the store's error, the store is unchanged, and the next raw SOC passes. Another store write that fails during the hold leaves the hold and the SOC as they were.
 - **Allocation:** with the counter at or below the held index, an allocation during the hold takes a fresh index and isn't deferred.
@@ -722,7 +722,7 @@ Once decided:
 
 **2026-11-25, SWM-3's feed and SOC writes:** the coordinator's technical calls, proposed, which the user may veto. Building the feed and SOC writes, SW-1 and the interleaving gate (SWM-3 part 3c) against SWM-1's vectors found:
 - **The re-check before the signature** covers SW-1, the feed grant, the name's binding and the document's key; custody and the rule wait for the upload's guard, as in the reference (*SW-1 in the core*). It comes after the history row, whose insert is a wait. "The vault" is an ask for the key's owner.
-- **A held revoke lands before the upload,** so that SOC is refused at the upload; a held index or identity change lands after it (*The change waits*).
+- **Every held change lands as the signature ends the hold,** before the SOC's batch read and upload: a revoke makes the upload's guard refuse that SOC; an index or identity change leaves the signed SOC to be uploaded, and refuses the site's next one (*The change waits*).
 - **One write to a topic at a time:** a request holds its topic's turn until it ends; the queue of waiting requests is SWM-4's.
 - **SWM-4 must apply feed-store writes in order:** each finishes before the swarm thread takes the next store change, which the hold relies on.
 - **A full feed store** is -32603 `Swarm feed store is full` (`store_full`, *Budgets*).

@@ -2027,8 +2027,8 @@ fn gate_the_change_wins() {
 
 /// The change waits: paused after the re-check, the vault's answer held
 /// back, the other site's change doesn't complete and writes nothing; the
-/// vault released, the SOC is uploaded and the change applies; the site's
-/// next raw SOC is refused.
+/// vault released, the change applies and its caller is answered, then the
+/// already signed SOC is uploaded; the site's next raw SOC is refused.
 #[test]
 fn gate_the_change_waits() {
     let text = text_of("keys.json");
