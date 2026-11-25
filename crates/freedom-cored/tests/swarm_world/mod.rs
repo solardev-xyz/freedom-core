@@ -362,8 +362,10 @@ impl Main {
     fn take(&mut self, wire: Wire) -> Option<Value> {
         match wire {
             Wire::Message(message) => {
-                // The vault's and the grants' events: main's own.
+                // The vault's and the grants' events: main's own, kept for
+                // a test to read.
                 if message["type"] == "event" {
+                    self.core.events.push(message);
                     return None;
                 }
                 // A body's head (`{ bytes }`), or its one answer in its
@@ -1016,6 +1018,234 @@ impl Main {
             }
             other => panic!("the thread asked {other}"),
         }
+    }
+}
+
+/// The node's answer to a call, and the body main sent it.
+pub type NodeFn<'a> = Box<dyn FnMut(&NodeCall, &[u8]) -> Event + 'a>;
+
+/// Main's answer to `shell.swarm_manifest { url }`, if it gives one.
+pub type ManifestFn<'a> = Box<dyn FnMut(&str) -> Option<Value> + 'a>;
+
+/// Main's side of one of its own Swarm methods (SWM-4 PR 9): the node it
+/// reaches, the parts it streams, the manifests it fetches, and what the
+/// thread asked of it.
+pub struct OwnMain<'a> {
+    /// The node's answer to a call and the body it received.
+    pub node: NodeFn<'a>,
+    pub parts: BTreeMap<u32, Vec<u8>>,
+    /// Main ends this part with this error code's abort after its first
+    /// frame (a picked file's read failing).
+    pub abort_part: Option<(u32, &'static str)>,
+    /// Main's answer to `shell.swarm_manifest { url }`: `None` leaves it
+    /// unanswered until the core cancels it.
+    pub manifest: ManifestFn<'a>,
+    pub calls: Vec<(NodeCall, Vec<u8>)>,
+    pub fetches: Vec<String>,
+    pub parts_asked: Vec<u32>,
+    pub cancels: usize,
+}
+
+impl<'a> OwnMain<'a> {
+    pub fn new(node: impl FnMut(&NodeCall, &[u8]) -> Event + 'a) -> OwnMain<'a> {
+        OwnMain {
+            node: Box::new(node),
+            parts: BTreeMap::new(),
+            abort_part: None,
+            manifest: Box::new(|url| panic!("an unexpected fetch of {url}")),
+            calls: Vec::new(),
+            fetches: Vec::new(),
+            parts_asked: Vec::new(),
+            cancels: 0,
+        }
+    }
+}
+
+impl Main {
+    /// One of main's own Swarm methods (or the chrome's) sent from
+    /// `caller`: its ID.
+    pub fn own_request(&mut self, method: &str, params: &Value, caller: &str) -> u64 {
+        let id = self.id();
+        self.core.send(&json!({
+            "type": "request", "id": id, "method": method, "params": params,
+            "context": { "caller": caller },
+        }));
+        id
+    }
+
+    /// Plays one of main's own methods: sends it and answers the thread's
+    /// requests from `own` until its answer, then waits until the thread
+    /// holds nothing (no charge, no request, no stream).
+    pub fn play_own(
+        &mut self,
+        own: &mut OwnMain<'_>,
+        method: &str,
+        params: &Value,
+        caller: &str,
+    ) -> Value {
+        let request = self.own_request(method, params, caller);
+        let answer = self.serve_own(own, request);
+        self.settled();
+        answer
+    }
+
+    /// Waits until the thread holds no charge, request or stream (a base
+    /// goes once the writer has written its answer, which can trail main's
+    /// reading of it by a moment).
+    pub fn settled(&mut self) {
+        let mut held = self.world(json!({}));
+        for _ in 0..400 {
+            if held["memory"] == 0 && held["requests"] == 0 && held["streams"] == 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            held = self.world(json!({}));
+        }
+        assert_eq!(held["memory"], 0, "no charge held after the step");
+        assert_eq!(held["requests"], 0, "no request left after the step");
+        assert_eq!(held["streams"], 0, "no stream left after the step");
+    }
+
+    /// Answers the thread's requests for main's request `request` from
+    /// `own` until its answer, which it returns.
+    pub fn serve_own(&mut self, own: &mut OwnMain<'_>, request: u64) -> Value {
+        let mut aborted = BTreeSet::new();
+        loop {
+            self.pump_own_parts(own, &mut aborted);
+            while let Some(body) = self.ended.pop_front() {
+                let Some(call) = self.open_calls.remove(&body.call) else {
+                    continue;
+                };
+                let event = (own.node)(&call, &body.bytes);
+                own.calls.push((call, body.bytes));
+                self.answer(body.call, reply_json(&event));
+            }
+            let message = match self.backlog.pop_front() {
+                Some(message) => Some(message),
+                None => match self
+                    .core
+                    .recv_wire_within(std::time::Duration::from_millis(20))
+                {
+                    Some(wire) => self.take(wire),
+                    None => continue,
+                },
+            };
+            let Some(message) = message else {
+                continue;
+            };
+            match message["type"].as_str().unwrap() {
+                "response" if message["id"] == request => return message,
+                "request" => {
+                    let id = message["id"].as_u64().unwrap();
+                    let params = &message["params"];
+                    assert_eq!(message["context"]["caller"], "shell");
+                    match message["method"].as_str().unwrap() {
+                        "shell.swarm_api" => {
+                            assert_eq!(params["for"], request);
+                            let call = node_call(params);
+                            if let Some(Body::Stream { .. }) = call.body {
+                                let body = self.id();
+                                self.core.send(&json!({
+                                    "type": "request", "id": body, "method": "swarm.body",
+                                    "params": { "for": id }, "context": { "caller": "shell" },
+                                }));
+                                self.bodies.insert(
+                                    body,
+                                    BodyIn {
+                                        call: id,
+                                        ..BodyIn::default()
+                                    },
+                                );
+                                self.open_calls.insert(id, call);
+                                continue;
+                            }
+                            let body = match &call.body {
+                                Some(Body::Base64(bytes)) => bytes.clone(),
+                                _ => Vec::new(),
+                            };
+                            let event = (own.node)(&call, &body);
+                            own.calls.push((call, body));
+                            self.answer(id, reply_json(&event));
+                        }
+                        "shell.swarm_part" => {
+                            assert_eq!(params["for"], request);
+                            let part = u32::try_from(params["part"].as_u64().unwrap()).unwrap();
+                            own.parts_asked.push(part);
+                            let data = own.parts[&part].clone();
+                            self.answer(id, json!({ "bytes": data.len() }));
+                            self.parts_out.insert(id, (data, 0));
+                            if own.abort_part.is_some_and(|(k, _)| k == part) {
+                                aborted.insert(id);
+                            }
+                        }
+                        "shell.swarm_manifest" => {
+                            assert_eq!(params["for"], request);
+                            let url = params["url"].as_str().unwrap().to_owned();
+                            own.fetches.push(url.clone());
+                            match (own.manifest)(&url) {
+                                Some(answer) => self.answer(id, answer),
+                                None => {
+                                    self.open_calls.insert(id, node_call_placeholder());
+                                }
+                            }
+                        }
+                        other => panic!("the thread asked {other}: {message}"),
+                    }
+                }
+                "cancel" => {
+                    own.cancels += 1;
+                    let id = message["id"].as_u64().unwrap();
+                    // A call main hasn't answered ends `cancelled`; its
+                    // body, if it streams one, still gets its terminal
+                    // from the core, after this (the duplex's frames
+                    // follow the control frames).
+                    if self.open_calls.remove(&id).is_some() {
+                        self.refuse(id, json!({ "code": "cancelled", "message": "Cancelled" }));
+                    }
+                    if self.parts_out.remove(&id).is_some() {
+                        self.abort(id, "cancelled");
+                    }
+                }
+                other => panic!("{other}: {message}"),
+            }
+        }
+    }
+
+    /// Each part's next bytes within the core's credit; a part main fails
+    /// ends after its first frame with its error code's abort.
+    fn pump_own_parts(&mut self, own: &OwnMain<'_>, aborted: &mut BTreeSet<u64>) {
+        let failing: Vec<u64> = self
+            .parts_out
+            .iter()
+            .filter(|(id, (_, sent))| aborted.contains(id) && *sent > 0)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in failing {
+            self.parts_out.remove(&id);
+            aborted.remove(&id);
+            let code = own.abort_part.map_or("EIO", |(_, code)| code);
+            let json =
+                json!({ "code": "body_stream_error", "message": "unreadable", "error_code": code })
+                    .to_string();
+            self.core
+                .send_raw(&stream_frame(KIND_ABORT, id, json.as_bytes()));
+        }
+        self.pump_parts();
+    }
+}
+
+/// A call main holds without answering (a fetch it leaves until the
+/// core's cancel).
+fn node_call_placeholder() -> NodeCall {
+    NodeCall {
+        form: Form::Stamps,
+        path: String::new(),
+        query: Vec::new(),
+        headers: Vec::new(),
+        body: None,
+        max_bytes: 0,
+        feed: None,
+        tree: None,
     }
 }
 
