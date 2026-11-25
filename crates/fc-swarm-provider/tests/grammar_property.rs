@@ -67,6 +67,7 @@ use fc_json::index::{Index, KeyOrder, Kind, Value as V};
 use fc_json::{JsString, JsValue};
 use fc_swarm::verify;
 use fc_swarm_provider::machine::node::{BodyOut, WINDOW};
+use fc_swarm_provider::machine::shell::{Shell, ShellCall, ShellMethod, ShellOutcome};
 use fc_swarm_provider::machine::{
     Abort, Approval, Ask, AskId, Body, Call, Effect, Event, Failed, Form, Head, MineJob, Mined,
     Need, NodeCall, Outcome, ReadyCheck, Reply, Request, Rule, SignKey, Signed, StoreWrite,
@@ -242,7 +243,7 @@ fn check_form(call: &NodeCall, form: &FormSpec, row: &str) -> Result<(), String>
         if !value_ok {
             return Err(format!("header {k}: {v}"));
         }
-        if spec.when.as_deref() == Some("publish") {
+        if spec.when.as_deref() == Some("publish") && !row.starts_with("swarm.publish") {
             return Err(format!("header {k} is swarm.publish's"));
         }
     }
@@ -254,7 +255,7 @@ fn check_form(call: &NodeCall, form: &FormSpec, row: &str) -> Result<(), String>
         };
         let allowed = match spec.when.as_deref() {
             Some("soc-raw") => row == "writeSingleOwnerChunk",
-            Some("publish") => false,
+            Some("publish") => row.starts_with("swarm.publish"),
             _ => true,
         };
         let has = seen.contains(&spec.name);
@@ -294,7 +295,10 @@ fn check_form(call: &NodeCall, form: &FormSpec, row: &str) -> Result<(), String>
     }
     if call.feed.is_some()
         && (call.form != Form::Chunk
-            || !matches!(row, "readFeedEntry_index" | "updateFeed" | "writeFeedEntry"))
+            || !matches!(
+                row,
+                "readFeedEntry_index" | "updateFeed" | "writeFeedEntry" | "swarm.feed:update"
+            ))
     {
         return Err("feed outside a feed row's chunks".to_owned());
     }
@@ -503,6 +507,9 @@ impl<'a> Checker<'a> {
             want.extend_from_slice(data);
             want
         };
+        if self.row.starts_with("swarm.") {
+            return self.shell(call, &segments, body.as_deref());
+        }
         match (self.row, call.form) {
             (_, Form::Stamps) => {}
             ("readChunk", Form::Chunk) => {
@@ -763,6 +770,146 @@ impl<'a> Checker<'a> {
         Ok(())
     }
 
+    /// A shell parent's call: the values its row binds, from main's own
+    /// params (the grammar's `swarm.publish`, `swarm.feed`, `swarm.stamps`
+    /// and `swarm.upload_status` rows), and a given batch as its upload's.
+    fn shell(
+        &mut self,
+        call: &NodeCall,
+        segments: &[String],
+        body: Option<&[u8]>,
+    ) -> Result<(), String> {
+        let header = |name: &str| {
+            call.headers
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+        };
+        let batch = param_str(self.params, "batch").map(|b| lower(&b));
+        if call.form == Form::Stamps {
+            return match (self.row, &batch) {
+                ("swarm.stamps", _) if param_str(self.params, "id").is_some() => {
+                    Err("/stamps where the row binds <b> = id".to_owned())
+                }
+                ("swarm.stamps", _) | (_, None) => Ok(()),
+                (_, Some(_)) => Err("a /stamps when the parent named its batch".to_owned()),
+            };
+        }
+        if let Some(batch) = &batch
+            && call.method() == "POST"
+            && header("swarm-postage-batch-id").as_ref() != Some(batch)
+        {
+            return Err("swarm-postage-batch-id isn't the parent's batch".to_owned());
+        }
+        let truthy = |key: &str| self.params.get(key) == &Value::Bool(true);
+        let parts: Vec<&Value> = match self.params.get("parts") {
+            Value::Array(parts) => parts.iter().flatten().collect(),
+            _ => Vec::new(),
+        };
+        let part_bytes = |p: &Value| match p.get("bytes") {
+            Value::Number(n) => *n as u64,
+            _ => 0,
+        };
+        let encrypt = header("swarm-encrypt");
+        if call.form.as_str().starts_with("bzz") && encrypt.is_some() != truthy("encrypt") {
+            return Err(format!(
+                "swarm-encrypt {encrypt:?} for encrypt {}",
+                truthy("encrypt")
+            ));
+        }
+        match (self.row, call.form) {
+            ("swarm.stamps", Form::Stamp) => {
+                let id = param_str(self.params, "id").map(|i| lower(&i));
+                if id.as_deref() != Some(segments[2].as_str()) {
+                    return Err("<b> isn't id".to_owned());
+                }
+            }
+            ("swarm.upload_status", Form::Tag) => {
+                let uid = match self.params.get("tag_uid") {
+                    Value::Number(n) => format!("{n}"),
+                    _ => String::new(),
+                };
+                if segments[2] != uid {
+                    return Err("<uid> isn't tag_uid".to_owned());
+                }
+            }
+            ("swarm.publish:data,file", Form::BzzFile) => {
+                let data = param_str(self.params, "kind").as_deref() == Some("data");
+                let name = param_str(self.params, "name")
+                    .filter(|n| !n.is_empty())
+                    .or_else(|| data.then(|| "data".to_owned()));
+                if call.query != [("name".to_owned(), name.unwrap_or_default())] {
+                    return Err(format!("name {:?}", call.query));
+                }
+                let content_type = param_str(self.params, "content_type")
+                    .filter(|c| !c.is_empty())
+                    .unwrap_or_else(|| {
+                        if data {
+                            "text/plain"
+                        } else {
+                            "application/octet-stream"
+                        }
+                        .to_owned()
+                    });
+                if header("content-type") != Some(content_type) {
+                    return Err("content-type".to_owned());
+                }
+                let deferred = truthy("deferred").to_string();
+                if header("swarm-deferred-upload") != Some(deferred) {
+                    return Err("swarm-deferred-upload isn't deferred".to_owned());
+                }
+                let part = parts.first().ok_or("no part")?;
+                let len = match &call.body {
+                    Some(Body::Base64(b)) => b.len() as u64,
+                    Some(Body::Stream { bytes }) => *bytes,
+                    None => 0,
+                };
+                if len != part_bytes(part) {
+                    return Err(format!("a body of {len}"));
+                }
+                if let (Some(body), Some(text)) = (body, param_str(part, "base64"))
+                    && fc_swarm_provider::value::decode_base64(&text).as_deref() != Some(body)
+                {
+                    return Err("the body isn't the part's bytes".to_owned());
+                }
+            }
+            ("swarm.publish:collection", Form::BzzTar) => {
+                let mut bound = 1024u64;
+                let mut top_index = false;
+                for p in &parts {
+                    let path = param_str(p, "path").unwrap_or_default();
+                    top_index |= path == "index.html";
+                    bound += 1024
+                        + (path.len() as u64).div_ceil(512) * 512
+                        + part_bytes(p).div_ceil(512) * 512;
+                }
+                let index = param_str(self.params, "index_document")
+                    .or_else(|| top_index.then(|| "index.html".to_owned()));
+                if header("swarm-index-document") != index {
+                    return Err(format!("swarm-index-document for {index:?}"));
+                }
+                match call.body {
+                    Some(Body::Stream { bytes }) if bytes <= bound => {}
+                    _ => return Err(format!("a tar past T(parts) = {bound}")),
+                }
+            }
+            ("swarm.feed:create", Form::FeedManifest) => {
+                let topic = lower(&param_str(self.params, "topic").unwrap_or_default());
+                if segments[3] != topic {
+                    return Err("<t> isn't topic".to_owned());
+                }
+                self.fix_owner(&segments[2])?;
+            }
+            ("swarm.feed:update", form) => {
+                let topic = lower(&param_str(self.params, "topic").unwrap_or_default());
+                let topic: [u8; 32] = unhex(&topic).try_into().map_err(|_| "topic")?;
+                self.feed_write(call, form, segments, topic, None)?;
+            }
+            (row, form) => return Err(format!("{form:?} under {row}")),
+        }
+        Ok(())
+    }
+
     /// readData's `n`: the root chunk main returned, over 4,096 bytes and
     /// at most `B`; its references are the children main admits.
     fn root_size(&self) -> Option<u64> {
@@ -834,13 +981,18 @@ impl<'a> Checker<'a> {
                     (None, Some(Lookup::Done(index))) => index,
                     _ => return Err(format!("a soc_up before its index: {:?}", self.lookup)),
                 };
+                // swarm.feed's update: at least `min_index`.
+                let index = match self.params.get("min_index") {
+                    Value::Number(n) if self.row == "swarm.feed:update" => index.max(*n as u64),
+                    _ => index,
+                };
                 if segments[3] != hex(&verify::feed_update_id(&topic, index)) {
                     return Err(format!("<id> isn't the index {index}'s"));
                 }
                 let Some(Body::Base64(body)) = &call.body else {
                     return Err("a SOC body".to_owned());
                 };
-                if self.row == "updateFeed" {
+                if matches!(self.row, "updateFeed" | "swarm.feed:update") {
                     let reference = lower(&param_str(self.params, "reference").unwrap_or_default());
                     if !(body.len() == 48 || body.len() == 80) || hex(&body[16..]) != reference {
                         return Err("updateFeed's body".to_owned());
@@ -1183,7 +1335,21 @@ impl PropNode {
                 headers: Vec::new(),
                 ..ReplySpec::ok(Vec::new(), "")
             },
-            Form::Stamp => ReplySpec::not_found(),
+            // `/stamps/<b>`: that batch of the node's `/stamps`, alone.
+            Form::Stamp => {
+                let id = &path["/stamps/".len()..];
+                self.stamps
+                    .as_ref()
+                    .and_then(|s| fc_json::parse(&String::from_utf8_lossy(s)).ok())
+                    .and_then(|all| {
+                        all.get("stamps")?
+                            .as_array()?
+                            .iter()
+                            .find(|b| b.get("batchID").and_then(|i| i.as_str()) == Some(id))
+                            .map(|b| b.stringify().into_bytes())
+                    })
+                    .map_or_else(ReplySpec::not_found, json)
+            }
         }
     }
 }
@@ -1373,6 +1539,57 @@ fn protocol_breach(rng: &mut Rng, call: &NodeCall) -> Vec<Event> {
 // ---------------------------------------------------------------------------
 // The scripted main.
 
+/// What the scripted main moves: a page's request or a shell parent.
+trait Machine {
+    fn answer(&mut self, world: &mut TestWorld, id: AskId, event: Event);
+    fn take_effects(&mut self) -> Vec<Effect>;
+    fn done(&self) -> bool;
+    fn cancel(&mut self);
+    fn busy(&mut self);
+    /// D13's bound passed for ask `id`: a shell parent's; a page's request
+    /// has its deadline instead.
+    fn expire(&mut self, _world: &mut TestWorld, _id: AskId) {}
+}
+
+impl Machine for Request {
+    fn answer(&mut self, world: &mut TestWorld, id: AskId, event: Event) {
+        Request::answer(self, world, id, event);
+    }
+    fn take_effects(&mut self) -> Vec<Effect> {
+        Request::take_effects(self)
+    }
+    fn done(&self) -> bool {
+        self.outcome().is_some()
+    }
+    fn cancel(&mut self) {
+        Request::cancel(self);
+    }
+    fn busy(&mut self) {
+        Request::busy(self);
+    }
+}
+
+impl Machine for Shell {
+    fn answer(&mut self, world: &mut TestWorld, id: AskId, event: Event) {
+        Shell::answer(self, world, id, event);
+    }
+    fn take_effects(&mut self) -> Vec<Effect> {
+        Shell::take_effects(self)
+    }
+    fn done(&self) -> bool {
+        self.outcome().is_some()
+    }
+    fn cancel(&mut self) {
+        Shell::cancel(self);
+    }
+    fn busy(&mut self) {
+        Shell::busy(self);
+    }
+    fn expire(&mut self, world: &mut TestWorld, id: AskId) {
+        Shell::expire(self, world, id);
+    }
+}
+
 struct Upload {
     call: NodeCall,
     body: Vec<u8>,
@@ -1417,7 +1634,7 @@ struct Main<'a> {
 }
 
 impl Main<'_> {
-    fn take(&mut self, request: &mut Request) {
+    fn take<M: Machine>(&mut self, request: &mut M) {
         for effect in request.take_effects() {
             match effect {
                 Effect::Ask(Ask {
@@ -1472,8 +1689,14 @@ impl Main<'_> {
 
     /// Gives `event` to ask `id`, unless the request ended; a random cancel
     /// or `busy` may come first.
-    fn give(&mut self, request: &mut Request, checker: &mut Checker<'_>, id: AskId, event: Event) {
-        if request.outcome().is_some() {
+    fn give<M: Machine>(
+        &mut self,
+        request: &mut M,
+        checker: &mut Checker<'_>,
+        id: AskId,
+        event: Event,
+    ) {
+        if request.done() {
             return;
         }
         let roll = self.rng.below(1000);
@@ -1481,8 +1704,12 @@ impl Main<'_> {
             request.cancel();
         } else if roll < 5 {
             request.busy();
+        } else if roll < 8 {
+            // D13: the ask went past its bound; main's answer, when it
+            // comes, is a late one.
+            request.expire(&mut self.world, id);
         }
-        if request.outcome().is_some() {
+        if request.done() {
             self.take(request);
             return;
         }
@@ -1541,15 +1768,15 @@ impl Main<'_> {
 
     /// Delivers a node call's events in order, a streamed reply's data
     /// frames only within the core's credit (one that runs out stalls).
-    fn deliver(
+    fn deliver<M: Machine>(
         &mut self,
-        request: &mut Request,
+        request: &mut M,
         checker: &mut Checker<'_>,
         id: AskId,
         events: Vec<Event>,
     ) {
         for event in events {
-            if request.outcome().is_some() || self.cancelled.contains(&id) {
+            if request.done() || self.cancelled.contains(&id) {
                 return;
             }
             if let Event::Data(bytes) = &event
@@ -1593,7 +1820,7 @@ impl Main<'_> {
         }
     }
 
-    fn answer(&mut self, request: &mut Request, checker: &mut Checker<'_>, ask: Ask) {
+    fn answer<M: Machine>(&mut self, request: &mut M, checker: &mut Checker<'_>, ask: Ask) {
         let id = ask.id;
         match ask.need {
             Need::Ready(check) => {
@@ -1663,7 +1890,7 @@ impl Main<'_> {
             // read it, with no roll (no random cancel or `busy` first): every
             // run's answers and outcomes are those the reads gave.
             Need::Live => {
-                if request.outcome().is_none() {
+                if !request.done() {
                     let live = self.world.live();
                     request.answer(&mut self.world, id, Event::Live(live));
                     self.take(request);
@@ -1672,7 +1899,7 @@ impl Main<'_> {
             // Main opens and closes a subscription with no roll either, so
             // the other answers stay as they were.
             Need::Subscribe(_) => {
-                if request.outcome().is_none() {
+                if !request.done() {
                     let opened =
                         Event::Opened(Ok(JsString::from("59820d1a24fddf7bceaad40b518018f0")));
                     request.answer(&mut self.world, id, opened);
@@ -1680,7 +1907,7 @@ impl Main<'_> {
                 }
             }
             Need::Unsubscribe { .. } => {
-                if request.outcome().is_none() {
+                if !request.done() {
                     request.answer(&mut self.world, id, Event::Closed);
                     self.take(request);
                 }
@@ -1744,7 +1971,7 @@ impl Main<'_> {
 
     /// An upload's body is in, or main answers before it is: the node's
     /// reply.
-    fn uploaded(&mut self, request: &mut Request, checker: &mut Checker<'_>, id: AskId) {
+    fn uploaded<M: Machine>(&mut self, request: &mut M, checker: &mut Checker<'_>, id: AskId) {
         let Some(upload) = self.uploads.remove(&id) else {
             return;
         };
@@ -1752,9 +1979,9 @@ impl Main<'_> {
         self.deliver(request, checker, id, events);
     }
 
-    fn run(&mut self, request: &mut Request, checker: &mut Checker<'_>) {
+    fn run<M: Machine>(&mut self, request: &mut M, checker: &mut Checker<'_>) {
         self.take(request);
-        while request.outcome().is_none() {
+        while !request.done() {
             if let Some((id, bytes)) = self.body_credits.pop_front() {
                 // A frame of an upload's body went: its credit back, or, now
                 // and then, the reply before the body is in.
@@ -2202,6 +2429,332 @@ fn every_call_matches_its_row() {
                 rows_called.get(row).is_some_and(|n| *n > 0),
                 "{row}: no run made a call"
             );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main's own node methods, the shell parents.
+
+/// The shell parents' node: the usable batch and a second one, a tag, and
+/// three feeds of the Bee wallet key (their topics main computes from
+/// these strings): one whose updates 0 to 3 exist (the head probe's), one
+/// `GET /feeds` answers with its index, one with none.
+const SHELL_NODE: &str = r#"{"node":{
+  "stamps":{"stamps":[
+    {"batchID":"a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1","utilization":0,"usable":true,"label":"freedom","depth":22,"amount":"100000000000","bucketDepth":16,"blockNumber":1000,"immutableFlag":true,"exists":true,"batchTTL":864000},
+    {"batchID":"b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2","utilization":0,"usable":false,"label":"","depth":20,"amount":"7","bucketDepth":16,"blockNumber":9,"immutableFlag":true,"exists":true,"batchTTL":5,"propagating":true}]},
+  "tags":{"101":{"uid":101,"address":"","split":10,"seen":2,"stored":10,"sent":7,"synced":5,"startedAt":"2026-01-01T00:00:00Z"}},
+  "probes":[{"key":"bee","topic":"shell/probed","head":3}],
+  "latest":[{"key":"bee","topic":"shell/latest","reply":{"status":200,"headers":{"swarm-feed-index":"0000000000000004","swarm-feed-index-next":"0000000000000005"}}}]
+}}"#;
+
+/// Main's params for one shell run, drawn from the seed: the row, the
+/// method, the params' JSON and the parts' bytes.
+fn shell_params(rng: &mut Rng) -> (&'static str, ShellMethod, String, BTreeMap<u32, Vec<u8>>) {
+    let opt = |rng: &mut Rng, percent: u64, text: String| {
+        if rng.chance(percent) {
+            text
+        } else {
+            String::new()
+        }
+    };
+    let batch = |rng: &mut Rng| {
+        let id = rng.pick(&["b2", "B2", "a1", "c3"]).repeat(32);
+        opt(rng, 40, format!(r#","batch":"{id}""#))
+    };
+    let encrypt = |rng: &mut Rng| rng.pick(&["", r#","encrypt":true"#, r#","encrypt":false"#]);
+    let mut parts = BTreeMap::new();
+    let mut part = |rng: &mut Rng, k: u32, len: usize, inline: bool| {
+        let data = rng.bytes(len);
+        if inline && len <= 64 * 1024 {
+            format!(
+                r#""bytes":{len},"base64":"{}""#,
+                fc_swarm_provider::value::encode_base64(&data)
+            )
+        } else {
+            parts.insert(k, data);
+            format!(r#""bytes":{len},"part":{k}"#)
+        }
+    };
+    let (row, method, params) = match rng.below(9) {
+        0..=1 => {
+            let len = rng.pick(&[0usize, 1, 5, 4096, 65_536, 65_537, 150_000]);
+            let inline = rng.chance(70);
+            let source = part(rng, 0, len, inline);
+            let name = rng.pick(&[
+                "",
+                r#","name":"""#,
+                r#","name":"draft.md""#,
+                r#","name":"ñandú & co/?#.txt""#,
+            ]);
+            let content_type = rng.pick(&[
+                "",
+                r#","content_type":"text/markdown""#,
+                r#","content_type":"""#,
+            ]);
+            let history = opt(
+                rng,
+                30,
+                r#","history":{"type":"data","name":"Text"}"#.to_owned(),
+            );
+            (
+                "swarm.publish:data,file",
+                ShellMethod::Publish,
+                format!(
+                    r#"{{"kind":"data","parts":[{{{source}}}]{name}{content_type}{}{},"pin":true,"deferred":{}{history}}}"#,
+                    encrypt(rng),
+                    batch(rng),
+                    rng.chance(50)
+                ),
+            )
+        }
+        2 => {
+            let len = rng.pick(&[0usize, 9, 70_000, 300_000]);
+            let source = part(rng, 0, len, false);
+            let history = opt(
+                rng,
+                30,
+                r#","history":{"type":"file","name":"notes.txt"}"#.to_owned(),
+            );
+            (
+                "swarm.publish:data,file",
+                ShellMethod::Publish,
+                format!(
+                    r#"{{"kind":"file","parts":[{{{source}}}],"name":"notes.txt"{}{},"pin":true,"deferred":{}{history}}}"#,
+                    encrypt(rng),
+                    batch(rng),
+                    rng.chance(80)
+                ),
+            )
+        }
+        3..=4 => {
+            let long = format!("{}.txt", "é".repeat(60));
+            let pool = [
+                "index.html",
+                "a/b.txt",
+                "assets/app.js",
+                long.as_str(),
+                "d/index.html",
+            ];
+            let n = rng.below(4) as usize;
+            let mut items = Vec::new();
+            let mut paths = Vec::new();
+            for k in 0..n {
+                let path = pool[(k + rng.below(2) as usize * 2) % pool.len()];
+                if paths.contains(&path) {
+                    continue;
+                }
+                paths.push(path);
+                let len = rng.pick(&[0usize, 1, 511, 513, 70_000]);
+                let inline = rng.chance(50);
+                let source = part(rng, k as u32, len, inline);
+                items.push(format!(
+                    r#"{{"path":{},{source}}}"#,
+                    JsValue::string(path).stringify()
+                ));
+            }
+            let index = match paths.first() {
+                Some(p) if rng.chance(30) => {
+                    format!(r#","index_document":{}"#, JsValue::string(*p).stringify())
+                }
+                _ => String::new(),
+            };
+            let history = opt(
+                rng,
+                30,
+                r#","history":{"type":"directory","name":"site"}"#.to_owned(),
+            );
+            (
+                "swarm.publish:collection",
+                ShellMethod::Publish,
+                format!(
+                    r#"{{"kind":"collection","parts":[{}]{index}{}{},"pin":true,"deferred":true{history}}}"#,
+                    items.join(","),
+                    encrypt(rng),
+                    batch(rng)
+                ),
+            )
+        }
+        5..=6 => {
+            let topic =
+                fc_swarm::feed::topic(rng.pick(&["shell/probed", "shell/latest", "shell/none"]));
+            let mut topic_hex = hex(&topic);
+            if rng.chance(20) {
+                topic_hex = topic_hex.to_ascii_uppercase();
+            }
+            let base = format!(
+                r#""key":{{"kind":"bee_wallet"}},"topic":"{topic_hex}"{}"#,
+                batch(rng)
+            );
+            if rng.chance(30) {
+                (
+                    "swarm.feed:create",
+                    ShellMethod::Feed,
+                    format!(r#"{{"op":"create",{base}}}"#),
+                )
+            } else {
+                let reference = rng.pick(&["ef", "EF"]).repeat(rng.pick(&[32, 64]));
+                let min = rng.pick(&[
+                    "",
+                    r#","min_index":0"#,
+                    r#","min_index":2"#,
+                    r#","min_index":9"#,
+                    r#","min_index":1099511627776"#,
+                ]);
+                (
+                    "swarm.feed:update",
+                    ShellMethod::Feed,
+                    format!(r#"{{"op":"update",{base},"reference":"{reference}"{min}}}"#),
+                )
+            }
+        }
+        7 => {
+            let id = rng.pick(&[
+                "",
+                r#""id":"a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1""#,
+                r#""id":"B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2""#,
+                r#""id":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd""#,
+            ]);
+            ("swarm.stamps", ShellMethod::Stamps, format!("{{{id}}}"))
+        }
+        _ => {
+            let uid = rng.pick(&[101u64, 7, 9_007_199_254_740_991]);
+            (
+                "swarm.upload_status",
+                ShellMethod::UploadStatus,
+                format!(r#"{{"tag_uid":{uid}}}"#),
+            )
+        }
+    };
+    (row, method, params, parts)
+}
+
+/// The property over main's own methods: every call a shell parent makes,
+/// over seeded params and random answers from main, the node and the vault
+/// (D13's expiry among them), matches its row at its step, and a given
+/// batch is the upload's with no `/stamps`.
+#[test]
+fn every_shell_call_matches_its_row() {
+    let grammar_text = text_of("swarm-grammar.json");
+    let keys_text = text_of("keys.json");
+    let grammar_index = Index::new(&grammar_text).unwrap();
+    let grammar = grammar_index.root();
+    let keys_index = Index::new(&keys_text).unwrap();
+    let keys = keys(&keys_index);
+    let forms = forms(grammar);
+    let node_index = Index::new(SHELL_NODE).unwrap();
+    let mut contents = Contents::default();
+    let node = PropNode::of(node_index.root(), &keys, &mut contents);
+    let runs = env_u64("GRAMMAR_SHELL_RUNS").unwrap_or(1500);
+    let only_seed = env_u64("GRAMMAR_SEED");
+    let mut signers = HashMap::new();
+    let mut failures = Vec::new();
+    let mut rows_called: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut outcomes: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for seed in 0..runs {
+        if only_seed.is_some_and(|s| s != seed) {
+            continue;
+        }
+        let mut rng = Rng::new(seed.wrapping_mul(0x5851_f42d_4c95_7f2d));
+        let (row, method, params, parts) = shell_params(&mut rng);
+        let json = fc_json::parse(&params).unwrap();
+        let call = ShellCall::parse(method, &json)
+            .unwrap_or_else(|why| panic!("seed {seed}: {params}: {why}"));
+        let typed = Value::from_js(&json);
+        let mut world = TestWorld::new(1_767_225_600_123);
+        let mut shell = Shell::start(call, &mut world);
+        let mut checker = Checker::new(row, &typed, JsString::default(), &parts, &forms);
+        checker.row_forms = get(get(get(grammar, "rows"), row), "calls")
+            .children()
+            .flat_map(|g| get(g, "forms").children().map(string).collect::<Vec<_>>())
+            .collect();
+        let honesty = rng.pick(&[95, 70, 40]);
+        let mut main = Main {
+            rng,
+            honesty,
+            world,
+            node: &node,
+            keys: &keys,
+            signers: &mut signers,
+            parts_data: parts.clone(),
+            queue: VecDeque::new(),
+            body_credits: VecDeque::new(),
+            call_at: HashMap::new(),
+            windows: HashMap::new(),
+            uploads: BTreeMap::new(),
+            parts: Vec::new(),
+            cancelled: HashSet::new(),
+            open_calls: BTreeSet::new(),
+            most_open: 0,
+            ready: Vec::new(),
+            violations: Vec::new(),
+        };
+        main.run(&mut shell, &mut checker);
+        *rows_called.entry(row).or_default() += checker.calls.len();
+        let kind = match shell.outcome() {
+            Some(ShellOutcome::Result(_)) => "result",
+            Some(ShellOutcome::Error(_)) => "error",
+            Some(ShellOutcome::Cancelled) => "cancelled",
+            Some(ShellOutcome::Busy) => "busy",
+            Some(ShellOutcome::Protocol(_)) => "protocol",
+            None => "none",
+        };
+        *outcomes.entry(kind).or_default() += 1;
+        let shape = common::Ran {
+            outcome: Outcome::Cancelled,
+            ready: main.ready.clone(),
+            calls: checker
+                .calls
+                .iter()
+                .map(|(c, _)| Logged {
+                    call: c.clone(),
+                    charge: 0,
+                    body: None,
+                })
+                .collect(),
+            cancels_after_outcome: 0,
+            most_open: main.most_open,
+        };
+        let sid = format!("seed {seed} (GRAMMAR_SEED={seed}) {params}");
+        let shaped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            check_row_shape(&sid, grammar, row, &shape);
+        }));
+        if let Err(panic) = shaped {
+            let why = panic
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                .unwrap_or_default();
+            main.violations.push(format!("the row's shape: {why}"));
+        }
+        for v in &main.violations {
+            failures.push(format!("{sid} [{row}]: {v}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} violations:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    eprintln!("shell property: {runs} runs, outcomes {outcomes:?}, calls by row {rows_called:?}");
+    if only_seed.is_none() {
+        for row in [
+            "swarm.publish:data,file",
+            "swarm.publish:collection",
+            "swarm.feed:create",
+            "swarm.feed:update",
+            "swarm.stamps",
+            "swarm.upload_status",
+        ] {
+            assert!(
+                rows_called.get(row).is_some_and(|n| *n > 0),
+                "{row}: no call"
+            );
+        }
+        for kind in ["result", "error", "cancelled", "busy"] {
+            assert!(outcomes.contains_key(kind), "no run ended {kind}");
         }
     }
 }
