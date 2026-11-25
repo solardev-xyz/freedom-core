@@ -192,14 +192,18 @@ function replyOf(reply) {
   return out;
 }
 
-/** Deterministic randomness for subscription ids: 16 bytes from a counter. */
-function counterCrypto() {
+/**
+ * Deterministic randomness: the nth call's bytes are the first `size` of
+ * SHA-256(`<label> <n>`). Subscription ids take `swarm vectors random`,
+ * consent tokens `swarm vectors token`.
+ */
+function counterCrypto(label = 'swarm vectors random') {
   let n = 0;
   return {
     ...crypto,
     randomBytes(size) {
       n += 1;
-      return crypto.createHash('sha256').update(`swarm vectors random ${n}`).digest().subarray(0, size);
+      return crypto.createHash('sha256').update(`${label} ${n}`).digest().subarray(0, size);
     },
   };
 }
@@ -408,6 +412,13 @@ async function withReference(env, spec, fn) {
     clock,
     events,
     crypto: counterCrypto(),
+    // Main's own methods' cases (swarm-shell.js): the IPC handlers the
+    // modules register, the user's accounts, main's manifest fetch, and the
+    // consent tokens' randomness, each only where the case asks for it.
+    ...(spec.ipc ? { ipc: new Map() } : {}),
+    ...(spec.accounts ? { accounts: spec.accounts } : {}),
+    ...(spec.manifestFetch ? { manifestFetch: spec.manifestFetch } : {}),
+    ...(spec.tokens ? { tokenCrypto: counterCrypto('swarm vectors token') } : {}),
   };
   world.requestCount = () => node.requests.length;
   // A reply marked abortPage aborts the page's request (pageContext). The
