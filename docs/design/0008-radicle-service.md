@@ -1400,7 +1400,7 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 | admission in main | shared with dweb fetches: 256 active, 512 waiting | 503 |
 | health | `rad.stats` every 5 s; main's watchdog at 20 s | kill |
 | `rad.stats` | inline; one reply of at most 4 KiB; NAT64's prefixes and failures at most 16 each; the peers counted once a second | the lists are cut |
-| heartwood internals | not bounded by the service ([Pools and budgets](#pools-and-budgets)) | the process's safety cap on private memory, not on file maps: about 2 GiB on Windows (the job's limit) and Linux (`RLIMIT_DATA`), none on macOS (question 10); past it any allocation's failure ends the process (an abort, or exit 71), and main restarts it as after a crash |
+| heartwood internals | not bounded by the service ([Pools and budgets](#pools-and-budgets)) | the process's safety cap on private memory, not on read-only or shared maps: about 2 GiB on Windows (the job's limit) and Linux (`RLIMIT_DATA`), none on macOS (question 10); past it any allocation's failure ends the process (an abort, or exit 71), and main restarts it as after a crash |
 
 ## Deviations
 
