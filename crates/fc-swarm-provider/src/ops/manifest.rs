@@ -28,7 +28,8 @@
 //!   its key: `recheck()` and `holds()`), which main reads just before it
 //!   calls, as the reference reads it just before its decision: `false`
 //!   spends the consent and answers `{ refused: true }` with nothing
-//!   written.
+//!   written. Both come before the store is read, so they answer as the
+//!   reference's do even while the file and its `.bak` can't be read.
 //!
 //! **SW-1's hold.** A transaction that would revoke a held site's feed
 //! grant (a disconnect, a capability handed back, a manifest gone, or a
@@ -183,9 +184,8 @@ impl Run {
             stores.manifests.release_page_token(token.as_str());
             return done(Ok(JsValue::Undefined));
         }
-        if let Err(thrown) = ensure_loaded(stores) {
-            return Step::Done(Outcome::Thrown(thrown));
-        }
+        // `decidePageManifest`'s checks come before any read of the store:
+        // the consents live in memory, as the reference's do.
         if let Op::Decide {
             key, token, live, ..
         } = &self.op

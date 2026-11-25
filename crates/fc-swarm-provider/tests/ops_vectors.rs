@@ -2398,3 +2398,131 @@ fn a_decision_that_isnt_live_is_refused() {
     assert_eq!(got.get("kind"), Some(&s("legacy")));
     assert_eq!(got.get("reason"), Some(&s("unresolved")));
 }
+
+/// `decidePageManifest`'s checks come before the store is read: with the
+/// file and its `.bak` both unreadable, a forgotten token is expired, and a
+/// decision main read as not live spends its consent and is refused; only
+/// a live decision reads the store.
+#[test]
+fn a_decision_answers_its_checks_before_the_store_is_read() {
+    let cases = stores_section();
+    let keys = vault_keys();
+    let vault = Vault {
+        keys: &keys,
+        unlocked: true,
+    };
+    let case = cases
+        .iter()
+        .find(|c| c.get("id").and_then(JsValue::as_str) == Some("manifest-allow-publish"))
+        .unwrap();
+    let site = field(case, "site").clone();
+    let step = &field(case, "steps").as_array().unwrap()[0];
+    let manifest = str_of(field(step, "manifest")).as_bytes().to_vec();
+    let mut world = World::new(
+        FeedStore::empty(),
+        field(case, "grants").clone(),
+        Dir::new(),
+    );
+    let check = params(
+        "check",
+        &[
+            ("key", site.clone()),
+            (
+                "url",
+                JsValue::string(format!("{}/index.html", str_of(&site))),
+            ),
+            ("eager", JsValue::Bool(true)),
+        ],
+    );
+    // Two page consents: a page's are never shared.
+    let mut tokens = Vec::new();
+    for _ in 0..2 {
+        let answer =
+            outcome_answer(
+                world.play(ops::MANIFEST, &check, Caller::Shell, vault, |_| {
+                    Fetch::Answered {
+                        status: 200,
+                        body: manifest.clone(),
+                    }
+                }),
+            )
+            .unwrap();
+        tokens.push(answer.get("token").unwrap().clone());
+    }
+    assert_ne!(tokens[0], tokens[1]);
+    // A save that fails leaves the store unloaded; then both files go bad.
+    world.disk.fail = Some(manifests::FILE_NAME);
+    let failed = world.play(
+        ops::MANIFEST,
+        &params("disconnect", &[("origin", s("bzz://other"))]),
+        Caller::Shell,
+        vault,
+        no_fetch,
+    );
+    assert!(matches!(failed, Outcome::Thrown(_)));
+    assert!(!world.manifests.is_loaded());
+    world.disk.fail = None;
+    world
+        .disk
+        .dir
+        .insert(manifests::FILE_NAME.to_owned(), "{".to_owned());
+    world
+        .disk
+        .dir
+        .insert(manifests::BACKUP_NAME.to_owned(), "{".to_owned());
+    let before = world.disk.dir.clone();
+    let decide = |token: &JsValue, live: bool| {
+        params(
+            "decide",
+            &[
+                ("key", site.clone()),
+                ("token", token.clone()),
+                ("outcome", s("allow")),
+                ("live", JsValue::Bool(live)),
+            ],
+        )
+    };
+    let message = |outcome: Outcome| outcome_answer(outcome).unwrap_err().message;
+    let forgotten = world.play(
+        ops::MANIFEST,
+        &decide(&s("forgotten"), true),
+        Caller::Shell,
+        vault,
+        no_fetch,
+    );
+    assert_eq!(message(forgotten), "Manifest consent expired");
+    let refused = world.play(
+        ops::MANIFEST,
+        &decide(&tokens[0], false),
+        Caller::Shell,
+        vault,
+        no_fetch,
+    );
+    assert_eq!(
+        outcome_answer(refused).unwrap().stringify(),
+        r#"{"refused":true}"#
+    );
+    let spent = world.play(
+        ops::MANIFEST,
+        &decide(&tokens[0], true),
+        Caller::Shell,
+        vault,
+        no_fetch,
+    );
+    assert_eq!(message(spent), "Manifest consent expired");
+    // A live decision has store work to do: it reads the store, which it
+    // can't.
+    let live = world.play(
+        ops::MANIFEST,
+        &decide(&tokens[1], true),
+        Caller::Shell,
+        vault,
+        no_fetch,
+    );
+    assert_eq!(
+        message(live),
+        "swarm-manifest-grants.json and its backup are unreadable"
+    );
+    assert!(!world.manifests.is_loaded());
+    assert_eq!(world.disk.dir, before, "nothing written");
+}
