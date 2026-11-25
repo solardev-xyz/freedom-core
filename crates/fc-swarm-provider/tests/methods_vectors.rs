@@ -68,14 +68,7 @@ const SEVEN: [&str; 7] = [
 
 /// Cases of the seven methods this test doesn't play, each with why. The
 /// test fails on any case of the seven it neither plays nor names here.
-const LEFT_OUT: &[(&str, &str)] = &[(
-    "read-data-redundancy-level-span",
-    "the vector's `core` says the verified walk gives the reference's result, but the root \
-     chunk's span carries redundancy level 1 over two references and no parities: \
-     fc_swarm::tree (Ant's joiner) needs 3 parities for 2 data shards at level 1 and refuses \
-     the chunk as unverifiable, so the walk ends `chunk_type_mismatch` (reported; the vector \
-     isn't edited)",
-)];
+const LEFT_OUT: &[(&str, &str)] = &[];
 
 /// The deviations a case of the seven marks, and what the core answers.
 fn core_answer(deviation: &str, core: V<'_, '_>) -> Want {
@@ -1643,8 +1636,8 @@ fn access_and_reads() {
     }
     // Every step of these cases, but main's own answers; every honest
     // scenario of their reads.
-    assert_eq!((played, main_answered), (551, 7));
-    assert_eq!(scenarios_used.len(), 95);
+    assert_eq!((played, main_answered), (552, 7));
+    assert_eq!(scenarios_used.len(), 96);
     assert!(total_calls > 100, "{total_calls}");
 }
 

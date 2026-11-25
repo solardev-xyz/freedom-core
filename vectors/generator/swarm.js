@@ -165,24 +165,6 @@ async function environment(checkout, keysJson) {
     const data = content(seed, n);
     roots.set(sha256(data), (await splitTree(core, data)).root.address);
   }
-  // A root whose span carries a redundancy level (top byte 0x81): 8,192
-  // bytes in two leaves, the level cleared when its size is read.
-  {
-    const data = content('read-data/level', 8192);
-    const tree = await splitTree(core, data);
-    const span = 8192n | (0x81n << 56n);
-    const root = core.makeContentAddressedChunk(tree.root.payload, span);
-    const spanBytes = Buffer.alloc(8);
-    spanBytes.writeBigUInt64LE(span);
-    env.levelRoot = {
-      address: root.address.toHex(),
-      data: { seed: 'read-data/level', length: 8192 },
-      chunks: [
-        { address: root.address.toHex(), hex: Buffer.concat([spanBytes, tree.root.payload]).toString('hex') },
-        ...tree.chunks.filter((c) => c.address !== tree.root.address).map((c) => ({ address: c.address, hex: c.wire.toString('hex') })),
-      ],
-    };
-  }
   // A root whose span's top byte is exactly 128: a real size of 2^63.
   {
     const span = 1n << 63n;
@@ -265,6 +247,25 @@ async function buildSwarm(checkout, meta, keysJson, dwebVerify) {
     }
     throw new Error(`${fileId}: no parity reference in its root`);
   };
+  // A root whose span carries a redundancy level (top byte 0x81): design
+  // 0009's 4,097-byte file at level 1 as Bee split it (dweb-verify.json),
+  // its two leaves and three parities, the level cleared when its size is
+  // read. The node serves the root and the leaves; the walk reads no parity.
+  {
+    const file = dwebVerify.swarm.files.find((f) => f.id === 'file-4097-rs1');
+    const wire = Buffer.from(dwebVerify.swarm.chunks[file.root], 'base64');
+    assert.equal(wire[7], 0x81, `${file.id}: its span carries redundancy level 1`);
+    const tree = await splitTree(env.core, content(file.seed, file.size));
+    const leaves = tree.chunks.filter((c) => c.address !== tree.root.address);
+    assert.deepEqual(leaves.map((c) => c.address), [0, 1].map((i) => wire.subarray(8 + 32 * i, 40 + 32 * i).toString('hex')),
+      `${file.id}: its first two references are the plain split's leaves`);
+    env.levelRoot = {
+      address: file.root,
+      size: file.size,
+      data: { seed: file.seed, length: file.size },
+      chunks: [{ address: file.root, hex: wire.toString('hex') }, ...leaves.map((c) => ({ address: c.address, hex: c.wire.toString('hex') }))],
+    };
+  }
   const timed = async (name, fn) => {
     const started = Date.now();
     const value = await fn();
