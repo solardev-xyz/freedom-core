@@ -223,18 +223,13 @@ fn string(raw: &RawValue) -> Result<String, Fault> {
 /// Hex digits, in pairs, either case, no prefix.
 fn unhex(text: &str) -> Option<Vec<u8>> {
     let digit = |b: u8| char::from(b).to_digit(16);
-    let bytes = text.as_bytes();
-    if !bytes.len().is_multiple_of(2) {
+    let (pairs, odd) = text.as_bytes().as_chunks::<2>();
+    if !odd.is_empty() {
         return None;
     }
-    bytes
-        .chunks_exact(2)
-        .map(|pair| {
-            let [high, low] = *pair else {
-                return None;
-            };
-            u8::try_from(digit(high)? << 4 | digit(low)?).ok()
-        })
+    pairs
+        .iter()
+        .map(|&[high, low]| u8::try_from(digit(high)? << 4 | digit(low)?).ok())
         .collect()
 }
 
