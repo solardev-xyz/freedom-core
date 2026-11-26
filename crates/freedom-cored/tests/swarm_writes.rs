@@ -1381,6 +1381,68 @@ fn gate_cancel_deadline_and_a_failed_write_during_the_hold() {
     assert_eq!((gate.signed(), played.soc_posts), (signed + 1, 1));
 }
 
+/// A request's end and the vault's signature of a page's SOC don't
+/// interleave (design 0015, "Deadlines and cancel"): the vault checks the
+/// request and signs holding its state, which its end takes too. Ended
+/// (its deadline, on the swarm thread, as the loop is the vault's) while
+/// the vault stops just before that check (`presign`), nothing is signed
+/// or uploaded. Ended while it signs (`signing`), the end waits for the
+/// signature, which is made once; main's cancel then is read only after it
+/// too.
+#[test]
+fn an_end_and_a_page_s_signature_are_one_before_the_other() {
+    for (kind, how, signed) in [
+        ("presign", "deadline", 0),
+        ("signing", "deadline", 1),
+        ("signing", "cancel", 1),
+    ] {
+        let mut gate = Gate::new(kind);
+        let (mut script, mut request) = gate.arm();
+        if how == "deadline" {
+            request = request.replacen(r#""params""#, r#""deadline_ms":1000,"params""#, 1);
+        }
+        let (parked, release) = (gate.parked.clone(), gate.release.clone());
+        let mut stopped = false;
+        let mut idle: Idle<'_> = Box::new(|main: &mut Main| {
+            if stopped || !parked.exists() {
+                return None;
+            }
+            stopped = true;
+            if how == "cancel" {
+                let id = main.last_request();
+                main.core.send(&json!({ "type": "cancel", "id": id }));
+            }
+            // While the vault stops: before its check, the deadline ends
+            // the request at once; while it signs, the end waits, and
+            // main's cancel isn't read yet, so nothing comes.
+            let within = std::time::Duration::from_millis(match (kind, how) {
+                ("presign", _) => 5000,
+                (_, "deadline") => 2000,
+                _ => 300,
+            });
+            let meanwhile = main.core.recv_or_closed(within).unwrap();
+            if kind == "presign" {
+                let answer = meanwhile.expect("the deadline's answer");
+                main.backlog.push_back(answer);
+            } else {
+                assert_eq!(meanwhile, None, "{kind} {how}: the end waits");
+            }
+            std::fs::write(&release, "").unwrap();
+            None
+        });
+        let played = gate
+            .main
+            .play_with(&mut script, &page(SITE_A), &request, &mut *idle);
+        drop(idle);
+        assert!(stopped, "{kind} {how}: the vault stopped");
+        assert_eq!(played.outcome, Outcome::Cancelled, "{kind} {how}");
+        assert_eq!(gate.signed(), signed, "{kind} {how}");
+        if how == "deadline" {
+            assert_eq!(played.soc_posts, 0, "{kind} {how}: nothing uploaded");
+        }
+    }
+}
+
 /// D15: the vault decides a page's SOC again before it signs. With the
 /// connection revoked after the guard (the vault's owner held back), the
 /// machine's re-check before the signature, which doesn't read the

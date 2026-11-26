@@ -7,8 +7,8 @@
 //!   anything (so before its commit point).
 //! - `FREEDOM_CORED_TEST_KDF_DEADLINE_MS` replaces the 30 s KDF deadline.
 //! - `FREEDOM_CORED_TEST_STALL_MS` replaces the 30 s the vault loop's
-//!   replies may wait on a writer that writes nothing before the core
-//!   exits.
+//!   replies, and the swarm thread's frames, may wait on a writer that
+//!   writes nothing before the core exits.
 //! - `FREEDOM_CORED_TEST_COMMIT_DELAY_MS` stalls a job right after it claims
 //!   its commit point, before the rename or unlink.
 //! - `FREEDOM_CORED_TEST_COMMIT_MARKER` names a file created the moment a job
@@ -37,8 +37,12 @@
 //!   (design 0015, "Budgets"), so a test reaches `busy` with a few
 //!   requests. `FREEDOM_CORED_TEST_SWARM_STREAMS` replaces its 32 incoming
 //!   streams (D4), and `FREEDOM_CORED_TEST_SWARM_IDLE_MS` the 60 s idle
-//!   bound of an upload's streams and of a cancelled stream's terminal
-//!   (D13). With `FREEDOM_CORED_TEST_METHODS`, `test.swarm_world` sets the
+//!   bound of an upload's streams and of a cancelled stream's terminal,
+//!   and D13's other 60 s waits (D13). `FREEDOM_CORED_TEST_SWARM_WHOLE_MS`
+//!   replaces D13's 300 s for a whole node reply under `swarm.publish`, and
+//!   `FREEDOM_CORED_TEST_SWARM_DEADLINE_MS` the 300 s deadline of main's
+//!   own methods under the Swarm deadline (`swarm.feed`, `swarm.stamps`,
+//!   `swarm.upload_status`). With `FREEDOM_CORED_TEST_METHODS`, `test.swarm_world` sets the
 //!   swarm thread's world between the cases one core plays (D11): its read
 //!   budgets, tags' owners and stores afresh (`swarm-feeds.json` removed and
 //!   a new publish history), its `Date.now()`, the Swarm grants in memory,
@@ -59,7 +63,14 @@
 //!   thread; the answers then go to their requests in order. So a test
 //!   pauses a SOC write after its first SW-1 check (`owner`) or with the
 //!   signature held back (`sign`), and makes its change meanwhile (D11,
-//!   the interleaving gate).
+//!   the interleaving gate). With `presign` or `signing`, the vault itself
+//!   stops as it signs a Swarm SOC (a page's or main's own), with a line
+//!   on `<marker>`, blocking the event loop until `<release>` exists (at
+//!   most 120 s, or the exit): `presign` just before it takes the
+//!   request's state to check and sign, `signing` holding it, just before
+//!   the signature. So a test ends the request (its deadline, on the swarm
+//!   thread) on either side of the check (design 0015, "Deadlines and
+//!   cancel").
 //! - The swarm thread's mining lane (design 0015, SWM-4's D11), before
 //!   each batch: `FREEDOM_CORED_TEST_SWARM_MINE_DELAY_MS` sleeps that long
 //!   (a slow batch); `FREEDOM_CORED_TEST_SWARM_MINE_BLOCK` names a file: a
@@ -584,6 +595,10 @@ pub fn swarm_bounds(mut bounds: crate::swarm::engine::Bounds) -> crate::swarm::e
     if let Some(whole) = millis("FREEDOM_CORED_TEST_SWARM_WHOLE_MS") {
         bounds.whole_ms = whole;
     }
+    // The 300 s deadline of main's own methods under the Swarm deadline.
+    if let Some(deadline) = millis("FREEDOM_CORED_TEST_SWARM_DEADLINE_MS") {
+        bounds.deadline_ms = deadline;
+    }
     bounds
 }
 
@@ -613,8 +628,9 @@ fn swarm_hold() -> Option<(String, std::path::PathBuf, std::path::PathBuf)> {
 }
 
 /// Whether the swarm thread parks a vault answer of `kind` (`owner` or
-/// `sign`) now: the hook names it and its release isn't there. Each parked
-/// answer appends a line to the marker.
+/// `sign`), or the event loop a signature's ask before the vault runs it
+/// (`ask`), now: the hook names it and its release isn't there. Each parked
+/// answer or ask appends a line to the marker.
 #[cfg(feature = "testhooks")]
 pub fn swarm_hold_parks(kind: &str) -> bool {
     use std::io::Write as _;
@@ -630,6 +646,28 @@ pub fn swarm_hold_parks(kind: &str) -> bool {
         .open(marker)
         .and_then(|mut file| file.write_all(format!("{kind}\n").as_bytes()));
     true
+}
+
+/// The vault, signing a Swarm SOC, at `at` (`presign` or `signing`): if
+/// the hook names it and its release isn't there, a line on the marker,
+/// then the wait for the release (at most 120 s, or the exit).
+#[cfg(feature = "testhooks")]
+pub fn swarm_sign_hold(at: &str) {
+    use std::io::Write as _;
+    let Some((kind, marker, release)) = swarm_hold() else {
+        return;
+    };
+    if kind != at || release.exists() {
+        return;
+    }
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(marker)
+        .and_then(|mut file| file.write_all(format!("{kind}\n").as_bytes()));
+    hold(release.as_os_str(), || {
+        EXITING.load(std::sync::atomic::Ordering::SeqCst)
+    });
 }
 
 /// Whether the parked vault answers may go: the hook's release exists, or
@@ -1341,6 +1379,9 @@ pub fn swarm_bounds(bounds: crate::swarm::engine::Bounds) -> crate::swarm::engin
 
 #[cfg(not(feature = "testhooks"))]
 pub fn swarm_signed() {}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn swarm_sign_hold(_at: &str) {}
 
 #[cfg(not(feature = "testhooks"))]
 pub fn dweb_writer_held(_held: usize) {}

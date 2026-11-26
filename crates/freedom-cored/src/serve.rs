@@ -45,8 +45,11 @@
 //!   until requests are taken again.
 //! - **A stall ends the core:** once frames have waited [`STALL`] with the
 //!   writer writing nothing, main has stopped reading, and the core exits.
+//!   The swarm thread watches its own frames the same way, with the same
+//!   bound ([`transport::Watchdog`]), as it too holds new requests while
+//!   they wait.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -69,7 +72,7 @@ use crate::keystore::client::DesktopKeyStore;
 use crate::requests::{self, Owner, Requests};
 use crate::secrets::Secrets;
 use crate::swarm::thread as swarm;
-use crate::transport::{self, Allowance, Credits, Link, Pending, Route, StreamKey};
+use crate::transport::{self, Allowance, Credits, Link, Pending, Route, StreamKey, Watchdog};
 use crate::vault::{FileSnapshot, Finished, NodeRecovery, Out, Vault};
 use crate::worker::Worker;
 use crate::{chain, gate, hardening, journal, log, naming};
@@ -136,6 +139,13 @@ pub enum Event {
     /// A framing error, as a fixed category (never input text).
     ProtocolError(&'static str),
     WriterFailed,
+    /// A thread's frames waited past its allowance for the stall bound
+    /// with the writer writing nothing ([`Watchdog`]): main has stopped
+    /// reading.
+    NotReading {
+        waited: Duration,
+        thread: &'static str,
+    },
     ThreadDied(&'static str),
     ParentGone,
     /// The startup read of the vault file finished.
@@ -581,6 +591,9 @@ pub fn run(options: &Options) -> Exit {
             events: events_tx,
         }),
         swarm: None,
+        swarm_cancels: BTreeMap::new(),
+        #[cfg(feature = "testhooks")]
+        parked_asks: VecDeque::new(),
         #[cfg(feature = "testhooks")]
         test,
     };
@@ -607,6 +620,13 @@ pub fn run(options: &Options) -> Exit {
         } else {
             hello_deadline.saturating_duration_since(Instant::now())
         };
+        // A held signature ask is polled for its release (test hooks).
+        #[cfg(feature = "testhooks")]
+        let timeout = if core.parked_asks.is_empty() {
+            timeout
+        } else {
+            timeout.min(Duration::from_millis(10))
+        };
         // While a request that waited can go, the loop doesn't wait: it
         // takes an event if one is there, then that request (`resume`).
         let received = if core.resumable() {
@@ -617,6 +637,17 @@ pub fn run(options: &Options) -> Exit {
         } else {
             events.recv_timeout(timeout)
         };
+        // The test hooks' held signature asks, once released.
+        #[cfg(feature = "testhooks")]
+        if !core.parked_asks.is_empty() && crate::testhooks::swarm_hold_released() {
+            let mut gone = false;
+            while let Some((tag, ask)) = core.parked_asks.pop_front() {
+                gone |= !core.swarm_vault(tag, &ask);
+            }
+            if gone {
+                break Exit::Internal;
+            }
+        }
         // Whatever arrived, first apply what is due (auto-lock, deadlines):
         // a busy queue must not postpone either, nor a writer without room.
         if core.hello_done {
@@ -674,6 +705,7 @@ pub fn run(options: &Options) -> Exit {
                 log::error("stdout closed", serde_json::json!({}));
                 break Exit::Protocol;
             }
+            Ok(Event::NotReading { waited, thread }) => break not_reading(waited, thread),
             Ok(Event::ThreadDied(name)) => {
                 log::error("a thread died", serde_json::json!({ "thread": name }));
                 break Exit::Internal;
@@ -790,14 +822,12 @@ pub fn run(options: &Options) -> Exit {
                     break exit;
                 }
             }
-            // The vault answers at once, on this thread, which holds it.
+            // The vault answers at once, on this thread, which holds it;
+            // with the test hooks, a signature's ask may wait for their
+            // release first (`FREEDOM_CORED_TEST_SWARM_HOLD=ask=…`), as one
+            // behind a cancel waits on this loop's queue.
             Ok(Event::SwarmVault { tag, ask }) => {
-                let answer = Box::new(core.vault.swarm_vault(&ask));
-                let sent = core
-                    .swarm
-                    .as_ref()
-                    .is_some_and(|thread| thread.send(swarm::In::Vault { tag, answer }, None));
-                if !sent {
+                if !core.swarm_ask(tag, ask) {
                     break Exit::Internal;
                 }
             }
@@ -1069,6 +1099,13 @@ struct Core {
     dweb_start: Option<DwebStart>,
     /// The swarm thread, once the hello has settled (design 0015).
     swarm: Option<swarm::Handle>,
+    /// The Swarm requests' cancellations (design 0015), which a cancel from
+    /// main sets: held weakly, each going with its request.
+    swarm_cancels: BTreeMap<u64, crate::swarm::engine::CancelWatch>,
+    /// The swarm thread's signature asks the test hooks hold before the
+    /// vault runs them (`FREEDOM_CORED_TEST_SWARM_HOLD=ask=…`), in order.
+    #[cfg(feature = "testhooks")]
+    parked_asks: VecDeque<(u64, Box<crate::swarm::engine::VaultAsk>)>,
     /// The `test.*` methods' thread, when the test hooks enable it (debug
     /// builds only).
     #[cfg(feature = "testhooks")]
@@ -1435,6 +1472,42 @@ impl Ahead {
 }
 
 impl Core {
+    /// The swarm thread's ask of the vault under `tag`: answered now, or,
+    /// with the test hooks, a signature's held until their release. False
+    /// once the thread has gone.
+    fn swarm_ask(&mut self, tag: u64, ask: Box<crate::swarm::engine::VaultAsk>) -> bool {
+        #[cfg(feature = "testhooks")]
+        if matches!(
+            *ask,
+            crate::swarm::engine::VaultAsk::Sign(_) | crate::swarm::engine::VaultAsk::OwnSign(_)
+        ) && (!self.parked_asks.is_empty() || crate::testhooks::swarm_hold_parks("ask"))
+        {
+            self.parked_asks.push_back((tag, ask));
+            return true;
+        }
+        self.swarm_vault(tag, &ask)
+    }
+
+    /// The vault's answer to the swarm thread's ask under `tag`, sent to
+    /// it: false once the thread has gone.
+    fn swarm_vault(&mut self, tag: u64, ask: &crate::swarm::engine::VaultAsk) -> bool {
+        let answer = Box::new(self.vault.swarm_vault(ask));
+        self.swarm
+            .as_ref()
+            .is_some_and(|thread| thread.send(swarm::In::Vault { tag, answer }, None))
+    }
+
+    /// A new Swarm request's cancellation, kept (weakly) for main's cancel
+    /// of it; those whose request has gone are let go of as more come.
+    fn swarm_cancellable(&mut self, id: u64) -> crate::swarm::engine::Cancelled {
+        let cancelled = crate::swarm::engine::Cancelled::default();
+        if self.swarm_cancels.len() >= 1024 {
+            self.swarm_cancels.retain(|_, watch| !watch.gone());
+        }
+        self.swarm_cancels.insert(id, cancelled.watch());
+        cancelled
+    }
+
     /// A frame from main. While requests wait (the loop's frames have no
     /// room in the writer), requests wait too, in order, and keep their
     /// credits: once those are spent, the reader stops reading stdin.
@@ -1593,6 +1666,12 @@ impl Core {
             // A cancel names a vault request, a naming one, a chain one, a
             // dweb one or a swarm one; each ignores IDs it doesn't hold.
             Message::Cancel { id } => {
+                // A Swarm request's vault asks still on this loop's queue,
+                // behind this cancel, sign nothing (design 0015, "Deadlines
+                // and cancel").
+                if let Some(cancelled) = self.swarm_cancels.remove(&id) {
+                    cancelled.set();
+                }
                 if !self.chain.send(chain::In::Cancel { id }, None)
                     || self
                         .dweb
@@ -1883,6 +1962,7 @@ impl Core {
                         id,
                         params,
                         page: context.page.clone(),
+                        cancelled: self.swarm_cancellable(id),
                     },
                     // Main's own Swarm methods, and the chrome's (D5).
                     _ => swarm::In::Own {
@@ -1890,6 +1970,7 @@ impl Core {
                         method: loggable(method),
                         params,
                         caller: context.caller,
+                        cancelled: self.swarm_cancellable(id),
                     },
                 };
                 let sent = self
@@ -2196,6 +2277,7 @@ impl Core {
                 events: start.events.clone(),
                 requests: Arc::clone(&self.requests),
                 link: Arc::clone(&self.link),
+                stall: crate::testhooks::stall(STALL),
                 naming: self.naming.clone(),
                 grants,
                 grants_file,
@@ -2406,12 +2488,10 @@ impl Waiting {
 struct Outbox {
     out: Sender<transport::Out>,
     allowance: Arc<Allowance>,
-    link: Arc<Link>,
     waiting: VecDeque<Waiting>,
-    /// Since when frames have waited.
-    since: Option<Instant>,
-    /// [`STALL`], or a test's.
-    stall: Duration,
+    /// The writer's progress while frames wait, against [`STALL`] or a
+    /// test's bound.
+    watchdog: Watchdog,
 }
 
 impl Outbox {
@@ -2424,10 +2504,8 @@ impl Outbox {
         Outbox {
             out,
             allowance,
-            link,
             waiting: VecDeque::new(),
-            since: None,
-            stall,
+            watchdog: Watchdog::new(link, stall),
         }
     }
 
@@ -2446,9 +2524,7 @@ impl Outbox {
     /// allowance had no room.
     fn hold(&mut self, waiting: Waiting, now: Instant) -> Flow {
         self.waiting.push_back(waiting);
-        if self.since.is_none() {
-            self.since = Some(now);
-        }
+        self.watchdog.waiting(true, now);
         Flow::Continue
     }
 
@@ -2489,11 +2565,7 @@ impl Outbox {
                 return Flow::Exit(Exit::Protocol);
             }
         }
-        if self.waiting.is_empty() {
-            self.since = None;
-        } else if self.since.is_none() {
-            self.since = Some(now);
-        }
+        self.watchdog.waiting(!self.waiting.is_empty(), now);
         Flow::Continue
     }
 
@@ -2502,34 +2574,19 @@ impl Outbox {
         !self.waiting.is_empty()
     }
 
-    /// While frames wait, since when the writer has written nothing: since
-    /// they started waiting, or since its last write if later.
-    fn still(&self) -> Option<Instant> {
-        let since = self.since?;
-        Some(self.link.last_write().map_or(since, |at| at.max(since)))
-    }
-
     /// When the stall bound passes unless the writer moves: the loop wakes
     /// then to look.
     fn deadline(&self) -> Option<Instant> {
-        self.still()?.checked_add(self.stall)
+        self.watchdog.deadline()
     }
 
     /// Ends the core once frames have waited for the stall bound with the
     /// writer writing nothing: main has stopped reading.
     fn check(&self, now: Instant) -> Flow {
-        let Some(still) = self.still() else {
-            return Flow::Continue;
-        };
-        let waited = now.saturating_duration_since(still);
-        if waited < self.stall {
-            return Flow::Continue;
+        match self.watchdog.stalled(now) {
+            Some(waited) => Flow::Exit(not_reading(waited, "loop")),
+            None => Flow::Continue,
         }
-        log::error(
-            "main is not reading replies",
-            serde_json::json!({ "ms": u64::try_from(waited.as_millis()).unwrap_or(u64::MAX) }),
-        );
-        Flow::Exit(Exit::Protocol)
     }
 
     /// Hands every waiting frame to the writer, past the allowance: on
@@ -2543,8 +2600,22 @@ impl Outbox {
             let hold = self.allowance.force(frame.len());
             let _ = self.out.send(transport::Out::Frame { frame, hold });
         }
-        self.since = None;
+        self.watchdog.waiting(false, Instant::now());
     }
+}
+
+/// The core's end once `producer`'s frames waited `waited`, the stall
+/// bound or more, with the writer writing nothing: main has stopped
+/// reading.
+fn not_reading(waited: Duration, producer: &'static str) -> Exit {
+    log::error(
+        "main is not reading replies",
+        serde_json::json!({
+            "ms": u64::try_from(waited.as_millis()).unwrap_or(u64::MAX),
+            "frames": producer,
+        }),
+    );
+    Exit::Protocol
 }
 
 #[cfg(test)]
