@@ -1752,7 +1752,7 @@ impl Vault {
         }
         while self.queue.front().is_some_and(|p| instant >= p.deadline) {
             if let Some(pending) = self.queue.pop_front() {
-                self.reply_error(&mut out, pending.id, deadline_exceeded());
+                self.refuse_queued(&mut out, pending, deadline_exceeded());
             }
         }
         // Phone payments' rechecks, and the events a start left.
@@ -1833,7 +1833,7 @@ impl Vault {
             out.push(Out::Send(error_payload(running.request, &locked())));
         }
         for pending in std::mem::take(&mut self.queue) {
-            self.reply_error(out, pending.id, locked());
+            self.refuse_queued(out, pending, locked());
         }
     }
 
@@ -2218,7 +2218,7 @@ impl Vault {
                 return;
             };
             if Instant::now() >= pending.deadline {
-                self.reply_error(out, pending.id, deadline_exceeded());
+                self.refuse_queued(out, pending, deadline_exceeded());
                 continue;
             }
             // `accounts.*` runs here, on the loop, behind the jobs queued
@@ -2299,18 +2299,30 @@ impl Vault {
     /// grant events and narrowings passed on, as an approval method's are.
     fn run_accounts(&mut self, out: &mut Vec<Out>, id: u64, op: crate::accounts::Op) {
         // A vault write's metadata journal is finished first: while it
-        // can't be, the call fails `storage` (design 0013, "Recovery").
-        let answer = crate::vault_meta_journal::recover(&self.dir, self.secrets.as_deref())
-            .map_err(|e| crate::accounts::storage(crate::secrets::io_kind(&e)))
-            .and_then(|()| {
+        // can't be, the call fails `storage` (design 0013, "Recovery"), and
+        // discovery's check keeps nothing (design 0016, D1).
+        let fallback = op.fallback();
+        let recovered = crate::vault_meta_journal::recover(&self.dir, self.secrets.as_deref())
+            .map_err(|e| crate::accounts::storage(crate::secrets::io_kind(&e)));
+        let answer = match (recovered, fallback) {
+            (Ok(()), _) => {
                 self.accounts
                     .run(op, &self.state, &mut self.approvals, &self.safe_pending)
-            })
-            .and_then(|answer| {
-                let raw = serde_json::value::RawValue::from_string(answer.stringify())
-                    .map_err(|_| internal())?;
-                json_result(id, &raw).ok_or_else(internal)
-            });
+            }
+            (Err(error), Some(fallback)) => {
+                crate::log::warn(
+                    "the Ledger record check can't be kept: mismatched is empty",
+                    serde_json::json!({ "code": error.code }),
+                );
+                Ok(fallback)
+            }
+            (Err(error), None) => Err(error),
+        };
+        let answer = answer.and_then(|answer| {
+            let raw = serde_json::value::RawValue::from_string(answer.stringify())
+                .map_err(|_| internal())?;
+            json_result(id, &raw).ok_or_else(internal)
+        });
         match answer {
             Ok(payload) => out.push(Out::Send(payload)),
             Err(error) => self.reply_error(out, id, error),
@@ -2877,6 +2889,64 @@ impl Vault {
     fn reply_error(&self, out: &mut Vec<Out>, id: u64, error: ErrorBody) {
         out.push(Out::Send(error_payload(id, &error)));
     }
+
+    /// A queued request that won't run (the lock, its deadline): its error,
+    /// but for one whose end has an answer of its own when the store can't
+    /// keep its result (discovery's check, design 0016's D1: its accounts,
+    /// `mismatched` empty).
+    fn refuse_queued(&self, out: &mut Vec<Out>, pending: Pending, error: ErrorBody) {
+        match &pending.kind {
+            Kind::Accounts(op) => match op
+                .fallback()
+                .and_then(|answer| answered(pending.id, &answer))
+            {
+                Some(payload) => {
+                    crate::log::warn(
+                        "the Ledger record check can't be kept: mismatched is empty",
+                        serde_json::json!({ "code": error.code }),
+                    );
+                    out.push(Out::Send(payload));
+                }
+                None => self.reply_error(out, pending.id, error),
+            },
+            _ => self.reply_error(out, pending.id, error),
+        }
+    }
+
+    /// Whether `vault_meta` is in `store_moved`: the core writes the wallet
+    /// list (design 0013).
+    pub fn accounts_moved(&self) -> bool {
+        self.accounts.moved()
+    }
+
+    /// The Ledger records `ledger.accounts`' check reads (design 0016, D1),
+    /// from the loop's snapshot of the records: none before `vault_meta` is
+    /// moved.
+    pub fn ledger_checks(&self) -> Option<Result<Vec<crate::accounts::LedgerCheck>, ErrorBody>> {
+        self.approvals
+            .account_records()
+            .map(crate::accounts::Records::ledger_checks)
+    }
+
+    /// A Ledger operation's end for the accounts store (design 0016,
+    /// "Accounts"): queued as an `accounts.*` request is, behind the jobs
+    /// before it, and answered when it runs. A full queue refuses it
+    /// `busy`, but discovery's check, which then keeps nothing.
+    pub fn ledger_end(&mut self, id: u64, op: crate::accounts::Op) -> Vec<Out> {
+        let mut out = Vec::new();
+        let pending = Pending {
+            id,
+            kind: Kind::Accounts(op),
+            deadline: Instant::now() + self.kdf_deadline,
+        };
+        if self.queue.len() >= MAX_QUEUED {
+            self.refuse_queued(&mut out, pending, ErrorBody::new(ErrorCode::Busy, "Busy"));
+            return out;
+        }
+        self.queue.push_back(pending);
+        self.start_next(&mut out);
+        out
+    }
 }
 
 /// A committed reconcile: `status`, the addresses (create, import) and the
@@ -3082,6 +3152,12 @@ fn radicle_did(id: u64, public_key: &str) -> Result<Option<Zeroizing<Vec<u8>>>, 
         id,
         &serde_json::json!({ "did": multiformats::did_key(&key) }),
     ))
+}
+
+/// A request's answer from its JS value.
+fn answered(id: u64, answer: &fc_json::JsValue) -> Option<Zeroizing<Vec<u8>>> {
+    let raw = serde_json::value::RawValue::from_string(answer.stringify()).ok()?;
+    json_result(id, &raw)
 }
 
 fn json_result<R: Serialize>(id: u64, result: &R) -> Option<Zeroizing<Vec<u8>>> {

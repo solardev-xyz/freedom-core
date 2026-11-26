@@ -286,6 +286,12 @@ pub const METHODS: &[Method] = &[
     row("sign.transaction", PCS, false, DEVICE),
     row("sign.message", PCS, false, DEVICE),
     row("sign.typed_data", PCS, false, DEVICE),
+    // Design 0016, "Accounts" (LDG-2's L3): a Ledger's discovery, with its
+    // check of the records no device has matched, and adding an account
+    // with the address the device shows. Each drives the device lane, and
+    // each may write `vault-meta.json` once `vault_meta` is moved.
+    row("ledger.accounts", CS, true, DEVICE),
+    row("ledger.add", CS, true, DEVICE),
     row("swarm.sign_soc", PS, false, NOW),
     row("typed_data.hash", CS, false, NOW),
     row("naming.configure", CS, false, NOW),
@@ -821,8 +827,9 @@ mod tests {
     /// immediate method, but `schema.json` writes it `"device"`, apart from
     /// `null` and `"idle"`; each APDU has its own, 15 s or the user's 5
     /// minutes. The rows that may drive a Ledger carry it, and no other:
-    /// `sign.*`, `ledger.*`, `x402.settle` and `safe.sign_owner`, of which
-    /// the table has `sign.*` and `x402.settle` so far.
+    /// `sign.*`, `ledger.*`, `x402.settle`, `safe.sign_owner` and
+    /// `safe.message_sign`, of which the table has `sign.*`, `ledger.*` and
+    /// `x402.settle` so far.
     #[test]
     fn the_device_deadline_class() {
         assert_eq!(Deadline::Device.default_ms(), None);
@@ -837,7 +844,10 @@ mod tests {
         let drives = |name: &str| {
             name.starts_with("sign.")
                 || name.starts_with("ledger.")
-                || matches!(name, "x402.settle" | "safe.sign_owner")
+                || matches!(
+                    name,
+                    "x402.settle" | "safe.sign_owner" | "safe.message_sign"
+                )
         };
         let device: Vec<&str> = METHODS
             .iter()
@@ -850,6 +860,8 @@ mod tests {
                 "sign.transaction",
                 "sign.message",
                 "sign.typed_data",
+                "ledger.accounts",
+                "ledger.add",
                 "x402.settle"
             ]
         );
@@ -857,16 +869,20 @@ mod tests {
             assert_eq!(m.deadline == Deadline::Device, drives(m.name), "{}", m.name);
         }
         // The class changes no caller: each row keeps who reaches it.
-        for (name, callers) in [
-            ("sign.transaction", Callers::PageChromeOrShell),
-            ("sign.message", Callers::PageChromeOrShell),
-            ("sign.typed_data", Callers::PageChromeOrShell),
-            ("x402.settle", Callers::Shell),
+        // `ledger.*` is the chrome's and main's (0016, API), and writes the
+        // wallet list once `vault_meta` is moved.
+        for (name, callers, mutates) in [
+            ("sign.transaction", Callers::PageChromeOrShell, false),
+            ("sign.message", Callers::PageChromeOrShell, false),
+            ("sign.typed_data", Callers::PageChromeOrShell, false),
+            ("ledger.accounts", Callers::ChromeOrShell, true),
+            ("ledger.add", Callers::ChromeOrShell, true),
+            ("x402.settle", Callers::Shell, false),
         ] {
             let row = method(name).unwrap();
             assert_eq!(
                 (row.callers, row.mutates, row.since),
-                (callers, false, crate::PROTOCOL_VERSION)
+                (callers, mutates, crate::PROTOCOL_VERSION)
             );
         }
         // `schema.json` writes each row's class.

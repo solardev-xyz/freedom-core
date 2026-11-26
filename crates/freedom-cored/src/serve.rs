@@ -69,6 +69,8 @@ use crate::dweb::thread as dweb;
 use crate::eip1193::Connects;
 use crate::exit::Exit;
 use crate::keystore::client::DesktopKeyStore;
+use crate::ledger::lane::{Ended, Lane};
+use crate::ledger::methods::{self as ledger, Finish, Then};
 use crate::requests::{self, Owner, Requests};
 use crate::secrets::Secrets;
 use crate::swarm::thread as swarm;
@@ -174,6 +176,9 @@ pub enum Event {
     /// `eip1193.select_chain` that waited for room may go (design 0012,
     /// APR-5c).
     Eip1193Room,
+    /// A `shell.ledger_apdu`, or a cancel of one, that waited for room may
+    /// go (design 0016, the device lane).
+    LedgerRoom,
     /// The chain thread answered one of the core's own reads (design
     /// 0012, "Phone jobs"): its tag, the reply's payload, and whether it
     /// failed at or after the deadline it was given, by the chain thread's
@@ -259,6 +264,10 @@ const CAPABILITIES: &[&str] = &[
     "sign.transaction",
     "sign.message",
     "sign.typed_data",
+    // Design 0016: a Ledger's discovery and adding, on the device lane
+    // (LDG-2's L3).
+    "ledger.accounts",
+    "ledger.add",
     "swarm.sign_soc",
     "typed_data.hash",
     "naming.configure",
@@ -545,6 +554,14 @@ pub fn run(options: &Options) -> Exit {
             let _ = room.send(Event::Eip1193Room);
         })
     };
+    // The device lane (design 0016): a Ledger operation's APDUs go to main
+    // from this loop, through the gate, one at a time.
+    let ledger = {
+        let room = events_tx.clone();
+        Lane::new(Arc::clone(&requests), writer.queue.clone(), move || {
+            let _ = room.send(Event::LedgerRoom);
+        })
+    };
     let mut core = Core {
         snapshot_ready: false,
         node_recovery: None,
@@ -585,6 +602,7 @@ pub fn run(options: &Options) -> Exit {
         naming,
         chain,
         connects,
+        ledger,
         dweb: None,
         dweb_start: Some(DwebStart {
             out: dweb_out,
@@ -609,6 +627,7 @@ pub fn run(options: &Options) -> Exit {
                 core.vault.next_wakeup(),
                 core.outbox.deadline(),
                 core.connects.next_wakeup(),
+                core.ledger.next_wakeup(),
                 core.requests.next_overdue(),
             ]
             .into_iter()
@@ -654,6 +673,10 @@ pub fn run(options: &Options) -> Exit {
             let mut outs = core.vault.tick();
             outs.extend(core.connects.tick());
             if let Flow::Exit(exit) = core.dispatch(outs) {
+                break exit;
+            }
+            let ended = core.ledger.tick(Instant::now());
+            if let Flow::Exit(exit) = core.ledger_ended(ended) {
                 break exit;
             }
         }
@@ -786,6 +809,13 @@ pub fn run(options: &Options) -> Exit {
             Ok(Event::Eip1193Room) => {
                 let outs = core.connects.pump();
                 if let Flow::Exit(exit) = core.dispatch(outs) {
+                    break exit;
+                }
+            }
+            // An APDU or a cancel waited for room: the lane sends it now.
+            Ok(Event::LedgerRoom) => {
+                let ended = core.ledger.tick(Instant::now());
+                if let Flow::Exit(exit) = core.ledger_ended(ended) {
                     break exit;
                 }
             }
@@ -1096,6 +1126,9 @@ struct Core {
     chain: chain::Handle,
     /// A page's connects waiting on main (design 0012, APR-5c).
     connects: Connects,
+    /// The device lane (design 0016): the Ledger operations of `ledger.*`
+    /// and their `shell.ledger_apdu`s.
+    ledger: Lane<Then>,
     /// The dweb thread, once the hello has settled (design 0009).
     dweb: Option<dweb::Handle>,
     /// What starts it; taken when it starts.
@@ -1690,6 +1723,11 @@ impl Core {
                 {
                     return Flow::Exit(Exit::Internal);
                 }
+                // A Ledger operation ends wherever it is (design 0016).
+                let ended = self.ledger.cancel(id, Instant::now());
+                if let Flow::Exit(exit) = self.ledger_ended(ended) {
+                    return Flow::Exit(exit);
+                }
                 let mut outs = self.vault.cancel(id);
                 outs.extend(self.connects.cancel(id));
                 self.dispatch(outs)
@@ -1755,6 +1793,33 @@ impl Core {
                 .connects
                 .answered(id, outcome, &message, &mut self.vault);
             return self.dispatch(outs);
+        }
+        // The device lane reads its answer strictly (design 0016): a reply
+        // that breaks `shell.ledger_apdu`'s rules ends the connection.
+        if owner == Owner::Ledger {
+            let span = match &outcome {
+                Ok(span) | Err(span) => span.clone(),
+            };
+            let Some(text) = message
+                .get(span)
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            else {
+                return Flow::Exit(Exit::Internal);
+            };
+            let outcome = match outcome {
+                Ok(_) => Ok(text),
+                Err(_) => Err(text),
+            };
+            return match self.ledger.answered(id, outcome, Instant::now()) {
+                Ok(ended) => self.ledger_ended(ended),
+                Err(protocol) => {
+                    log::error(
+                        "protocol error",
+                        serde_json::json!({ "category": protocol.category() }),
+                    );
+                    Flow::Exit(Exit::Protocol)
+                }
+            };
         }
         let sent = match (owner, outcome) {
             // Naming copies its result out of the message, and reads its
@@ -1830,9 +1895,8 @@ impl Core {
                     self.credit.take(),
                 )
             }),
-            // No method drives the device lane yet, so no request is its
-            // (0016: ledger.* with LDG-2's L3, a Ledger key with L4).
-            (Owner::Ledger, _) => false,
+            // Answered above.
+            (Owner::Ledger, _) => true,
             // The dweb thread reads its piece's reply where it lies, as the
             // chain thread does.
             (Owner::Dweb, outcome) => self.dweb.as_ref().is_some_and(|thread| {
@@ -1879,6 +1943,7 @@ impl Core {
                 }
             }
             "eip1193.request" => self.eip1193(id, params, context),
+            method if ledger::handles(method) => self.ledger_request(id, method, params),
             method if Vault::handles(method) => {
                 let outs = self.vault.request(id, method, params, context);
                 self.dispatch(outs)
@@ -2144,6 +2209,46 @@ impl Core {
                 self.dispatch(outs)
             }
         }
+    }
+
+    /// `ledger.accounts` or `ledger.add` (design 0016, "Accounts"): its
+    /// operation onto the device lane, or its refusal before any APDU.
+    fn ledger_request(&mut self, id: u64, method: &str, params: Option<&str>) -> Flow {
+        let vault = &self.vault;
+        let started = ledger::start(
+            method,
+            params,
+            || vault.ledger_checks(),
+            vault.accounts_moved(),
+        );
+        match started {
+            Ok((operation, then, turn)) => {
+                let ended = self
+                    .ledger
+                    .submit(id, operation, then, turn, Instant::now());
+                self.ledger_ended(ended)
+            }
+            Err(error) => self.error(id, error),
+        }
+    }
+
+    /// The Ledger operations that ended: each parent answered, or its
+    /// result handed to the accounts store first.
+    fn ledger_ended(&mut self, ended: Vec<Ended<Then>>) -> Flow {
+        for ended in ended {
+            let flow = match ledger::finish(ended) {
+                Finish::Answer(id, Ok(answer)) => self.result(id, &answer),
+                Finish::Answer(id, Err(error)) => self.error(id, error),
+                Finish::Store(id, op) => {
+                    let outs = self.vault.ledger_end(id, op);
+                    self.dispatch(outs)
+                }
+            };
+            if let Flow::Exit(exit) = flow {
+                return Flow::Exit(exit);
+            }
+        }
+        Flow::Continue
     }
 
     /// `not_moved` for a page request that would write the dApp store
@@ -2871,6 +2976,7 @@ mod tests {
                     || chain::handles(name)
                     || dweb::handles(name)
                     || swarm::handles(name)
+                    || ledger::handles(name)
                     || name == "eip1193.request",
                 "{name}"
             );

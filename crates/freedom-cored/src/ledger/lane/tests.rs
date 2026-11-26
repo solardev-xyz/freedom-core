@@ -174,8 +174,9 @@ fn device(id: &str, apdu: &[u8]) -> Vec<u8> {
 fn as_recorded(id: &str, signed: &Signed) -> bool {
     let result = &case(id)["result"];
     match signed {
-        Signed::Accounts(accounts) => {
-            let accounts: Vec<Value> = accounts
+        Signed::Accounts(found) => {
+            let accounts: Vec<Value> = found
+                .accounts
                 .iter()
                 .map(|a| json!({ "path": a.path.to_string(), "address": checksum_address(&a.address) }))
                 .collect();

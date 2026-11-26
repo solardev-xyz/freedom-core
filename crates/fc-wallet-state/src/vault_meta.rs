@@ -731,6 +731,25 @@ impl VaultMeta {
         self.add_device(Kind::Ledger, name, address, &extra)
     }
 
+    /// `getLedgerRecordsToCheck()`: the Ledger records no device has matched
+    /// yet (`unchecked` or `mismatched`), each as `getWalletRecord` gives
+    /// it, in the wallet list's order, for the check discovery makes when a
+    /// Ledger is connected (#1065; design 0016, D1). None without a file.
+    pub fn ledger_records_to_check(&self) -> Vec<JsValue> {
+        let Some(meta) = &self.meta else {
+            return Vec::new();
+        };
+        wallet_list(meta)
+            .iter()
+            .filter(|wallet| js::equals_str(wallet.get("type"), LEDGER))
+            .filter_map(|wallet| match wallet.get("index") {
+                Some(JsValue::Number(index)) => wallet_record(meta, *index),
+                _ => None,
+            })
+            .filter(|record| !js::equals_str(record.get("addressCheck"), MATCHED))
+            .collect()
+    }
+
     /// `addRemoteWallet(name, address)`, once the phone has proven the
     /// account (#1078): the record starts `matched`. Main checks
     /// [`VaultMeta::check_device_addable`] before asking the phone, as the

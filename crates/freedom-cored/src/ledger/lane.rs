@@ -115,7 +115,8 @@ pub enum QueueWait {
     Counts,
     /// Question 5's proposal: the wait is capped on its own at 5 minutes,
     /// and every confirmation has its full 5, so a request may take 10 in
-    /// all.
+    /// all. Only the lane's tests run it until the user answers.
+    #[cfg_attr(not(test), allow(dead_code))]
     Apart,
 }
 
