@@ -156,24 +156,57 @@ fn ended(radicled: &mut Radicled) -> (ExitStatus, String) {
 /// Whether `status` is `std::process::abort`'s: `SIGABRT` on Unix, and
 /// `__fastfail`'s status (or the CRT's 3) on Windows.
 #[cfg(any(target_os = "linux", windows))]
-/// The log with the service's JSON lines taken out. Rust's allocator writes
-/// its abort message in pieces, and the log's writer can land a whole line
-/// between two of them ("memory allocation of N{...}\n bytes failed").
+/// The log with the service's own log records taken out. Rust's allocator
+/// writes its abort message in pieces, and the log's writer can land a whole
+/// record between two of them ("memory allocation of N{...}\n bytes failed").
+/// Only a complete JSON object with string `level` and `msg` members that
+/// ends its line is taken out; any other text, braces included, is kept, so
+/// nothing else can make the allocator's message appear.
 fn without_json_lines(log: &str) -> String {
     let mut out = String::new();
     let mut rest = log;
     while let Some(start) = rest.find("{\"") {
         out.push_str(&rest[..start]);
-        match rest[start..].find("}\n") {
-            Some(end) => rest = &rest[start + end + 2..],
-            None => {
-                rest = &rest[start..];
-                break;
-            }
+        let candidate = &rest[start..];
+        let mut records = serde_json::Deserializer::from_str(candidate).into_iter::<Value>();
+        let record = records.next();
+        let end = records.byte_offset();
+        let is_log = matches!(&record, Some(Ok(value))
+            if value.get("level").is_some_and(Value::is_string)
+                && value.get("msg").is_some_and(Value::is_string))
+            && candidate[end..].starts_with('\n');
+        if is_log {
+            rest = &candidate[end + 1..];
+        } else {
+            out.push_str("{\"");
+            rest = &candidate[2..];
         }
     }
     out.push_str(rest);
     out
+}
+
+#[test]
+fn only_the_services_log_records_are_taken_out() {
+    let record = "{\"bytes\":536870912,\"level\":\"info\",\"msg\":\"test hook: an allocation\"}\n";
+    assert_eq!(
+        without_json_lines(&format!(
+            "memory allocation of 536870912{record} bytes failed\n"
+        )),
+        "memory allocation of 536870912 bytes failed\n"
+    );
+    let nested = "{\"network\":{\"mode\":\"direct\"},\"level\":\"info\",\"msg\":\"serving\"}\n";
+    assert_eq!(without_json_lines(&format!("a{nested}b")), "ab");
+    // Not a log record: kept whole.
+    for kept in [
+        "memory allocation of 536870912{\"not\":\"a service log\"}\n bytes failed",
+        "keep {\"x\":1}\nthis",
+        "{\"level\":\"info\",\"msg\":\"no end of line\"} after",
+        "a log that ends mid-record {\"level\":\"info\",\"msg",
+        "{\"level\":1,\"msg\":\"x\"}\n",
+    ] {
+        assert_eq!(without_json_lines(kept), kept);
+    }
 }
 
 fn aborted(status: &ExitStatus) -> bool {
