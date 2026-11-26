@@ -274,21 +274,39 @@ fn read_result(text: &str, asked: Asked) -> Result<Answered, Fault> {
     }
 }
 
+/// An error's `data` as it was written. Its other members are read by
+/// [`ErrorBody`]; a `data` written twice is refused here, which a parse
+/// into a map would keep only the last of.
+#[derive(Deserialize)]
+struct WrittenData<'a> {
+    #[serde(borrow, default, deserialize_with = "present")]
+    data: Option<&'a RawValue>,
+}
+
+/// A refusal's `data`: exactly `{ "rule": <string> }`, its member once.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RefusalData {
+    rule: String,
+}
+
 fn read_error(text: &str) -> Result<Answered, Fault> {
     let raw: &RawValue = serde_json::from_str(text).map_err(|_| Fault::Error)?;
     let error = ErrorBody::from_raw(raw).map_err(|_| Fault::Error)?;
     match (error.code, error.data) {
         (ErrorCode::Cancelled, None) => Ok(Answered::Cancelled),
-        (ErrorCode::InvalidArgument, Some(data)) => {
-            let object = data.as_object().ok_or(Fault::Error)?;
-            if object.len() != 1 {
+        (ErrorCode::InvalidArgument, Some(_)) => {
+            // Read again as written, so that a member repeated in `data`,
+            // or `data` itself repeated, is refused (Codex, round 1 on #518).
+            let written: WrittenData<'_> = serde_json::from_str(text).map_err(|_| Fault::Error)?;
+            let data = written.data.ok_or(Fault::Error)?;
+            // serde's derived structs would also take an array in order.
+            if !data.get().trim_start().starts_with('{') {
                 return Err(Fault::Error);
             }
-            let rule = object
-                .get("rule")
-                .and_then(serde_json::Value::as_str)
-                .and_then(Rule::parse)
-                .ok_or(Fault::Error)?;
+            let refusal: RefusalData =
+                serde_json::from_str(data.get()).map_err(|_| Fault::Error)?;
+            let rule = Rule::parse(&refusal.rule).ok_or(Fault::Error)?;
             Ok(Answered::Refused(rule))
         }
         _ => Err(Fault::Error),
@@ -610,6 +628,10 @@ mod tests {
             r#"{"code":"invalid_argument","message":"Invalid argument","data":{"rule":null}}"#,
             r#"{"code":"invalid_argument","message":"Invalid argument","data":{"rule":"payload","apdu":"e0"}}"#,
             r#"{"code":"invalid_argument","message":"Invalid argument","data":{"reason":"payload"}}"#,
+            // A member written twice: the rule, or data itself.
+            r#"{"code":"invalid_argument","message":"Invalid argument","data":{"rule":"parent","rule":"payload"}}"#,
+            r#"{"code":"invalid_argument","message":"Invalid argument","data":{"rule":"payload","rule":"payload"}}"#,
+            r#"{"code":"invalid_argument","message":"Invalid argument","data":{"rule":"parent"},"data":{"rule":"payload"}}"#,
             // cancelled with data.
             r#"{"code":"cancelled","message":"Cancelled","data":{}}"#,
             r#"{"code":"cancelled","message":"Cancelled","data":{"rule":"ended"}}"#,
