@@ -275,6 +275,39 @@ def offchain_lookup(urls):
     return (word(int.from_bytes(sender, 'big')) + word(urls_at) + word(call_at)
             + bytes([0xde, 0xad, 0xbe, 0xef]) + bytes(28) + word(extra_at) + urls + call + extra)
 
+def ledger_seeds():
+    """Replies to fuzz_targets/ledger_answer.rs's operations, from the
+    recorded answers of vectors/ledger.json's cases: a tag (bit 0:
+    hash_only shown), a 2-byte length, the answer. The core's B0 01 for a
+    transaction or a message (deviation app-check) takes a typed case's."""
+    with open(os.path.join(ROOT, '..', '..', 'vectors', 'ledger.json')) as f:
+        cases = {c['id']: c for c in json.load(f)['cases']}
+
+    def answers(case_id):
+        return [bytes.fromhex(e['answer']) for e in cases[case_id]['exchanges']]
+
+    def replies(kind, items, shown_at=None):
+        out = bytes([kind])
+        for i, answer in enumerate(items):
+            out += bytes([1 if i == shown_at else 0]) + struct.pack('>H', len(answer)) + answer
+        return out
+
+    app = answers('typed-mail')[1]
+    write('ledger_answer', 'discovery', replies(0, answers('discovery-live-0-2')))
+    write('ledger_answer', 'add', replies(1, answers('add-live-0')))
+    message = answers('msg-live-1')
+    write('ledger_answer', 'message', replies(2, [message[0], app, message[1]]))
+    legacy = answers('tx-type0-chain-1-parity-0')
+    write('ledger_answer', 'tx-legacy', replies(3, [legacy[0], app, legacy[1]]))
+    eip1559 = answers('tx-type2-chain-1-parity-0')
+    write('ledger_answer', 'tx-eip1559', replies(4, [eip1559[0], app, eip1559[1]]))
+    write('ledger_answer', 'typed', replies(5, answers('typed-mail')))
+    # A Nano S: 6D00 to the first E0 1A, main's warning shown, the hash-only form.
+    write('ledger_answer', 'typed-hash-only', replies(5, answers('typed-hash-only-mail'), shown_at=2))
+    rejected = answers('typed-mail')[:-1] + [bytes([0x69, 0x85])]
+    write('ledger_answer', 'typed-rejected', replies(5, rejected))
+
+
 if __name__ == '__main__':
     json_seeds()
     protocol_seeds()
@@ -283,3 +316,4 @@ if __name__ == '__main__':
     seal_seeds()
     chain_seeds()
     naming_seeds()
+    ledger_seeds()

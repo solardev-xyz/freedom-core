@@ -361,7 +361,7 @@ async function x402OtherForms(env, cases) {
 
 // Design 0016's Ledger deviations, each with the cases that record it, or why none can.
 const DEVIATION_IDS = ['signature-check', 'field-pieces', 'device-bounds', 'blind-typed-data', 'app-check', 'key-check', 'empty-message',
-  'path-strict', 'address-from-device', 'device-deadlines', 'cancel', 'discovery-busy', 'name-ascii', 'chain-id-width'];
+  'path-strict', 'address-from-device', 'device-deadlines', 'cancel', 'discovery-busy', 'name-ascii', 'chain-id-width', 'no-device'];
 const NO_CASE = {
   'device-deadlines': 'no case: the reference sets no deadline (hw-transport\'s 15 s only emits "unresponsive"); LDG-2 tests both deadlines under a fixed clock',
   cancel: 'no case: the reference has no way to cancel an exchange; LDG-2 cancels before the first APDU, between two and during the user\'s wait',
@@ -392,8 +392,8 @@ function markSignatureFault(c, run) {
 
 // Which of a case's deviations it names first: a refusal before any APDU,
 // then what changes its answer, then what changes its stream.
-const PRIORITY = ['path-strict', 'empty-message', 'name-ascii', 'device-bounds', 'chain-id-width', 'signature-check', 'key-check',
-  'blind-typed-data', 'field-pieces', 'address-from-device', 'app-check'];
+const PRIORITY = ['path-strict', 'empty-message', 'name-ascii', 'device-bounds', 'no-device', 'chain-id-width', 'signature-check',
+  'key-check', 'blind-typed-data', 'field-pieces', 'address-from-device', 'app-check'];
 
 /** The case's marks: its own (what its stream can't show) and those its stream shows. */
 function markCase(env, c, run) {

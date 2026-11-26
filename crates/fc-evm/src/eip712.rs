@@ -73,8 +73,10 @@ fn err(message: impl Into<String>) -> Error {
     Error::TypedData(message.into())
 }
 
+/// A field type's base, as `encodeType` reads it (exported as
+/// `TypedBase`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Base {
+pub enum Base {
     Uint(u32),
     Int(u32),
     FixedBytes(usize),
@@ -487,6 +489,76 @@ impl Types {
         budget.hash(&concatenated)
     }
 
+    /// A struct's declared fields' values, read as [`Self::encode_struct`]
+    /// reads them.
+    fn collect_struct(
+        &self,
+        name: &str,
+        value: &Value,
+        depth: usize,
+    ) -> Result<Vec<TypedValue>, Error> {
+        if depth > MAX_DEPTH {
+            return Err(err("nested too deeply"));
+        }
+        let object = value
+            .as_object()
+            .ok_or_else(|| err(format!("{}: expected an object", shortened(name))))?;
+        let fields = self
+            .fields
+            .get(name)
+            .ok_or_else(|| err(format!("unknown type {}", quoted(name))))?;
+        fields
+            .iter()
+            .map(|field| {
+                let value = object
+                    .get(&field.name)
+                    .filter(|v| !v.is_null())
+                    .ok_or_else(|| {
+                        err(format!(
+                            "{}.{}: missing",
+                            shortened(name),
+                            shortened(&field.name)
+                        ))
+                    })?;
+                self.collect_field(&field.ty.base, &field.ty.dims, value, depth + 1)
+            })
+            .collect()
+    }
+
+    /// One field's value, read as [`Self::encode_field`] reads it.
+    fn collect_field(
+        &self,
+        base: &Base,
+        dims: &[Option<u64>],
+        value: &Value,
+        depth: usize,
+    ) -> Result<TypedValue, Error> {
+        if depth > MAX_DEPTH {
+            return Err(err("nested too deeply"));
+        }
+        let Some((outer, inner)) = dims.split_last() else {
+            return match base {
+                Base::Struct(name) => {
+                    Ok(TypedValue::Struct(self.collect_struct(name, value, depth)?))
+                }
+                _ => Ok(TypedValue::from(parse_scalar(base, value)?)),
+            };
+        };
+        let items = value.as_array().ok_or_else(|| err("expected an array"))?;
+        if let Some(count) = outer
+            && items.len() as u64 != *count
+        {
+            return Err(err(format!(
+                "array length mismatch; expected length {count}"
+            )));
+        }
+        items
+            .iter()
+            .map(|item| self.collect_field(base, inner, item, depth + 1))
+            .collect::<Result<Vec<_>, _>>()
+            .map(TypedValue::Array)
+    }
+
     /// The view's `types`: every type as the request lists them, with the
     /// alias-resolved field types `encodeType` uses, then `EIP712Domain`
     /// for the domain fields present.
@@ -583,22 +655,27 @@ fn number(value: &Value) -> Result<(bool, U256), Error> {
     }
 }
 
-/// One value's 32 bytes; the view gets it as `getPayload` normalizes it:
-/// integers as decimal strings, bytes and addresses as lowercase hex.
-fn encode_base(
-    base: &Base,
-    value: &Value,
-    budget: &mut Budget,
-    view: &mut ViewText,
-) -> Result<[u8; 32], Error> {
+/// One value as [`encode_base`] reads it, before its 32-byte word.
+enum Scalar<'a> {
+    Uint(U256),
+    /// Negative, and the magnitude.
+    Int(bool, U256),
+    FixedBytes(Vec<u8>),
+    Bytes(Vec<u8>),
+    String(&'a str),
+    Address([u8; 20]),
+    Bool(bool),
+}
+
+/// One value read and checked against its type.
+fn parse_scalar<'a>(base: &Base, value: &'a Value) -> Result<Scalar<'a>, Error> {
     match base {
         Base::Uint(bits) => {
             let (negative, magnitude) = number(value)?;
             if negative || magnitude > U256::mask(*bits) {
                 return Err(err(format!("value out-of-bounds for uint{bits}")));
             }
-            view.integer(false, &magnitude)?;
-            Ok(magnitude.to_be_bytes())
+            Ok(Scalar::Uint(magnitude))
         }
         Base::Int(bits) => {
             let (negative, magnitude) = number(value)?;
@@ -612,13 +689,7 @@ fn encode_base(
             if limit.is_none_or(|limit| magnitude > limit) {
                 return Err(err(format!("value out-of-bounds for int{bits}")));
             }
-            view.integer(negative, &magnitude)?;
-            Ok(if negative {
-                magnitude.wrapping_neg()
-            } else {
-                magnitude
-            }
-            .to_be_bytes())
+            Ok(Scalar::Int(negative, magnitude))
         }
         Base::FixedBytes(width) => {
             let bytes = parse_bytes(
@@ -628,39 +699,75 @@ fn encode_base(
             if bytes.len() != *width {
                 return Err(err(format!("invalid length for bytes{width}")));
             }
+            Ok(Scalar::FixedBytes(bytes))
+        }
+        Base::Bytes => Ok(Scalar::Bytes(parse_bytes(
+            value.as_str().ok_or_else(|| err("expected hex bytes"))?,
+            "bytes",
+        )?)),
+        Base::String => Ok(Scalar::String(
+            value.as_str().ok_or_else(|| err("expected a string"))?,
+        )),
+        Base::Address => Ok(Scalar::Address(parse_address(
+            value.as_str().ok_or_else(|| err("expected an address"))?,
+        )?)),
+        Base::Bool => match value {
+            Value::Bool(flag) => Ok(Scalar::Bool(*flag)),
+            _ => Err(err("bool takes only true or false")),
+        },
+        Base::Struct(_) => Err(err("struct where a value was expected")),
+    }
+}
+
+/// One value's 32 bytes; the view gets it as `getPayload` normalizes it:
+/// integers as decimal strings, bytes and addresses as lowercase hex.
+fn encode_base(
+    base: &Base,
+    value: &Value,
+    budget: &mut Budget,
+    view: &mut ViewText,
+) -> Result<[u8; 32], Error> {
+    match parse_scalar(base, value)? {
+        Scalar::Uint(magnitude) => {
+            view.integer(false, &magnitude)?;
+            Ok(magnitude.to_be_bytes())
+        }
+        Scalar::Int(negative, magnitude) => {
+            view.integer(negative, &magnitude)?;
+            Ok(if negative {
+                magnitude.wrapping_neg()
+            } else {
+                magnitude
+            }
+            .to_be_bytes())
+        }
+        Scalar::FixedBytes(bytes) => {
             view.hex(&bytes)?;
             let mut out = [0u8; 32];
-            out[..*width].copy_from_slice(&bytes);
+            let word = out
+                .get_mut(..bytes.len())
+                .ok_or_else(|| err("bytes width"))?;
+            word.copy_from_slice(&bytes);
             Ok(out)
         }
-        Base::Bytes => {
-            let bytes = parse_bytes(
-                value.as_str().ok_or_else(|| err("expected hex bytes"))?,
-                "bytes",
-            )?;
+        Scalar::Bytes(bytes) => {
             view.hex(&bytes)?;
             budget.hash(&bytes)
         }
-        Base::String => {
-            let text = value.as_str().ok_or_else(|| err("expected a string"))?;
+        Scalar::String(text) => {
             view.string(text)?;
             budget.hash(text.as_bytes())
         }
-        Base::Address => {
-            let address = parse_address(value.as_str().ok_or_else(|| err("expected an address"))?)?;
+        Scalar::Address(address) => {
             view.hex(&address)?;
             let mut out = [0u8; 32];
             out[12..].copy_from_slice(&address);
             Ok(out)
         }
-        Base::Bool => match value {
-            Value::Bool(flag) => {
-                view.raw(if *flag { "true" } else { "false" })?;
-                Ok(U256::from_u64(u64::from(*flag)).to_be_bytes())
-            }
-            _ => Err(err("bool takes only true or false")),
-        },
-        Base::Struct(_) => Err(err("struct where a value was expected")),
+        Scalar::Bool(flag) => {
+            view.raw(if flag { "true" } else { "false" })?;
+            Ok(U256::from_u64(u64::from(flag)).to_be_bytes())
+        }
     }
 }
 
@@ -915,11 +1022,156 @@ fn encode(
         write_reports(view, &types, message, chain, request)?;
     }
     view.raw("}")?;
+    Ok(digest(&domain, &message_hash))
+}
+
+/// `keccak256(0x19 0x01 ‖ domainSeparator ‖ hashStruct(message))`.
+fn digest(domain: &[u8; 32], message: &[u8; 32]) -> [u8; 32] {
     let mut data = Vec::with_capacity(66);
     data.extend_from_slice(&[0x19, 0x01]);
-    data.extend_from_slice(&domain);
-    data.extend_from_slice(&message_hash);
-    Ok(keccak256(&data))
+    data.extend_from_slice(domain);
+    data.extend_from_slice(message);
+    keccak256(&data)
+}
+
+/// A field's type as `encodeType` reads it: the base, and the array
+/// dimensions as written, innermost first (`None` is dynamic).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedField {
+    pub name: String,
+    pub base: Base,
+    pub dims: Vec<Option<u64>>,
+}
+
+/// A type and its fields, in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedStruct {
+    pub name: String,
+    pub fields: Vec<TypedField>,
+}
+
+/// A value as the hash reads it: integers by magnitude and sign, bytes and
+/// addresses as bytes, a struct as its declared fields' values in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypedValue {
+    Uint(U256),
+    Int {
+        negative: bool,
+        magnitude: U256,
+    },
+    /// `bytes<N>`: exactly N bytes.
+    FixedBytes(Vec<u8>),
+    Bytes(Vec<u8>),
+    String(String),
+    Address([u8; 20]),
+    Bool(bool),
+    Struct(Vec<TypedValue>),
+    Array(Vec<TypedValue>),
+}
+
+impl From<Scalar<'_>> for TypedValue {
+    fn from(scalar: Scalar<'_>) -> Self {
+        match scalar {
+            Scalar::Uint(value) => TypedValue::Uint(value),
+            Scalar::Int(negative, magnitude) => TypedValue::Int {
+                negative,
+                magnitude,
+            },
+            Scalar::FixedBytes(bytes) => TypedValue::FixedBytes(bytes),
+            Scalar::Bytes(bytes) => TypedValue::Bytes(bytes),
+            Scalar::String(text) => TypedValue::String(text.to_owned()),
+            Scalar::Address(address) => TypedValue::Address(address),
+            Scalar::Bool(flag) => TypedValue::Bool(flag),
+        }
+    }
+}
+
+/// Typed data parsed and hashed exactly as [`typed_data_hash`] parses and
+/// hashes it, with what it read: a caller that sends the fields elsewhere
+/// (design 0016: a Ledger, field by field) sends these, so what it sends is
+/// what the hash and the view (#88) cover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedTypedData {
+    /// [`typed_data_hash`]'s digest.
+    pub hash: [u8; 32],
+    /// `hashDomain(domain)`.
+    pub domain_separator: [u8; 32],
+    /// `hashStruct(primaryType, message)`.
+    pub struct_hash: [u8; 32],
+    pub primary_type: String,
+    /// `getPayload`'s `types`: every type of the request, in its order,
+    /// then `EIP712Domain` with the domain's fields present.
+    pub types: Vec<TypedStruct>,
+    /// `EIP712Domain`'s values, field by field.
+    pub domain: Vec<TypedValue>,
+    /// The primary type's declared fields' values, in order.
+    pub message: Vec<TypedValue>,
+}
+
+/// [`typed_data_hash`] with what it parsed ([`ParsedTypedData`]). Accepts
+/// and refuses exactly what [`typed_data_hash`] does.
+pub fn typed_data_parse(
+    domain: &Value,
+    types: &Value,
+    message: &Value,
+) -> Result<ParsedTypedData, Error> {
+    let parsed = Types::parse(types)?;
+    let present = domain_fields(domain)?;
+    let domain_separator = domain_hash(&present)?;
+    let mut budget = Budget::default();
+    let encoded = parsed.encode_struct(
+        &parsed.primary,
+        message,
+        0,
+        &mut budget,
+        &mut ViewText::none(),
+    )?;
+    let struct_hash = budget.hash(&encoded)?;
+    // Every value is known to encode: read it again, keeping it.
+    let mut domain_types = Vec::with_capacity(present.len());
+    let mut domain_values = Vec::with_capacity(present.len());
+    for field in &present {
+        let base = primitive(field.ty)?.ok_or_else(|| err("domain type"))?;
+        domain_values.push(TypedValue::from(parse_scalar(&base, field.value)?));
+        domain_types.push(TypedField {
+            name: field.name.to_owned(),
+            base,
+            dims: Vec::new(),
+        });
+    }
+    let message_values = parsed.collect_struct(&parsed.primary, message, 0)?;
+    let mut types = Vec::with_capacity(parsed.order.len() + 1);
+    for name in &parsed.order {
+        let fields = parsed
+            .fields
+            .get(name)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        types.push(TypedStruct {
+            name: name.clone(),
+            fields: fields
+                .iter()
+                .map(|field| TypedField {
+                    name: field.name.clone(),
+                    base: field.ty.base.clone(),
+                    dims: field.ty.dims.clone(),
+                })
+                .collect(),
+        });
+    }
+    types.push(TypedStruct {
+        name: DOMAIN_TYPE.to_owned(),
+        fields: domain_types,
+    });
+    Ok(ParsedTypedData {
+        hash: digest(&domain_separator, &struct_hash),
+        domain_separator,
+        struct_hash,
+        primary_type: parsed.primary.clone(),
+        types,
+        domain: domain_values,
+        message: message_values,
+    })
 }
 
 /// `ignored`, `named_type` and `chain` (#88). None changes what is signed.
