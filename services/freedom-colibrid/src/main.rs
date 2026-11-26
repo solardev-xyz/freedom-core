@@ -160,7 +160,9 @@ fn run(started: Instant, entry: &confine::Entry) -> Exit {
 }
 
 /// Confinement (0014, "Confinement"): no network, `read_write` alone, and
-/// `descriptors` the only ones kept.
+/// `descriptors` the only ones kept, under 0010's memory cap, 2 GiB, for the
+/// persistent, private and checkpoint processes alike: a backstop above
+/// their own resident budgets (0014, "Budgets").
 fn confined(
     read_write: Vec<std::path::PathBuf>,
     descriptors: Vec<i32>,
@@ -178,9 +180,7 @@ fn confined(
         times: false,
         symlinks: false,
         modes: false,
-        // No memory cap here yet: 0010's names the IPFS and Radicle
-        // processes, while 0014's Budgets point at 0007's question 9.
-        memory_cap: None,
+        memory_cap: Some(confine::MEMORY_CAP),
     }) {
         Ok(report) => Ok(report.to_json()),
         Err(invalid) => {
