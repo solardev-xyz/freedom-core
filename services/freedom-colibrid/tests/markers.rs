@@ -82,6 +82,8 @@ struct InProcess {
     next_id: u64,
     /// Messages read while waiting for the writer to be held.
     backlog: Vec<Value>,
+    /// The service's shared state, read in-process.
+    shared: Arc<Shared>,
 }
 
 impl InProcess {
@@ -105,7 +107,7 @@ impl InProcess {
             gate: Arc::clone(&gate),
         };
         let shared = Arc::new(Shared::new(1, Arc::new(Store::memory()), Mode::Serve));
-        let service = Arc::new(ColibriService::start(shared, json!({})).unwrap());
+        let service = Arc::new(ColibriService::start(Arc::clone(&shared), json!({})).unwrap());
         let mut options = Options::new("colibri", 1, Instant::now());
         options.exit_watchdog = None;
         options.two_way = true;
@@ -134,6 +136,7 @@ impl InProcess {
             gate,
             next_id: 1,
             backlog: Vec::new(),
+            shared,
         };
         main.request(
             "colibri.hello",
@@ -157,6 +160,35 @@ impl InProcess {
     fn release(&self) {
         self.gate.state.lock().unwrap().0 = false;
         self.gate.signal.notify_all();
+    }
+
+    /// Waits, for at most `wait`, until `taken` requests have been taken
+    /// since the start. The count only grows, so a request taken and
+    /// already answered between two looks is still seen.
+    fn until_taken(&self, taken: u64, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline {
+            if self.shared.taken() >= taken {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        self.shared.taken() >= taken
+    }
+
+    /// Waits, for at most `wait`, until `open` requests are open. A
+    /// request is done only after its reply is queued, so with the writer
+    /// held, a request that goes back to none open has stopped without
+    /// its reply reaching main.
+    fn until_open(&self, open: u64, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline {
+            if self.shared.stats()["open_requests"] == open {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        self.shared.stats()["open_requests"] == open
     }
 
     /// Whether the writer is held now.
@@ -287,8 +319,25 @@ fn a_marker_still_queued_is_taken_back_and_the_request_is_busy() {
     // queued behind it can't be written within its second.
     let mut main = InProcess::start("open_requests");
     let stats = main.request("colibri.stats", json!({}));
+    // Held before the request is sent: otherwise a slow runner can write
+    // the request's marker ahead of the hello's and the stats' replies,
+    // and the case is the one a_marker_still_being_written_* covers.
+    assert!(
+        main.until_held(Duration::from_secs(30)),
+        "colibri.stats' reply never written"
+    );
+    let taken = main.shared.taken();
     let id = main.request("colibri.request", block_number());
-    std::thread::sleep(Duration::from_millis(1500));
+    // Released only once the request has stopped: its marker queued
+    // behind the held writer and its second passed.
+    assert!(
+        main.until_taken(taken + 1, Duration::from_secs(30)),
+        "the request was never taken"
+    );
+    assert!(
+        main.until_open(0, Duration::from_secs(30)),
+        "the request never stopped"
+    );
     main.release();
     let seen = main.until_reply(id);
     assert!(seen.iter().any(|m| m["id"] == stats), "{seen:?}");
@@ -308,7 +357,16 @@ fn a_marker_still_being_written_is_cleared_before_busy() {
     // The writer is held inside the marker itself.
     let mut main = InProcess::start("colibri.step");
     let id = main.request("colibri.request", block_number());
-    std::thread::sleep(Duration::from_millis(1500));
+    // Released only once the writer is held inside the marker and the
+    // request has stopped, past the marker's second.
+    assert!(
+        main.until_held(Duration::from_secs(30)),
+        "the marker never written"
+    );
+    assert!(
+        main.until_open(0, Duration::from_secs(30)),
+        "the request never stopped"
+    );
     main.release();
     let seen = main.until_reply(id);
     let order: Vec<String> = seen

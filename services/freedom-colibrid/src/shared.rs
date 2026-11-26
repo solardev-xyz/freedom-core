@@ -44,6 +44,9 @@ pub struct Shared {
     /// fall in one order: no request is taken after the flag is set, and
     /// the last request out always sees it.
     open: AtomicU64,
+    /// Requests taken since the start: only ever grows, so a test can tell
+    /// a request taken and already answered from one not yet taken.
+    taken: AtomicU64,
     /// Steps run.
     steps: AtomicU64,
     /// Calls into the C core for requests, each behind its marker.
@@ -78,6 +81,7 @@ impl Shared {
             max_resident: crate::testhooks::memory_budget().unwrap_or(max_resident),
             store,
             open: AtomicU64::new(0),
+            taken: AtomicU64::new(0),
             steps: AtomicU64::new(0),
             calls: AtomicU64::new(0),
             resident: AtomicU64::new(0),
@@ -92,7 +96,9 @@ impl Shared {
             .try_update(Ordering::AcqRel, Ordering::Acquire, |open| {
                 (open & RECYCLING == 0 && open < self.max_open).then_some(open + 1)
             })
-            .map(|_| ())
+            .map(|_| {
+                self.taken.fetch_add(1, Ordering::AcqRel);
+            })
             .map_err(|open| {
                 if open & RECYCLING == 0 {
                     NotTaken::Full
@@ -100,6 +106,11 @@ impl Shared {
                     NotTaken::Recycling
                 }
             })
+    }
+
+    /// The requests taken since the start.
+    pub fn taken(&self) -> u64 {
+        self.taken.load(Ordering::Acquire)
     }
 
     /// A request is answered. True when the process should now end: it is
