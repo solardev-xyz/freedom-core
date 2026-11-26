@@ -3,8 +3,7 @@
 //! binary and the test as main, frame by frame.
 //!
 //! - **An upload's part and its `swarm.body`:** a `publishData` whose data
-//!   is a part (with the test hooks' stand-in for the stores, which PR 7
-//!   replaces): main streams the part within the core's credit, asks for
+//!   is a part (its history row in the core's own store): main streams the part within the core's credit, asks for
 //!   the call's body and reads it within its own. The core credits the part
 //!   only for bytes it has put on the body ("credit goes in only when it can
 //!   go out"), so a main that stops reading the body holds one window each
@@ -45,12 +44,10 @@ fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-/// A core with the Swarm grants moved, the stand-in stores and `env`'s
-/// hooks, `SITE` connected.
+/// A core with the Swarm grants and stores moved and `env`'s hooks, `SITE`
+/// connected.
 fn main_with(env: &[(&str, &str)]) -> Main {
-    let mut hooks = vec![("FREEDOM_CORED_TEST_SWARM_WRITES", "accept")];
-    hooks.extend_from_slice(env);
-    let mut main = swarm_world::main_with(&["swarm"], &hooks);
+    let mut main = swarm_world::main_with(&["swarm"], env);
     main.world(json!({
         "reset": true,
         "clock": 1_767_225_600_123u64,

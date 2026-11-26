@@ -275,17 +275,7 @@ impl FeedStore {
 
     /// `getAllFeeds(key)`: a copy of each feed, by name.
     pub fn all_feeds(&self, key: &JsString) -> JsValue {
-        let mut out = object();
-        if let Some(feeds) = self
-            .entry(key)
-            .and_then(|entry| entry.get("feeds"))
-            .filter(|feeds| feeds.truthy())
-        {
-            for (name, feed) in props(feeds) {
-                out.set(name.clone(), spread(feed));
-            }
-        }
-        out
+        copy_map(self.entry(key).and_then(|entry| entry.get("feeds")))
     }
 
     /// `getAllOriginEntries()`: each site with an active identity, the
@@ -1393,6 +1383,11 @@ fn migrate_v1(store: &JsValue, now_ms: u64) -> Result<JsValue, Unloadable> {
     migrated.set("version", JsValue::Number(CURRENT_VERSION));
     migrated.set("nextPublisherKeyIndex", JsValue::Number(counter));
     migrated.set("origins", object());
+    // The file's keys are unique and in JavaScript's order already: the
+    // sites kept are collected in it, not set one by one (a set searches
+    // the keys before it, so a store of many sites would load in
+    // quadratic time).
+    let mut kept = Vec::new();
     for (origin, entry) in props(origins) {
         // An invalid site is skipped.
         let Ok(entry) = migrate_v1_entry(entry, now_ms) else {
@@ -1402,13 +1397,12 @@ fn migrate_v1(store: &JsValue, now_ms: u64) -> Result<JsValue, Unloadable> {
             .filter(|active| is_str(active.get("mode"), APP_SCOPED))
             .and_then(|active| active.get("publisherKeyIndex"))
             .cloned();
-        if let Some(origins) = migrated.get_mut("origins") {
-            origins.set(origin.clone(), entry);
-        }
+        kept.push((origin.clone(), entry));
         if let Some(index) = active {
             update_next_index(&mut migrated, &index);
         }
     }
+    migrated.set("origins", JsValue::Object(kept));
     Ok(migrated)
 }
 
@@ -1436,7 +1430,7 @@ fn migrate_v1_entry(entry: &JsValue, now_ms: u64) -> Result<JsValue, Thrown> {
     {
         return Err(Thrown::error("Invalid v1 feed map"));
     }
-    let mut feeds = object();
+    let mut feeds = Vec::new();
     for (name, feed) in props(&or_falsy(feeds_in, object())) {
         if !is_plain_object(feed) {
             return Err(Thrown::error("Invalid v1 feed entry"));
@@ -1446,8 +1440,9 @@ fn migrate_v1_entry(entry: &JsValue, now_ms: u64) -> Result<JsValue, Thrown> {
             "identityId",
             or_falsy(feed.get("identityId"), JsValue::String(id.clone())),
         );
-        feeds.set(name.clone(), copy);
+        feeds.push((name.clone(), copy));
     }
+    let feeds = JsValue::Object(feeds);
     let mut identities = object();
     identities.set(id.clone(), identity);
     let mut out = object();
@@ -1487,23 +1482,26 @@ fn validate_v2(mut store: JsValue) -> Result<JsValue, Unloadable> {
             .is_some_and(|clean| unreadable(entry) || clean.identities.is_some())
     });
     if changed || rebuild {
-        let mut origins = object();
-        for ((origin, entry), clean) in entries.iter().zip(sanitized) {
-            let Some(clean) = clean else {
-                continue;
-            };
-            if changed || unreadable(entry) {
-                origins.set(origin.clone(), clean.entry);
-            } else if let Some(identities) = clean.identities {
-                // Only the identities left out: the rest as it was.
-                let mut kept = entry.clone();
-                kept.set("identities", identities);
-                origins.set(origin.clone(), kept);
-            } else {
-                origins.set(origin.clone(), entry.clone());
-            }
-        }
-        store.set("origins", origins);
+        // The file's keys, unique and in order: collected, not set one by
+        // one (quadratic in the sites).
+        let origins = entries
+            .iter()
+            .zip(sanitized)
+            .filter_map(|((origin, entry), clean)| {
+                let clean = clean?;
+                Some(if changed || unreadable(entry) {
+                    (origin.clone(), clean.entry)
+                } else if let Some(identities) = clean.identities {
+                    // Only the identities left out: the rest as it was.
+                    let mut kept = entry.clone();
+                    kept.set("identities", identities);
+                    (origin.clone(), kept)
+                } else {
+                    (origin.clone(), entry.clone())
+                })
+            })
+            .collect();
+        store.set("origins", JsValue::Object(origins));
     }
     Ok(store)
 }
@@ -1754,20 +1752,8 @@ fn active_identity(entry: &JsValue) -> Option<&JsValue> {
 fn decorate(entry: &JsValue) -> JsValue {
     let active = active_identity(entry);
     let mut out = spread(entry);
-    let mut identities = object();
-    if let Some(map) = entry.get("identities").filter(|map| is_plain_object(map)) {
-        for (id, identity) in props(map) {
-            identities.set(id.clone(), spread(identity));
-        }
-    }
-    out.set("identities", identities);
-    let mut feeds = object();
-    if let Some(map) = entry.get("feeds").filter(|map| is_plain_object(map)) {
-        for (name, feed) in props(map) {
-            feeds.set(name.clone(), spread(feed));
-        }
-    }
-    out.set("feeds", feeds);
+    out.set("identities", copy_map(entry.get("identities")));
+    out.set("feeds", copy_map(entry.get("feeds")));
     out.set(
         "identityMode",
         or_falsy(field(active, "mode"), JsValue::Null),
@@ -1781,6 +1767,26 @@ fn decorate(entry: &JsValue) -> JsValue {
         or_nullish(field(active, "walletIndex"), JsValue::Null),
     );
     out
+}
+
+/// A copy of a map the store holds, each value spread (`{ ...value }`), as
+/// `decorateOriginEntry` and `getAllFeeds` copy `identities` and `feeds`;
+/// `{}` for anything but an object. The store's objects have each key once,
+/// in JavaScript's order (as `JSON.parse` and each change leave them), so
+/// the copy keeps them as they are, in one pass: setting each key in turn
+/// would search the keys before it, which at about 100,000 feeds a site
+/// (within the file's bound) is quadratic on every feed write's identity
+/// lookup.
+fn copy_map(map: Option<&JsValue>) -> JsValue {
+    match map {
+        Some(JsValue::Object(props)) => JsValue::Object(
+            props
+                .iter()
+                .map(|(key, value)| (key.clone(), spread(value)))
+                .collect(),
+        ),
+        _ => object(),
+    }
 }
 
 /// `value?.[name]`, an own property of an object.
@@ -2414,5 +2420,100 @@ mod tests {
                 .create_app_scoped_identity(&key("k"), &js(&label), Source::User, NOW)
                 .is_ok()
         );
+    }
+
+    /// About 100,000 feeds for one site, and as many sites, within the
+    /// file's bound: the load (`validateV2Store`'s sanitizer, its rebuild
+    /// of `origins`, a v1 migration), `getOriginEntry` (every feed write's
+    /// identity lookup), `getAllFeeds` and a feed write each take linear
+    /// time. Copying a map by setting each key in turn searched the keys
+    /// before it: minutes at this size, where each step here takes well
+    /// under a second in a release build and a few in a debug one.
+    #[test]
+    fn a_hundred_thousand_feeds_take_linear_time() {
+        use std::fmt::Write as _;
+        use std::time::{Duration, Instant};
+
+        const N: usize = 100_000;
+        // Generous for a debug build on a shared host; the quadratic copies
+        // took minutes.
+        let bound = Duration::from_secs(if cfg!(debug_assertions) { 30 } else { 5 });
+        let timed = |what: &str, started: Instant| {
+            let took = started.elapsed();
+            assert!(took < bound, "{what} took {took:?}");
+        };
+        let site = key("https://a.example");
+        let mut text = String::from(
+            r#"{"version":2,"nextPublisherKeyIndex":0,"origins":{"https://a.example":{"activeIdentityId":"bee-wallet","identities":{"bee-wallet":{"id":"bee-wallet","mode":"bee-wallet","publisherKeyIndex":null}},"feedGranted":true,"grantedAt":1,"feeds":{"#,
+        );
+        for i in 0..N {
+            let comma = if i == 0 { "" } else { "," };
+            write!(text, r#"{comma}"f{i}":{{"topic":"t"}}"#).unwrap();
+        }
+        text.push_str("}}}}");
+        assert!(text.len() < MAX_FILE_BYTES);
+        let started = Instant::now();
+        let loaded = FeedStore::load(Some(text.as_bytes()), NOW, |_| false);
+        timed("the load", started);
+        assert!(loaded.writes.is_empty());
+        let mut store = loaded.store;
+
+        let started = Instant::now();
+        let entry = store.origin_entry(&site).unwrap();
+        timed("getOriginEntry", started);
+        assert_eq!(key_count(entry.get("feeds").unwrap()), N);
+        let started = Instant::now();
+        assert!(store.active_origin_identity(&site).is_some());
+        timed("the active identity", started);
+        let started = Instant::now();
+        let feeds = store.all_feeds(&site);
+        timed("getAllFeeds", started);
+        assert_eq!(key_count(&feeds), N);
+        assert_eq!(
+            props(&feeds).last().map(|(name, _)| name.as_str()),
+            Some("f99999")
+        );
+
+        // A feed write: the store's copy, the change and its text.
+        let started = Instant::now();
+        let change = FeedChange::UpdateFeedReference {
+            key: site.clone(),
+            name: key("f5"),
+            reference: js("\"ab\""),
+        };
+        let changed = change.apply(&mut store, NOW).unwrap();
+        timed("a feed write", started);
+        assert!(changed.write.is_some_and(|t| t.len() <= MAX_FILE_BYTES));
+
+        // As many sites, one of them invalid: the sanitizer drops it and
+        // rebuilds `origins`.
+        let mut text = String::from(r#"{"version":2,"nextPublisherKeyIndex":0,"origins":{"bad":1"#);
+        for i in 0..N {
+            write!(
+                text,
+                r#","s{i}":{{"activeIdentityId":"bee-wallet","identities":{{"bee-wallet":{{"id":"bee-wallet","mode":"bee-wallet"}}}}}}"#
+            )
+            .unwrap();
+        }
+        text.push_str("}}");
+        assert!(text.len() < MAX_FILE_BYTES);
+        let started = Instant::now();
+        let loaded = FeedStore::load(Some(text.as_bytes()), NOW, |_| false);
+        timed("a load that drops a site", started);
+        assert_eq!(key_count(loaded.store.origins()), N);
+
+        // A v1 file of as many feeds, migrated.
+        let mut text = String::from(
+            r#"{"version":1,"origins":{"https://a.example":{"identityMode":"bee-wallet","feeds":{"#,
+        );
+        for i in 0..N {
+            let comma = if i == 0 { "" } else { "," };
+            write!(text, r#"{comma}"f{i}":{{}}"#).unwrap();
+        }
+        text.push_str("}}}}");
+        let started = Instant::now();
+        let loaded = FeedStore::load(Some(text.as_bytes()), NOW, |_| false);
+        timed("a v1 migration", started);
+        assert_eq!(key_count(&loaded.store.all_feeds(&site)), N);
     }
 }

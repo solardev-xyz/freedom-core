@@ -38,14 +38,25 @@
 //!   requests. `FREEDOM_CORED_TEST_SWARM_STREAMS` replaces its 32 incoming
 //!   streams (D4), and `FREEDOM_CORED_TEST_SWARM_IDLE_MS` the 60 s idle
 //!   bound of an upload's streams and of a cancelled stream's terminal
-//!   (D13). `FREEDOM_CORED_TEST_SWARM_WRITES=accept` stands in for the
-//!   Swarm stores until SWM-4 PR 7 serves them: the store methods pass the
-//!   door, and every store write is answered as made, with nothing
-//!   written, so an upload's part and body run through the pipe. With
-//!   `FREEDOM_CORED_TEST_METHODS`, `test.swarm_world` sets the swarm
-//!   thread's world between the cases one core plays (D11): its read
-//!   budgets, tags' owners and feed store afresh, its `Date.now()`, the
-//!   Swarm grants in memory, tags' owners and the feed store.
+//!   (D13). With `FREEDOM_CORED_TEST_METHODS`, `test.swarm_world` sets the
+//!   swarm thread's world between the cases one core plays (D11): its read
+//!   budgets, tags' owners and stores afresh (`swarm-feeds.json` removed and
+//!   a new publish history), its `Date.now()`, the Swarm grants in memory,
+//!   tags' owners, `swarm-feeds.json`'s text, or the stores read again from
+//!   their files; and `test.swarm_feed_change` makes a feed store change
+//!   through SW-1's keeper, as `swarm.identities` will (SWM-4 PR 9), so a
+//!   test makes "another site takes the index", which no method does.
+//! - `FREEDOM_CORED_TEST_SWARM_SIGN_MARKER` names a file the vault appends
+//!   a line to (`sign`) for each SOC it signs for `swarm.request` (design
+//!   0015, D11), so a test counts the signatures.
+//! - `FREEDOM_CORED_TEST_SWARM_HOLD` (`<owner|sign>=<marker>=<release>`):
+//!   the swarm thread parks each vault answer of that kind (a key's owner,
+//!   or a signature), appending a line to `<marker>` for each, until the
+//!   file `<release>` exists, polled every 10 ms without blocking the
+//!   thread; the answers then go to their requests in order. So a test
+//!   pauses a SOC write after its first SW-1 check (`owner`) or with the
+//!   signature held back (`sign`), and makes its change meanwhile (D11,
+//!   the interleaving gate).
 //! - The swarm thread's mining lane (design 0015, SWM-4's D11), before
 //!   each batch: `FREEDOM_CORED_TEST_SWARM_MINE_DELAY_MS` sleeps that long
 //!   (a slow batch); `FREEDOM_CORED_TEST_SWARM_MINE_BLOCK` names a file: a
@@ -69,10 +80,15 @@
 //! - `FREEDOM_CORED_TEST_GRANT_WRITE_FAIL` names a file: while it holds
 //!   `<store>:<step>` lines (`dapp`, `swarm`, `radicle`, `x402`, `phone`
 //!   for `phone-payments.json`, `vault_meta` for `vault-meta.json`,
-//!   `safe_pending` for `safe-pending.json`, and `receipts` for the copy
-//!   of a moved profile's `x402-receipts.json` into the Freedom root,
-//!   whose `flush` also fails the Freedom root's sync before the original
-//!   is dropped (design 0017, C5); `write`, `fsync`, `rename`,
+//!   `safe_pending` for `safe-pending.json`, `swarm_feeds` for
+//!   `swarm-feeds.json` and `swarm_manifests` for
+//!   `swarm-manifest-grants.json` and its `.bak` (design 0015), and
+//!   `receipts` for the copy of a moved profile's `x402-receipts.json` into
+//!   the Freedom root, whose `flush` also fails the Freedom root's sync
+//!   before the original is dropped (design 0017, C5), `publish_history`
+//!   for its `publish-history.json` the same way (design 0015, D10);
+//!   `swarm_history:write` fails each `publish-history.sqlite` statement
+//!   before it runs; `write`, `fsync`, `rename`,
 //!   `flush`), each write of that store's permission
 //!   file fails at that step as if the OS had failed it (design 0012, "The
 //!   files": a failed write). Read at each write, so a test turns it on
@@ -307,12 +323,12 @@
 //!   `recover` add to their read-write grant the directory of each file a
 //!   hook above names (`COMMIT_MARKER`, `COMMIT_HOLD`, `REFUSED_CLAIM_HOLD`,
 //!   `STEP_HOLD`, `DWEB_WRITER_MARKER`, `NAMING_MARKER`, `X402_SIGN_MARKER`,
-//!   `EIP1193_RETAINED_MARKER`, `GRANT_WRITE_FAIL`, `INTENT_IDS`,
-//!   `INTENT_LIMITS`, `APPROVAL_CLOCK`, `WALL_CLOCK`, `SWARM_MINE_BLOCK`,
-//!   and `SWAP`'s replacement), and with `SWAP` renames across
-//!   directories (`refer`), since its replacement is renamed in from
-//!   elsewhere. So every hook works confined; without these variables,
-//!   nothing is added.
+//!   `EIP1193_RETAINED_MARKER`, `SWARM_SIGN_MARKER`, `GRANT_WRITE_FAIL`,
+//!   `INTENT_IDS`, `INTENT_LIMITS`, `APPROVAL_CLOCK`, `WALL_CLOCK`,
+//!   `SWARM_MINE_BLOCK`, `SWARM_HOLD`'s marker and release, and `SWAP`'s
+//!   replacement), and with `SWAP` renames across directories (`refer`),
+//!   since its replacement is renamed in from elsewhere. So every hook
+//!   works confined; without these variables, nothing is added.
 
 use std::time::Duration;
 
@@ -558,10 +574,59 @@ pub fn swarm_bounds(mut bounds: crate::swarm::engine::Bounds) -> crate::swarm::e
     if let Some(idle) = millis("FREEDOM_CORED_TEST_SWARM_IDLE_MS") {
         bounds.idle_ms = idle;
     }
-    if std::env::var_os("FREEDOM_CORED_TEST_SWARM_WRITES").is_some_and(|v| v == "accept") {
-        bounds.stub_writes = true;
-    }
     bounds
+}
+
+/// The vault signed a SOC for `swarm.request`: a line on the marker.
+#[cfg(feature = "testhooks")]
+pub fn swarm_signed() {
+    use std::io::Write as _;
+    if let Some(marker) = std::env::var_os("FREEDOM_CORED_TEST_SWARM_SIGN_MARKER") {
+        // One write per line: the test reads the file between requests.
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(marker)
+            .and_then(|mut file| file.write_all(b"sign\n"));
+    }
+}
+
+/// `FREEDOM_CORED_TEST_SWARM_HOLD`'s kind, marker and release.
+#[cfg(feature = "testhooks")]
+fn swarm_hold() -> Option<(String, std::path::PathBuf, std::path::PathBuf)> {
+    let spec = std::env::var("FREEDOM_CORED_TEST_SWARM_HOLD").ok()?;
+    let mut parts = spec.splitn(3, '=');
+    let kind = parts.next()?.to_owned();
+    let marker = parts.next()?.into();
+    let release = parts.next()?.into();
+    Some((kind, marker, release))
+}
+
+/// Whether the swarm thread parks a vault answer of `kind` (`owner` or
+/// `sign`) now: the hook names it and its release isn't there. Each parked
+/// answer appends a line to the marker.
+#[cfg(feature = "testhooks")]
+pub fn swarm_hold_parks(kind: &str) -> bool {
+    use std::io::Write as _;
+    let Some((wanted, marker, release)) = swarm_hold() else {
+        return false;
+    };
+    if wanted != kind || release.exists() {
+        return false;
+    }
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(marker)
+        .and_then(|mut file| file.write_all(format!("{kind}\n").as_bytes()));
+    true
+}
+
+/// Whether the parked vault answers may go: the hook's release exists, or
+/// the hook is gone.
+#[cfg(feature = "testhooks")]
+pub fn swarm_hold_released() -> bool {
+    swarm_hold().is_none_or(|(_, _, release)| release.exists())
 }
 
 /// The mining lane's hooks, on the lane thread before each batch: the
@@ -1032,6 +1097,7 @@ const CORE_HOOK_FILES: &[&str] = &[
     "FREEDOM_CORED_TEST_NAMING_MARKER",
     "FREEDOM_CORED_TEST_X402_SIGN_MARKER",
     "FREEDOM_CORED_TEST_EIP1193_RETAINED_MARKER",
+    "FREEDOM_CORED_TEST_SWARM_SIGN_MARKER",
     "FREEDOM_CORED_TEST_GRANT_WRITE_FAIL",
     "FREEDOM_CORED_TEST_INTENT_IDS",
     "FREEDOM_CORED_TEST_INTENT_LIMITS",
@@ -1055,6 +1121,10 @@ pub fn core_hook_grant() -> (Vec<std::path::PathBuf>, bool) {
     let swap = std::env::var("FREEDOM_CORED_TEST_SWAP").ok();
     if let Some((_, replacement)) = swap.as_deref().and_then(|spec| spec.split_once('=')) {
         files.push(replacement.into());
+    }
+    if let Some((_, marker, release)) = swarm_hold() {
+        files.push(marker);
+        files.push(release);
     }
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     for dir in files
@@ -1258,6 +1328,9 @@ pub fn dweb_bounds(bounds: crate::dweb::engine::Bounds) -> crate::dweb::engine::
 pub fn swarm_bounds(bounds: crate::swarm::engine::Bounds) -> crate::swarm::engine::Bounds {
     bounds
 }
+
+#[cfg(not(feature = "testhooks"))]
+pub fn swarm_signed() {}
 
 #[cfg(not(feature = "testhooks"))]
 pub fn dweb_writer_held(_held: usize) {}

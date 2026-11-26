@@ -11,12 +11,15 @@
 //! - [`wire`]: the messages, read strictly and written;
 //! - [`stream`]: the messages around the streams: a part's request and
 //!   head, `swarm.body`'s, and the abort codes each way;
+//! - [`stores`]: the Swarm stores' files (D3): `swarm-feeds.json`,
+//!   `swarm-manifest-grants.json` and `publish-history.sqlite`;
 //! - [`thread`]: the thread itself, which the event loop starts once a
 //!   hello settles protocol 2.
 
 pub mod engine;
 pub mod lane;
 pub mod memory;
+pub mod stores;
 pub mod stream;
 pub mod thread;
 pub mod wire;

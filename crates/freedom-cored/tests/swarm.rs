@@ -4,7 +4,9 @@
 //! ([`swarm_world`]), streaming a node's body within the core's credit.
 //!
 //! **What is played:** every `methods` case of `vectors/swarm.json` whose
-//! steps the swarm thread serves without the stores: `requestAccess`,
+//! steps the swarm thread serves without writing the stores (which it
+//! holds, moved: `swarm_stores`, D3): `requestAccess`, `listFeeds` (the
+//! feed store's records and the read budget's charges, PR 7),
 //! `getCapabilities`, `readChunk`, `readSingleOwnerChunk`, `readData`
 //! (0009's walk, its leaves streamed and checked on the thread's hashing
 //! pool), `readFeedEntry` (an index's SOC and its streamed join, the latest
@@ -13,11 +15,12 @@
 //! close inside the request, a GSOC topic's signer mined on the lane),
 //! `sendPss` and `sendGsoc` (its signer mined on the lane, PR 8), and the
 //! method dispatch's own cases. A `getUploadStatus` case's `publishFiles`
-//! steps aren't played (the stores come with PR 7): the tag each gave the
-//! site is set in the thread's world instead, as the reference's upload
-//! recorded it. Not played, and counted: cases with other methods (PRs 7
-//! to 9). The streams' own cases (windows and credit, parts and
-//! `swarm.body`, the idle bound) are in `tests/swarm_streams.rs`.
+//! steps aren't played (`tests/swarm_writes.rs` plays them with their
+//! uploads): the tag each gave the site is set in the thread's world
+//! instead, as the reference's upload recorded it. Not played, and
+//! counted: cases with other methods (none now: the writes are
+//! `tests/swarm_writes.rs`'s). The streams' own cases (windows and credit,
+//! parts and `swarm.body`, the idle bound) are in `tests/swarm_streams.rs`.
 //!
 //! **What is checked,** each step: the answer, read back from its typed
 //! form, against the reference's (the case's `core` where a deviation
@@ -39,8 +42,9 @@ use swarm_world::logic::{self, Want};
 use swarm_world::{Main, Name, Naming, Script, grants_json, named_page, page, wire_typed};
 
 /// The methods whose cases this step plays.
-const PLAYED: [&str; 11] = [
+const PLAYED: [&str; 12] = [
     "swarm_requestAccess",
+    "swarm_listFeeds",
     "swarm_getCapabilities",
     "swarm_readChunk",
     "swarm_readSingleOwnerChunk",
@@ -70,6 +74,7 @@ const LEFT_OUT: &[(&str, &str)] = &[
 fn row_of(method: &str, params: fc_json::index::Value<'_, '_>) -> &'static str {
     match method {
         "swarm_requestAccess" => "requestAccess",
+        "swarm_listFeeds" => "listFeeds",
         "swarm_getCapabilities" => "getCapabilities",
         "swarm_readChunk" => "readChunk",
         "swarm_readSingleOwnerChunk" => "readSingleOwnerChunk",
@@ -222,6 +227,8 @@ fn every_served_case_plays() {
             subscribe_check,
             key: origin.clone(),
             naming: None,
+            parts: std::collections::BTreeMap::new(),
+            write_node: None,
         };
         let mut world = json!({
             "reset": true,
@@ -352,6 +359,7 @@ fn every_served_case_plays() {
         let row = logic::string(logic::get(*scenario, "row"));
         let played_row = [
             "requestAccess",
+            "listFeeds",
             "getCapabilities",
             "readChunk",
             "readSingleOwnerChunk",
@@ -374,10 +382,10 @@ fn every_served_case_plays() {
     }
     assert_eq!(
         (played, main_answered, seeded, later),
-        (280, 16, 7, 3),
+        (676, 16, 7, 0),
         "steps played, main's own, uploads seeded and later cases"
     );
-    assert_eq!(scenarios_used.len(), 157);
+    assert_eq!(scenarios_used.len(), 158);
 }
 
 /// A `readChunk` of the vectors' 11-byte chunk.
@@ -412,7 +420,7 @@ fn the_door_answers_before_any_machine_runs() {
     assert_eq!(answer["error"]["code"], "not_moved", "{answer}");
     assert_eq!(answer["error"]["data"], json!({ "store": "swarm" }));
 
-    let mut main = swarm_world::main();
+    let mut main = swarm_world::main_stores(&["swarm"], &[], &[]);
     connected(&mut main);
     // A store method before the stores move (D3); main's own unsubscribe
     // (D5); params that aren't typed.
@@ -649,6 +657,8 @@ fn a_failed_name_ends_the_binding_for_swarm_and_ethereum() {
         subscribe_check: None,
         key: fc_json::JsString::from(swarm_world::NAME),
         naming: Some(Naming::new()),
+        parts: std::collections::BTreeMap::new(),
+        write_node: None,
     };
     let names = |script: &mut Script, names: &[Name]| {
         script.naming.as_mut().unwrap().names.extend(names);
