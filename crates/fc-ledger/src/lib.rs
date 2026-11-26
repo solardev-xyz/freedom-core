@@ -19,7 +19,7 @@
 //!   after `6D00` answered the operation's first `E0 1A` and main said its
 //!   warning is shown (Q23, deviation `blind-typed-data`).
 //! - **The status mapping** ([`LedgerCode`]): `errors.js`'s table, main's
-//!   failures, and the four new codes.
+//!   failures (deviation `no-device`), and the four new codes.
 //! - **The checks:** every signature recovered against the account and the
 //!   digest the user confirmed, `s` low (deviation `signature-check`); a
 //!   legacy transaction's `v` read from the bound chain ID, any width

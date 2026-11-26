@@ -134,14 +134,6 @@ impl Replay<'_> {
     }
 }
 
-/// The two `open-no-device-*` cases: the reference's `TransportError
-/// ("NoDevice")` is `LEDGER_UNKNOWN`, matched by no row of `errors.js`;
-/// in the core's lane main reports a missing device as `failed:
-/// not_found`, `LEDGER_DEVICE_NOT_FOUND`, and none of `shell.ledger_apdu`'s
-/// five failures maps to `LEDGER_UNKNOWN`. The design's table has no row
-/// for this: raised in the PR, pinned here as the core answers.
-const RAISED: [&str; 2] = ["open-no-device-discovery", "open-no-device-msg"];
-
 /// The deviation a refusal implements, and its bound as the grammar file's
 /// reason words it.
 fn refusal_mark(refusal: &Refusal) -> (&'static str, Option<String>) {
@@ -345,8 +337,9 @@ fn every_case() {
             }
             want = end.clone();
         }
-        if RAISED.contains(&id) {
-            assert_eq!(want, End::Code("LEDGER_UNKNOWN".into()), "{id}");
+        if marks.contains("no-device") {
+            // Main's failed: not_found, where the reference's NoDevice is
+            // LEDGER_UNKNOWN.
             want = End::Code("LEDGER_DEVICE_NOT_FOUND".into());
         }
         assert_eq!(end, want, "{id}");

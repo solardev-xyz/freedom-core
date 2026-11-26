@@ -265,10 +265,12 @@ function baseCases(env, toEthersTx) {
   add(typedCase(ethers, 'app-version-1.9.0-typed', 'app', mail(), record, { device: { app: { name: 'Ethereum', version: '1.9.0' } } }));
 
   // Opening the device: no Ledger attached (the transport's own NoDevice
-  // error), and one node-hid can't open.
+  // error, LEDGER_UNKNOWN today; main's failed: not_found with the core,
+  // deviation no-device), and one node-hid can't open.
   for (const open of ['no-device', 'cannot-open']) {
-    add({ id: `open-${open}-discovery`, family: 'open', operation: 'ledger.accounts', request: { scheme: 'live', start: 0, count: 1 }, device: { open } });
-    add({ id: `open-${open}-msg`, family: 'open', operation: 'sign.message', record, request: { message: hex(Buffer.from('Freedom')) }, device: { open } });
+    const mark = open === 'no-device' ? { deviation: 'no-device' } : {};
+    add({ id: `open-${open}-discovery`, family: 'open', operation: 'ledger.accounts', request: { scheme: 'live', start: 0, count: 1 }, device: { open }, ...mark });
+    add({ id: `open-${open}-msg`, family: 'open', operation: 'sign.message', record, request: { message: hex(Buffer.from('Freedom')) }, device: { open }, ...mark });
   }
   return { cases, excluded };
 }

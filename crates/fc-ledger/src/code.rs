@@ -102,7 +102,9 @@ impl Failed {
         }
     }
 
-    /// The code the operation ends with.
+    /// The code the operation ends with: a missing device is
+    /// `LEDGER_DEVICE_NOT_FOUND`, where today's `NoDevice` is
+    /// `LEDGER_UNKNOWN` (deviation `no-device`).
     pub fn code(self) -> LedgerCode {
         match self {
             Failed::NotFound => LedgerCode::DeviceNotFound,
