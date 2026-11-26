@@ -297,7 +297,11 @@ fn check_form(call: &NodeCall, form: &FormSpec, row: &str) -> Result<(), String>
         && (call.form != Form::Chunk
             || !matches!(
                 row,
-                "readFeedEntry_index" | "updateFeed" | "writeFeedEntry" | "swarm.feed:update"
+                "readFeedEntry_index"
+                    | "updateFeed"
+                    | "writeFeedEntry"
+                    | "swarm.feed:update"
+                    | "swarm.feed:read"
             ))
     {
         return Err("feed outside a feed row's chunks".to_owned());
@@ -905,6 +909,13 @@ impl<'a> Checker<'a> {
                 let topic: [u8; 32] = unhex(&topic).try_into().map_err(|_| "topic")?;
                 self.feed_write(call, form, segments, topic, None)?;
             }
+            // readFeedState: feed_head once, then the head probe after its
+            // 404 alone; nothing else.
+            ("swarm.feed:read", form @ (Form::FeedHead | Form::Chunk)) => {
+                let topic = lower(&param_str(self.params, "topic").unwrap_or_default());
+                let topic: [u8; 32] = unhex(&topic).try_into().map_err(|_| "topic")?;
+                self.feed_write(call, form, segments, topic, None)?;
+            }
             (row, form) => return Err(format!("{form:?} under {row}")),
         }
         Ok(())
@@ -1072,7 +1083,10 @@ impl<'a> Checker<'a> {
                         _ => Lookup::Ended,
                     }
                 }
-                Some(r) if matches!(r.status, 404 | 500) => Lookup::Zero,
+                // An update probes after a 404 or a 500; a read, which
+                // throws a 500, after a 404 alone.
+                Some(r) if r.status == 404 => Lookup::Zero,
+                Some(r) if r.status == 500 && self.row != "swarm.feed:read" => Lookup::Zero,
                 _ => Lookup::Ended,
             },
             (asking, Form::Chunk) if asking.asked().is_some() => match status {
@@ -2600,6 +2614,15 @@ fn shell_params(rng: &mut Rng) -> (&'static str, ShellMethod, String, BTreeMap<u
                     ShellMethod::Feed,
                     format!(r#"{{"op":"create",{base}}}"#),
                 )
+            } else if rng.chance(35) {
+                // A read takes no batch.
+                (
+                    "swarm.feed:read",
+                    ShellMethod::Feed,
+                    format!(
+                        r#"{{"op":"read","key":{{"kind":"bee_wallet"}},"topic":"{topic_hex}"}}"#
+                    ),
+                )
             } else {
                 let reference = rng.pick(&["ef", "EF"]).repeat(rng.pick(&[32, 64]));
                 let min = rng.pick(&[
@@ -2752,6 +2775,7 @@ fn every_shell_call_matches_its_row() {
             "swarm.publish:collection",
             "swarm.feed:create",
             "swarm.feed:update",
+            "swarm.feed:read",
             "swarm.stamps",
             "swarm.upload_status",
         ] {

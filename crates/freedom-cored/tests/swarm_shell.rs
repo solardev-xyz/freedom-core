@@ -37,7 +37,7 @@ mod swarm_world;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use fc_json::index::{Index, KeyOrder};
+use fc_json::index::{Index, KeyOrder, Value as V};
 use fc_json::{JsString, JsValue};
 use fc_swarm_provider::machine::{Event, Failed, Form, NodeCall, Reply};
 use fc_swarm_provider::stores::feeds::{self, FeedStore};
@@ -2033,7 +2033,8 @@ fn check_call(id: &str, k: usize, (call, body): &(NodeCall, Vec<u8>), want: &Wan
 ///   `swarm.upload_status`): main's params as the case gives them; each of
 ///   the core's node calls against the reference's (form, method, path,
 ///   query, headers, body, a probe's feed update), answered with the
-///   node's recorded reply; parts streamed through `shell.swarm_part`, and
+///   node's recorded reply, and within the case's row in
+///   `swarm-grammar.json`; parts streamed through `shell.swarm_part`, and
 ///   a picked file's read failing with its errno's name; the answer
 ///   (typed), and the history `swarm.history` reads after;
 /// - **the store ops** (`swarm.identities`, `swarm.history`,
@@ -2050,6 +2051,9 @@ fn check_call(id: &str, k: usize, (call, body): &(NodeCall, Vec<u8>), want: &Wan
 #[test]
 fn every_shell_case_through_the_pipe() {
     let cases = shell_section();
+    let grammar_text = logic::text_of("swarm-grammar.json");
+    let grammar_index = Index::new(&grammar_text).unwrap();
+    let grammar = grammar_index.root();
     let mut main = store_main();
     let mut played: BTreeMap<String, usize> = BTreeMap::new();
     for case in &cases {
@@ -2059,7 +2063,7 @@ fn every_shell_case_through_the_pipe() {
         } else if ["swarm.identities", "swarm.history", "swarm.manifest"].contains(&method) {
             play_shell_op(&mut main, case);
         } else {
-            play_shell_node(&mut main, case);
+            play_shell_node(&mut main, case, grammar);
         }
         *played.entry(method.to_owned()).or_default() += 1;
     }
@@ -2078,7 +2082,27 @@ fn every_shell_case_through_the_pipe() {
     );
 }
 
-fn play_shell_node(main: &mut Main, case: &JsValue) {
+/// The calls' forms within `row`'s in the grammar file, in order and
+/// within their counts (common's `check_row_shape`).
+fn within_row(id: &str, grammar: V<'_, '_>, row: &str, calls: &[(NodeCall, Vec<u8>)]) {
+    let ran = logic::Ran {
+        outcome: fc_swarm_provider::machine::Outcome::Cancelled,
+        ready: Vec::new(),
+        calls: calls
+            .iter()
+            .map(|(call, _)| logic::Logged {
+                call: call.clone(),
+                charge: 0,
+                body: None,
+            })
+            .collect(),
+        cancels_after_outcome: 0,
+        most_open: 0,
+    };
+    logic::check_row_shape(id, grammar, row, &ran);
+}
+
+fn play_shell_node(main: &mut Main, case: &JsValue, grammar: V<'_, '_>) {
     let id = str_of(field(case, "id"));
     let world = field(case, "world");
     let clock = num(field(world, "clock")) as u64;
@@ -2122,6 +2146,7 @@ fn play_shell_node(main: &mut Main, case: &JsValue) {
     }
     let params = json_of(field(step, "params"));
     let answer = main.play_own(&mut own, str_of(field(case, "method")), &params, "shell");
+    within_row(id, grammar, str_of(field(case, "row")), &own.calls);
     let extra = usize::from(picked_read);
     assert_eq!(own.calls.len(), wants.len() + extra, "{id}");
     for (k, (got, want)) in own.calls.iter().zip(&wants).enumerate() {
