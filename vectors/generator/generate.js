@@ -30,6 +30,7 @@ const { buildJournal } = require('./journal');
 const { buildStores } = require('./stores');
 const { buildSqlite } = require('./sqlite');
 const { buildColibri } = require('./colibri');
+const { buildLedger } = require('./ledger');
 
 const REFERENCE_COMMIT = 'fb540328162839e68150fe2c5e517edb86734d1c';
 // The Radicle vectors' own reference: freedom-browser's integration/rust-core,
@@ -86,6 +87,14 @@ const COLIBRI_REFERENCE_COMMIT = '7cf6a0c299b50b64944d5d246a911bdb25dc5c82';
 // refusing any other version, with every package file the run loads checked by
 // digest. Like the Radicle reference, it moves on its own.
 const SWARM_REFERENCE_COMMIT = 'dea09d2f58c18c5ffe5baef464fdf70af1ef40ef';
+// The Ledger vectors' reference (design 0016, LDG-1): the swarm reference's
+// checkout, whose src/main/wallet/ledger/ has #1063 (every signature
+// recovered) and #1065 (the address read from the device), over its
+// installed @ledgerhq/hw-app-eth 7.11.1, hw-transport-node-hid 6.33.5 and
+// @x402/evm 2.29.0, the versions design 0016 pins (ledger.js refuses any
+// other). It moves with the swarm reference until the Ledger vectors need
+// another commit.
+const LEDGER_REFERENCE_COMMIT = SWARM_REFERENCE_COMMIT;
 const OUTPUT = path.resolve(__dirname, '..');
 const INDICES = [0, 1, 2, 1000, 2147483647];
 const MNEMONICS = [
@@ -672,8 +681,23 @@ async function main() {
   swarmJob.catch(() => {});
   // Built in this order; a check compares each file as soon as it is built,
   // so a mismatch stops the run there.
+  // Design 0016's Ledger exchanges (LDG-1): one run builds both files.
+  let ledgerFiles = null;
   const builders = [
     ['keys.json', () => buildKeys(reference)],
+    // The ledger reference's src/main/wallet/ledger/ over a recording
+    // transport and a scripted device holding keys.json's test mnemonic, and
+    // the APDU grammar every exchange is checked against. Early in the list,
+    // so a mismatch there stops the run quickly.
+    ['ledger.json', async () => {
+      ledgerFiles = await buildLedger(swarmReference.checkout, {
+        freedomBrowserCommit: checkedCommit(swarmReference.checkout, LEDGER_REFERENCE_COMMIT, 'ledger reference'),
+        nodeVersion: process.version,
+        generator: 'vectors/generator/generate.js',
+      }, JSON.parse(fs.readFileSync(path.join(OUTPUT, 'keys.json'), 'utf8')));
+      return ledgerFiles.ledger;
+    }],
+    ['ledger-grammar.json', () => ledgerFiles.grammar],
     ['mnemonic-validation.json', () => buildValidation(reference)],
     ['identity-formats.json', () => buildIdentities(reference)],
     // Its own meta: the shared one is frozen into the existing fixtures.
