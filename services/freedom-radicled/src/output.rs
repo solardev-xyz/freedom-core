@@ -555,7 +555,10 @@ impl Failure {
 }
 
 impl From<libradicle::Error> for Failure {
+    /// Out of memory ends the process first, never a read's failure
+    /// ([`crate::oom`]).
     fn from(error: libradicle::Error) -> Self {
+        crate::oom::check(&error);
         match error {
             libradicle::Error::TooLarge { size, limit } => {
                 Failure::Refused(Refused::TooLarge { size, limit })

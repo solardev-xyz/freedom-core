@@ -1,6 +1,6 @@
 //! The crate's one unsafe call (AGENTS.md rule 6). `unsafe_code` is `deny`
-//! here, not `forbid`, so that `main`'s call to
-//! `libradicle::isolate_git_config` can carry its own `#[allow]`. This holds
+//! here, not `forbid`, so that `main`'s call to `libradicle::process_init`
+//! can carry its own `#[allow]`. This holds
 //! the crate to that one call: no other line of its Rust sources, outside a
 //! comment, names the lint, so no other item, module or statement lifts it,
 //! and the one that does is that call's statement.
@@ -65,8 +65,8 @@ fn one_statement_lifts_the_lint() {
         [(
             Path::new("src").join("main.rs"),
             format!("#[allow({})]", lint()),
-            Some("let isolated = unsafe { libradicle::isolate_git_config() };".to_owned()),
+            Some("let initialized = unsafe { libradicle::process_init() };".to_owned()),
         )],
-        "only main's call to isolate_git_config may lift the lint"
+        "only main's call to process_init may lift the lint"
     );
 }

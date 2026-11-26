@@ -119,11 +119,15 @@ fn record_path(home: &Path) -> PathBuf {
     home.join("node").join(quarantine::QUARANTINE_DB_FILE)
 }
 
-fn record_failed(e: &quarantine::Error) -> ErrorBody {
-    ErrorBody::new(
+/// The record's error, as a method answers it: out of memory ends the
+/// process first ([`crate::oom`]).
+fn record_failed(e: quarantine::Error) -> ErrorBody {
+    let failed = ErrorBody::new(
         ErrorCode::Failed,
-        format!("the quarantine record: {}", record_error(e)),
-    )
+        format!("the quarantine record: {}", record_error(&e)),
+    );
+    crate::oom::check_heartwood(e);
+    failed
 }
 
 fn answer(conn: &Connection, id: u64, answer: Result<Value, ErrorBody>) {
@@ -151,8 +155,8 @@ pub fn list(conn: &Connection, home: &Path, params: Option<&RawValue>) -> Work {
 
 /// Page `page` of `home`'s quarantine record: `{ entries, next_page }`.
 fn list_page(home: &Path, page: u64) -> Result<Value, ErrorBody> {
-    let record = Quarantine::open(record_path(home)).map_err(|e| record_failed(&e))?;
-    let count = record.count().map_err(|e| record_failed(&e))?;
+    let record = Quarantine::open(record_path(home)).map_err(record_failed)?;
+    let count = record.count().map_err(record_failed)?;
     let index = usize::try_from(page).ok();
     // A page past the last is empty, and never asked of the record: its
     // query's offset, the page times its size, would overflow for a page
@@ -163,7 +167,7 @@ fn list_page(home: &Path, page: u64) -> Result<Value, ErrorBody> {
     if first >= count {
         return Ok(json!({ "entries": [], "next_page": null }));
     }
-    let entries = record.page(index, PAGE).map_err(|e| record_failed(&e))?;
+    let entries = record.page(index, PAGE).map_err(record_failed)?;
     let next = (count - first > PAGE).then(|| page + 1);
     Ok(json!({
         "entries": entries.iter().map(entry).collect::<Vec<_>>(),
@@ -257,8 +261,8 @@ pub fn remove(
 /// `removing`'s repository with its `qid`.
 fn precondition(home: &Path, removing: Removing) -> Result<Quarantine, ErrorBody> {
     let Removing { rid, qid } = removing;
-    let record = Quarantine::open(record_path(home)).map_err(|e| record_failed(&e))?;
-    let held = record.get(&rid).map_err(|e| record_failed(&e))?;
+    let record = Quarantine::open(record_path(home)).map_err(record_failed)?;
+    let held = record.get(&rid).map_err(record_failed)?;
     if held.is_none_or(|held| held.qid != qid) {
         return Err(not_quarantined(rid));
     }
@@ -320,6 +324,7 @@ fn removal(
 /// Answers removal `id` of `rid` `outcome_unknown`: the node's unseed, `e`,
 /// was sent and not answered within its bound. The record stays.
 fn unseed_unanswered(conn: &Connection, id: u64, rid: RepoId, e: &libradicle::Error) {
+    crate::oom::check(e);
     let why = "the node didn't answer its unseed in time";
     if conn.reply_error(id, &pools::outcome_unknown(why)).is_ok() {
         pools::unknown_logged(id, why);
@@ -334,10 +339,14 @@ fn unseed_unanswered(conn: &Connection, id: u64, rid: RepoId, e: &libradicle::Er
 /// `kind`: `quarantined`, with the record's `kind` and `step` (0008,
 /// "Errors"). The gate's kind, and a null step, if the record doesn't read.
 pub fn refusal(home: &Path, rid: RepoId, kind: gate::Quarantine) -> ErrorBody {
-    let held = Quarantine::open(record_path(home))
-        .and_then(|record| record.get(&rid))
-        .ok()
-        .flatten();
+    let held = match Quarantine::open(record_path(home)).and_then(|record| record.get(&rid)) {
+        Ok(held) => held,
+        // Out of memory ends the process first ([`crate::oom`]).
+        Err(e) => {
+            crate::oom::check_heartwood(e);
+            None
+        }
+    };
     let data = match held {
         Some(record) => json!({ "kind": record.kind.as_str(), "step": record.step }),
         None => json!({
@@ -363,8 +372,10 @@ fn not_quarantined(rid: RepoId) -> ErrorBody {
 }
 
 /// A removal's failure, naming its step: never a path. libradicle's own
-/// message otherwise, as 0008's `failed` says.
+/// message otherwise, as 0008's `failed` says. Out of memory is never
+/// answered: it ends the process ([`crate::oom`]).
 fn removal_failed(e: &libradicle::Error) -> ErrorBody {
+    crate::oom::check(e);
     let message = match e {
         libradicle::Error::Remove(e) => match &**e {
             RemoveError::Quarantine(e) => format!("the quarantine record: {}", record_error(e)),
