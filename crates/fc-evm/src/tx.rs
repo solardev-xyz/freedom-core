@@ -218,7 +218,7 @@ impl Transaction {
     /// The key is needed only between this and [`PreparedTransaction::finish`].
     pub fn prepare(&self) -> Result<PreparedTransaction, Error> {
         let mut fields = Vec::new();
-        let digest = match &self.fees {
+        let unsigned = match &self.fees {
             Fees::Legacy { gas_price } => {
                 rlp::uint(&mut fields, &U256::from_u64(self.nonce));
                 rlp::uint(&mut fields, gas_price);
@@ -230,7 +230,7 @@ impl Transaction {
                 rlp::uint(&mut unsigned, &U256::ZERO);
                 let mut payload = Vec::new();
                 rlp::list(&mut payload, &unsigned);
-                keccak256(&payload)
+                payload
             }
             Fees::Eip1559 {
                 max_fee_per_gas,
@@ -239,13 +239,14 @@ impl Transaction {
                 self.eip1559_fields(&mut fields, max_fee_per_gas, max_priority_fee_per_gas);
                 let mut unsigned = vec![0x02];
                 rlp::list(&mut unsigned, &fields);
-                keccak256(&unsigned)
+                unsigned
             }
         };
         Ok(PreparedTransaction {
             legacy_chain_id: matches!(self.fees, Fees::Legacy { .. }).then_some(self.chain_id),
             fields,
-            digest,
+            digest: keccak256(&unsigned),
+            unsigned,
         })
     }
 
@@ -265,12 +266,22 @@ pub struct PreparedTransaction {
     legacy_chain_id: Option<U256>,
     fields: Vec<u8>,
     digest: [u8; 32],
+    unsigned: Vec<u8>,
 }
 
 impl PreparedTransaction {
     /// What the key signs.
     pub fn digest(&self) -> [u8; 32] {
         self.digest
+    }
+
+    /// The unsigned serialization, whose keccak256 is [`Self::digest`]:
+    /// `rlp([nonce, gasPrice, gasLimit, to, value, data, chainId, 0, 0])`
+    /// for a legacy transaction, `0x02 ‖ rlp([chainId, nonce, …, []])` for
+    /// EIP-1559 (ethers' `unsignedSerialized`). A Ledger is sent these bytes
+    /// (design 0016, "The APDU grammar").
+    pub fn unsigned(&self) -> &[u8] {
+        &self.unsigned
     }
 
     /// The signed serialization, from a 65-byte `r ‖ s ‖ v` signature of
@@ -332,6 +343,24 @@ mod tests {
         let mut value = base();
         edit(value.as_object_mut().unwrap());
         Transaction::from_json(&value)
+    }
+
+    #[test]
+    fn the_unsigned_serialization_is_what_the_digest_hashes() {
+        let eip1559 = Transaction::from_json(&base()).unwrap().prepare().unwrap();
+        assert_eq!(eip1559.unsigned()[0], 0x02);
+        assert_eq!(keccak256(eip1559.unsigned()), eip1559.digest());
+        let legacy = json!({
+            "type": 0, "chain_id": "137", "nonce": "1", "gas_limit": "21000", "to": null,
+            "value": "0", "data": "0x", "gas_price": "1"
+        });
+        let legacy = Transaction::from_json(&legacy).unwrap().prepare().unwrap();
+        // rlp([1, 1, 21000, 0x, 0, 0x, 137, 0, 0])
+        assert_eq!(
+            crate::to_hex(legacy.unsigned()),
+            "0xcc010182520880808081898080"
+        );
+        assert_eq!(keccak256(legacy.unsigned()), legacy.digest());
     }
 
     #[test]

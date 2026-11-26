@@ -6,8 +6,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use fc_evm::{
-    Transaction, ViewRequest, keccak256, parse_bytes, parse_json, parse_unsigned, sign_message,
-    sign_typed_data, to_hex, typed_data_hash, typed_data_view,
+    ParsedTypedData, Transaction, TypedBase, TypedValue, ViewRequest, keccak256, parse_bytes,
+    parse_json, parse_unsigned, sign_message, sign_typed_data, to_hex, typed_data_hash,
+    typed_data_parse, typed_data_view,
 };
 use fc_keys::{Mnemonic, Secp256k1Key, freedom};
 use serde_json::Value;
@@ -63,6 +64,131 @@ fn keys() -> BTreeMap<String, Secp256k1Key> {
 
 /// No bound on the view's length: the core sets one (#88), tested there.
 const UNBOUNDED: usize = usize::MAX;
+
+/// Checks `typed_data_parse` against the hash and the view of a case the
+/// core accepts: the same digest from its two hashes, `getPayload`'s types
+/// (EIP712Domain last), and every value the view shows, in its order.
+fn check_parse(id: &str, data: &Value, hash: &[u8; 32], view: &Value) {
+    let parsed = typed_data_parse(&data["domain"], &data["types"], &data["message"])
+        .unwrap_or_else(|e| panic!("{id}: {e}"));
+    assert_eq!(&parsed.hash, hash, "{id}");
+    let mut whole = vec![0x19, 0x01];
+    whole.extend_from_slice(&parsed.domain_separator);
+    whole.extend_from_slice(&parsed.struct_hash);
+    assert_eq!(&keccak256(&whole), hash, "{id}");
+    assert_eq!(
+        parsed.primary_type,
+        view["primary_type"].as_str().unwrap(),
+        "{id}"
+    );
+    let view_types = view["types"].as_object().unwrap();
+    assert_eq!(parsed.types.len(), view_types.len(), "{id}");
+    assert_eq!(parsed.types.last().unwrap().name, "EIP712Domain", "{id}");
+    for ty in &parsed.types {
+        let listed = view_types[&ty.name].as_array().unwrap();
+        let names: Vec<&str> = listed.iter().map(|f| f["name"].as_str().unwrap()).collect();
+        let parsed_names: Vec<&str> = ty.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(parsed_names, names, "{id}: {}", ty.name);
+    }
+    let domain_view = view["domain"].as_object().unwrap();
+    let domain_fields = &parsed.types.last().unwrap().fields;
+    assert_eq!(domain_fields.len(), parsed.domain.len(), "{id}");
+    for (field, value) in domain_fields.iter().zip(&parsed.domain) {
+        let shown = &domain_view[&field.name];
+        if field.name == "chainId" {
+            // The view writes the chain as a hex quantity.
+            let TypedValue::Uint(id_value) = value else {
+                panic!("{id}: chainId")
+            };
+            assert_eq!(parse_unsigned(shown.as_str().unwrap()).unwrap(), *id_value);
+        } else {
+            assert_value(id, &parsed, &field.base, &field.dims, value, shown);
+        }
+    }
+    let primary = TypedBase::Struct(parsed.primary_type.clone());
+    let message = TypedValue::Struct(parsed.message.clone());
+    assert_value(id, &parsed, &primary, &[], &message, &view["message"]);
+}
+
+/// A parsed value of a type against the view's JSON for it (`getPayload`'s
+/// forms).
+fn assert_value(
+    id: &str,
+    parsed: &ParsedTypedData,
+    base: &TypedBase,
+    dims: &[Option<u64>],
+    value: &TypedValue,
+    shown: &Value,
+) {
+    if let Some((_, inner)) = dims.split_last() {
+        let TypedValue::Array(items) = value else {
+            panic!("{id}: an array")
+        };
+        let shown = shown.as_array().unwrap();
+        assert_eq!(items.len(), shown.len(), "{id}");
+        for (item, shown) in items.iter().zip(shown) {
+            assert_value(id, parsed, base, inner, item, shown);
+        }
+        return;
+    }
+    match (base, value) {
+        (TypedBase::Uint(_), TypedValue::Uint(n)) => {
+            assert_eq!(shown.as_str().unwrap(), n.to_decimal(), "{id}")
+        }
+        (
+            TypedBase::Int(_),
+            TypedValue::Int {
+                negative,
+                magnitude,
+            },
+        ) => {
+            let text = format!(
+                "{}{}",
+                if *negative { "-" } else { "" },
+                magnitude.to_decimal()
+            );
+            assert_eq!(shown.as_str().unwrap(), text, "{id}");
+        }
+        (TypedBase::FixedBytes(width), TypedValue::FixedBytes(bytes)) => {
+            assert_eq!(bytes.len(), *width, "{id}");
+            assert_eq!(shown.as_str().unwrap(), to_hex(bytes), "{id}")
+        }
+        (TypedBase::Bytes, TypedValue::Bytes(bytes)) => {
+            assert_eq!(shown.as_str().unwrap(), to_hex(bytes), "{id}")
+        }
+        (TypedBase::Address, TypedValue::Address(address)) => {
+            assert_eq!(shown.as_str().unwrap(), to_hex(address), "{id}")
+        }
+        (TypedBase::String, TypedValue::String(text)) => {
+            assert_eq!(shown.as_str().unwrap(), text, "{id}")
+        }
+        (TypedBase::Bool, TypedValue::Bool(flag)) => {
+            assert_eq!(shown.as_bool().unwrap(), *flag, "{id}")
+        }
+        (TypedBase::Struct(name), TypedValue::Struct(values)) => {
+            let fields = &parsed
+                .types
+                .iter()
+                .find(|t| &t.name == name)
+                .unwrap()
+                .fields;
+            let shown = shown.as_object().unwrap();
+            assert_eq!(fields.len(), values.len(), "{id}");
+            assert_eq!(fields.len(), shown.len(), "{id}");
+            for (field, item) in fields.iter().zip(values) {
+                assert_value(
+                    id,
+                    parsed,
+                    &field.base,
+                    &field.dims,
+                    item,
+                    &shown[&field.name],
+                );
+            }
+        }
+        other => panic!("{id}: a value of another type: {other:?}"),
+    }
+}
 
 /// Checks the view of a case the core accepts (#88, test 1): it is the
 /// reference's `getPayload`, with `primaryType` as `primary_type`; its own
@@ -203,6 +329,10 @@ fn typed_data() {
                 signed.is_err(),
                 "{id}: expected a rejection, the core signed it"
             );
+            assert!(
+                typed_data_parse(domain, types, message).is_err(),
+                "{id}: the parse accepted what the hash refuses"
+            );
             continue;
         }
         let signature = signed.unwrap_or_else(|e| panic!("{id}: {e}"));
@@ -223,6 +353,7 @@ fn typed_data() {
             max_len: UNBOUNDED,
         };
         let view = check_view(id, data, &request, &case["result"]);
+        check_parse(id, data, &hash, &view);
         // Without parameters: never a match.
         assert_eq!(view["named_type"], "unknown", "{id}");
         let has_chain = domain.get("chainId").is_some_and(|c| !c.is_null());
