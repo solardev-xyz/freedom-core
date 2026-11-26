@@ -29,13 +29,17 @@
 //! peak the load reached is measured, not the vault import's or the start's.
 //! Where that file can't be written, `VmRSS` is sampled as the load runs.
 //!
-//! **Heavy, `#[ignore]`d:** the 50 MiB publish in a release build (the hooks
-//! drop out of optimized builds, so it runs with the shipped bounds), and a
-//! stalled upload at the real 60 s idle bound:
+//! **Heavy, `#[ignore]`d:** a stalled upload at D13's real 60 s idle
+//! bound, no hook shortening it:
 //!
 //! ```sh
-//! cargo test -p freedom-cored --all-features --test swarm_gates -- --ignored --nocapture --test-threads 1
+//! cargo test -p freedom-cored --features testhooks --test swarm_gates -- --ignored --nocapture
 //! ```
+//!
+//! Every test here needs the test hooks (`test.swarm_world` and the swarm
+//! thread's hooks), which build only into debug and test builds, so the
+//! figures are a debug build's. The 50 MiB publish takes under 2 s, so it
+//! runs in CI whole.
 
 // The gates print what they measure.
 #![allow(
@@ -57,7 +61,6 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use swarm_world::{Main, WINDOW, logic, page};
 
-const KIB: u64 = 1 << 10;
 const MIB: usize = 1 << 20;
 /// The test clock's `Date.now()`.
 const CLOCK: u64 = 1_767_225_600_123;
@@ -67,9 +70,6 @@ const POOL: usize = 64 * MIB;
 
 /// One usable batch, as the node lists it.
 const STAMPS: &str = r#"{"stamps":[{"batchID":"a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1","utilization":0,"usable":true,"label":"freedom","depth":22,"amount":"100000000000","bucketDepth":16,"blockNumber":1000,"immutableFlag":true,"exists":true,"batchTTL":864000}]}"#;
-
-/// The node's reference for an upload it took.
-const REFERENCE: &str = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
 
 fn b64(bytes: &[u8]) -> String {
     use base64::Engine as _;
@@ -198,8 +198,6 @@ impl Asked {
 enum Reply {
     /// `{ result }` at once.
     Whole(Value),
-    /// `{ error }` at once.
-    Refuse(Value),
     /// A streamed reply: its head, then `body` within the core's credit,
     /// then its end.
     Stream { head: Value, body: Vec<u8> },
@@ -312,6 +310,9 @@ struct Rig {
     sampled: Option<u64>,
     /// A fragmented message being read: its declared length and its bytes.
     partial: Option<(usize, Vec<u8>)>,
+    /// Main stops sending each part here, and never ends it (a stalled
+    /// read of the picked file).
+    stall_parts_at: Option<usize>,
 }
 
 impl Rig {
@@ -337,6 +338,7 @@ impl Rig {
             mining: None,
             sampled: None,
             partial: None,
+            stall_parts_at: None,
         }
     }
 
@@ -505,7 +507,6 @@ impl Rig {
                 }
             }
             Wire::Stream { kind, id, rest } => self.body_frame(kind, id, &rest),
-            other => panic!("an unexpected frame: {other:?}"),
         }
         true
     }
@@ -601,7 +602,6 @@ impl Rig {
         let id = asked.id;
         match reply {
             Reply::Whole(result) => self.send_answer(id, result),
-            Reply::Refuse(error) => self.main.refuse(id, error),
             Reply::Stream { head, body } => {
                 self.send_answer(id, head);
                 self.open.insert(id, Open::Streaming);
@@ -626,7 +626,7 @@ impl Rig {
                         sent: 0,
                         credit: 0,
                         name,
-                        stall_at: None,
+                        stall_at: self.stall_parts_at,
                     },
                 );
             }
@@ -829,21 +829,6 @@ fn grown(rig: &mut Rig, base: &Option<Baseline>) -> Option<(u64, u64, &'static s
 // ---------------------------------------------------------------------------
 // The 50 MiB publish.
 
-/// `publishFiles` of `n` files of `size` bytes, each a part.
-fn files_request(n: usize, size: usize) -> String {
-    let files: Vec<String> = (0..n)
-        .map(|k| {
-            format!(
-                r#"{{"object":[["path",{{"string":"files/{k:03}.bin"}}],["bytes",{{"bytes":{size},"kind":"Uint8Array","part":{k}}}]]}}"#
-            )
-        })
-        .collect();
-    format!(
-        r#"{{"method":{{"string":"swarm_publishFiles"}},"params":{{"object":[["files",{{"array":[{}]}}]]}},"approval":"user"}}"#,
-        files.join(",")
-    )
-}
-
 /// The vectors' `publish-files-100-files-50mib`: its request, its parts and
 /// the reference the node gave (SHA-256 of the tar it took).
 fn fifty_mib_case() -> (String, Vec<Vec<u8>>, String) {
@@ -871,10 +856,10 @@ fn fifty_mib_case() -> (String, Vec<Vec<u8>>, String) {
     (request, parts, reference)
 }
 
-/// Main for an upload: ready, live, one usable batch, each part from
-/// `parts` (by the request it is for and its number), and an upload's
-/// body answered with the SHA-256 of what came as its reference.
-fn uploads(parts: BTreeMap<(u64, u32), Vec<u8>>, fallback: Option<Vec<Vec<u8>>>) -> Handler {
+/// Main for an upload: ready, live, one usable batch, part `k` from
+/// `parts`, and an upload's body answered with the SHA-256 of what came as
+/// its reference.
+fn uploads(parts: Option<Vec<Vec<u8>>>) -> Handler {
     Box::new(move |asked: &Asked| match asked.method.as_str() {
         "shell.swarm_ready" => Reply::Whole(json!({ "ok": true })),
         "approval.recheck" => Reply::Whole(json!({ "live": true, "agent": false })),
@@ -899,11 +884,10 @@ fn uploads(parts: BTreeMap<(u64, u32), Vec<u8>>, fallback: Option<Vec<Vec<u8>>>)
             let parent = asked.parent().unwrap();
             let k = u32::try_from(asked.params["part"].as_u64().unwrap()).unwrap();
             let bytes = parts
-                .get(&(parent, k))
-                .cloned()
-                .or_else(|| fallback.as_ref().map(|all| all[k as usize].clone()))
+                .as_ref()
+                .and_then(|all| all.get(k as usize))
                 .unwrap_or_else(|| panic!("no part {k} for {parent}"));
-            Reply::Part(bytes)
+            Reply::Part(bytes.clone())
         }
         "shell.prefetch" => Reply::Ignore,
         other => panic!("the thread asked {other}: {:?}", asked.params),
@@ -924,7 +908,7 @@ fn publish_measured(
     Duration,
     Option<(u64, u64, &'static str)>,
 ) {
-    rig.handler = uploads(BTreeMap::new(), Some(parts));
+    rig.handler = uploads(Some(parts));
     let base = baseline(rig);
     let start = Instant::now();
     let id = rig.request(SITE, request);
@@ -945,7 +929,7 @@ fn publish_measured(
 /// connected, the clock set.
 fn rig_with(env: &[(&str, &str)], sites: &[&str]) -> Rig {
     let main = swarm_world::main_with(&["swarm"], env);
-    let mut rig = Rig::new(main, uploads(BTreeMap::new(), None));
+    let mut rig = Rig::new(main, uploads(None));
     rig.world(json!({ "reset": true, "clock": CLOCK, "grants": grants(sites) }));
     rig
 }
@@ -1300,7 +1284,7 @@ fn eight_dense_1_mib_stamps_replies_stay_within_their_charges() {
     let all: Vec<&str> = sites.iter().map(String::as_str).collect();
     let mut rig = rig_with(&[], &all);
     // Main holds each `/stamps` call until all eight are out.
-    let mut inner = uploads(BTreeMap::new(), None);
+    let mut inner = uploads(None);
     rig.handler = Box::new(move |asked: &Asked| {
         if asked.form() == "stamps" {
             Reply::Hold
@@ -1430,7 +1414,6 @@ fn soc_case() -> SocCase {
 /// `app.example` holds app-scoped index 0, exclusively; `other.example`
 /// index 1. A raw SOC from `app.example` at its index.
 const GATE_CASE: &str = "write-soc-app-scoped-other-site-other-index";
-const SITE_B: &str = "https://other.example";
 
 /// Main for a raw SOC: ready, live, one usable batch, and the SOC's upload
 /// answered with its own address.
@@ -1639,12 +1622,7 @@ fn a_cancel_at_each_stage_leaves_nothing_open_signed_uploaded_or_held() {
         Scenario {
             name: "publishData of a 300,000-byte part",
             world: world.clone(),
-            handler: || {
-                uploads(
-                    BTreeMap::new(),
-                    Some(vec![PART.with(|p| p.borrow().clone())]),
-                )
-            },
+            handler: || uploads(Some(vec![PART.with(|p| p.borrow().clone())])),
             send: Box::new(|rig: &mut Rig| {
                 rig.request(
                     SITE,
@@ -1674,12 +1652,7 @@ fn a_cancel_at_each_stage_leaves_nothing_open_signed_uploaded_or_held() {
         Scenario {
             name: "main's swarm.publish of a picked file",
             world: world.clone(),
-            handler: || {
-                uploads(
-                    BTreeMap::new(),
-                    Some(vec![PART.with(|p| p.borrow().clone())]),
-                )
-            },
+            handler: || uploads(Some(vec![PART.with(|p| p.borrow().clone())])),
             send: Box::new(|rig: &mut Rig| {
                 rig.own(
                     "swarm.publish",
@@ -2123,4 +2096,944 @@ fn gate_the_change_waits_through_swarm_identities_and_swarm_manifest() {
     );
     assert_eq!(gate.signed() - signed, 1);
     gate.rig.settled();
+}
+
+// ---------------------------------------------------------------------------
+// `vault.lock` under the swarm thread's load.
+
+/// Percentiles of `samples`, in ms: p50, p99 and the largest.
+fn spread(samples: &[Duration]) -> (f64, f64, f64) {
+    let mut v: Vec<f64> = samples.iter().map(|d| d.as_secs_f64() * 1e3).collect();
+    v.sort_by(f64::total_cmp);
+    let at = |p: f64| v[((v.len() as f64 * p).ceil() as usize).clamp(1, v.len()) - 1];
+    (at(0.5), at(0.99), at(1.0))
+}
+
+/// `vault.lock` every 20 ms while two 50 MiB uploads stream (the vectors'
+/// 100 files each, from two sites) and the lane mines a GSOC signer (20 ms
+/// before each of its 120 batches): answered within 0009's gate, 50 ms at
+/// p99, counting only the locks sent while all three ran.
+#[test]
+fn vault_lock_is_answered_within_0009s_gate_during_two_uploads_and_a_mining_job() {
+    const B: &str = "https://b.example";
+    let (request, parts, _) = fifty_mib_case();
+    let main = swarm_world::main_with(
+        &["swarm"],
+        &[("FREEDOM_CORED_TEST_SWARM_MINE_DELAY_MS", "20")],
+    );
+    let mut rig = Rig::new(main, uploads(None));
+    rig.world(json!({ "reset": true, "clock": CLOCK, "grants": grants(&[SITE, B]) }));
+    let mut upload = uploads(Some(parts));
+    let mut subscribe = subscribe_node();
+    rig.handler = Box::new(move |asked: &Asked| {
+        if asked.method.starts_with("shell.swarm_subscribe")
+            || asked.method == "shell.swarm_unsubscribe"
+        {
+            subscribe(asked)
+        } else {
+            upload(asked)
+        }
+    });
+    let start = Instant::now();
+    let search = rig.request(
+        SITE,
+        r#"{"method":{"string":"swarm_subscribe"},"params":{"object":[["kind",{"string":"gsoc"}],["topic",{"string":"long-608"}]]}}"#,
+    );
+    let ids = [rig.request(SITE, &request), rig.request(B, &request)];
+    // Until both bodies stream and the search runs.
+    rig.until(Duration::from_secs(30), "the bodies", |rig| {
+        rig.bodies.len() == 2 && rig.bodies.values().all(|b| b.len > 0)
+    });
+    let mining = |rig: &Rig| {
+        !rig.asked
+            .iter()
+            .any(|(a, _)| a.method == "approval.recheck" && a.parent() == Some(search))
+    };
+    let running = |rig: &Rig| mining(rig) && ids.iter().all(|id| !rig.answered(*id));
+    assert!(running(&rig), "the search and both uploads run");
+    let window = Instant::now();
+    let mut locks = Vec::new();
+    let mut next = window;
+    while window.elapsed() < Duration::from_secs(2) && running(&rig) {
+        if Instant::now() >= next {
+            let id = rig.own("vault.lock", &json!({}), "chrome");
+            locks.push((id, Instant::now()));
+            next += Duration::from_millis(20);
+        }
+        rig.step(Duration::from_millis(1));
+    }
+    let window = window.elapsed();
+    let moved: usize = rig.bodies.values().map(|b| b.len).sum();
+    assert!(
+        locks.len() >= 25,
+        "{} locks while all three ran",
+        locks.len()
+    );
+    rig.until(Duration::from_secs(10), "the last locks", |rig| {
+        locks.iter().all(|(id, _)| rig.answered(*id))
+    });
+    let samples: Vec<Duration> = locks
+        .iter()
+        .map(|(id, sent)| {
+            let (answer, arrived) = &rig.answers[id];
+            assert_eq!(answer["result"], json!({}), "{answer}");
+            *arrived - *sent
+        })
+        .collect();
+    let (p50, p99, max) = spread(&samples);
+    rig.until(
+        Duration::from_secs(120),
+        "the uploads and the search",
+        |rig| ids.iter().all(|id| rig.answered(*id)) && rig.answered(search) && rig.open.is_empty(),
+    );
+    for id in ids {
+        assert!(
+            rig.answer(id)["result"]["result_typed"].is_object(),
+            "{}",
+            rig.answer(id)
+        );
+    }
+    assert!(
+        rig.answer(search)["result"]["result_typed"].is_object(),
+        "{}",
+        rig.answer(search)
+    );
+    rig.settled();
+    eprintln!(
+        "[vault] vault.lock while two uploads streamed ({:.1} MiB of bodies by the window's end) \
+         and the lane mined, for {window:?}: n {} p50 {p50:.1} ms p99 {p99:.1} ms max {max:.1} ms; \
+         all done in {:?}",
+        moved as f64 / MIB as f64,
+        samples.len(),
+        start.elapsed()
+    );
+    assert!(p99 <= 50.0, "0009's gate: p99 {p99:.1} ms");
+}
+
+// ---------------------------------------------------------------------------
+// Malformed replies from main, and a stalled node.
+
+/// The request a malformed reply's case drives the core to.
+#[derive(Clone, Copy)]
+enum Drive {
+    /// `readChunk`: its readiness, then its chunk.
+    ReadChunk,
+    /// The latest feed entry: its readiness, then its streamed reply.
+    Latest,
+    /// `publishData` of a 300,000-byte part: readiness, the batch, the
+    /// live facts, the upload, its part.
+    Publish,
+    /// A GSOC subscription by `chat` (one batch): readiness, the search,
+    /// the live facts, the open; the live facts refused after the open, so
+    /// the core closes it.
+    Subscribe,
+    /// `swarm.manifest`'s check: main's fetch.
+    Manifest,
+}
+
+/// What main sends in place of its answer to the ask: a response's members
+/// (beside `type` and `id`), or frames made for the ask's ID.
+enum Bad {
+    Members(Value),
+    Frames(fn(u64) -> Vec<Vec<u8>>),
+}
+
+fn read_chunk_request() -> String {
+    format!(
+        r#"{{"method":{{"string":"swarm_readChunk"}},"params":{{"object":[["reference",{{"string":"{}"}}]]}}}}"#,
+        "f9335c1f06d729ae3e725352a445fa01a1e9dc20e937f0ef19ab199b1fb2827b"
+    )
+}
+
+/// An honest main for `drive`, which holds the first ask named `target`.
+fn driving(drive: Drive, target: &'static str) -> Handler {
+    let topic = [0x42; 32];
+    let mut inner: Handler = match drive {
+        Drive::ReadChunk | Drive::Latest => {
+            let mut paths = BTreeMap::new();
+            paths.insert(
+                format!("/feeds/{}/{}", "11".repeat(20), hex(&topic)),
+                Served::Stream(
+                    head(
+                        200,
+                        &[
+                            ("content-length", "5".to_owned()),
+                            ("swarm-feed-index", format!("{:016x}", 0)),
+                            ("swarm-feed-index-next", format!("{:016x}", 1)),
+                        ],
+                    ),
+                    std::rc::Rc::new(b"hello".to_vec()),
+                ),
+            );
+            reads_node(paths)
+        }
+        Drive::Publish => uploads(Some(vec![vec![7; 300_000]])),
+        Drive::Subscribe => {
+            let mut rechecks = 0;
+            Box::new(move |asked: &Asked| match asked.method.as_str() {
+                // The second recheck, after the open, refuses: the core
+                // closes the subscription.
+                "approval.recheck" => {
+                    rechecks += 1;
+                    Reply::Whole(json!({ "live": rechecks == 1, "agent": false }))
+                }
+                _ => subscribe_node()(asked),
+            })
+        }
+        Drive::Manifest => manifest_node(),
+    };
+    let mut held = false;
+    Box::new(move |asked: &Asked| {
+        if !held && asked.name() == target {
+            held = true;
+            return Reply::Hold;
+        }
+        inner(asked)
+    })
+}
+
+fn send_drive(rig: &mut Rig, drive: Drive) {
+    match drive {
+        Drive::ReadChunk => {
+            rig.request(SITE, &read_chunk_request());
+        }
+        Drive::Latest => {
+            rig.request(SITE, &read_feed(&[0x42; 32], &[0x11; 20], None));
+        }
+        Drive::Publish => {
+            rig.request(
+                SITE,
+                r#"{"method":{"string":"swarm_publishData"},"params":{"object":[["data",{"bytes":300000,"kind":"Uint8Array","part":0}],["contentType",{"string":"application/octet-stream"}]]},"approval":"user"}"#,
+            );
+        }
+        Drive::Subscribe => {
+            rig.request(
+                SITE,
+                r#"{"method":{"string":"swarm_subscribe"},"params":{"object":[["kind",{"string":"gsoc"}],["topic",{"string":"chat"}]]}}"#,
+            );
+        }
+        Drive::Manifest => {
+            rig.own(
+                "swarm.manifest",
+                &json!({
+                    "op": "check", "key": { "string": BZZ_SITE },
+                    "url": { "string": format!("{BZZ_SITE}/index.html") },
+                    "eager": { "boolean": true },
+                }),
+                "shell",
+            );
+        }
+    }
+}
+
+/// A part's head, then `n` bytes of data in one frame.
+fn part_frames(id: u64, head: usize, n: usize) -> Vec<Vec<u8>> {
+    vec![
+        common::frame(&json!({ "type": "response", "id": id, "result": { "bytes": head } })),
+        stream_frame(KIND_DATA, id, &vec![7; n]),
+    ]
+}
+
+/// Main breaks the protocol at each of the swarm thread's asks, one way
+/// at a time, each on a fresh core: every one ends the connection (exit
+/// 76, a protocol error's category on stderr), as 0001 and 0009 make a
+/// malformed reply, D5.
+#[test]
+fn every_malformed_reply_from_main_ends_the_connection() {
+    let whole_ok = |members: Value| {
+        let mut reply = json!({ "status": 200, "status_text": "OK", "headers": [] });
+        for (k, v) in members.as_object().unwrap() {
+            reply[k] = v.clone();
+        }
+        reply
+    };
+    let cases: Vec<(&str, Drive, &str, Bad, &str)> = vec![
+        (
+            "a readiness of another type",
+            Drive::ReadChunk,
+            "shell.swarm_ready reachable",
+            Bad::Members(json!({ "result": { "ok": "yes" } })),
+            "swarm_reply",
+        ),
+        (
+            "a refusal without its reason",
+            Drive::ReadChunk,
+            "shell.swarm_ready reachable",
+            Bad::Members(json!({ "result": { "ok": false } })),
+            "swarm_reply",
+        ),
+        (
+            "a readiness with a reason",
+            Drive::ReadChunk,
+            "shell.swarm_ready reachable",
+            Bad::Members(json!({ "result": { "ok": true, "reason": "x" } })),
+            "swarm_reply",
+        ),
+        (
+            "a readiness that is an array",
+            Drive::ReadChunk,
+            "shell.swarm_ready reachable",
+            Bad::Members(json!({ "result": [true] })),
+            "swarm_reply",
+        ),
+        (
+            "a cancelled answer to an ask never cancelled",
+            Drive::ReadChunk,
+            "shell.swarm_ready reachable",
+            Bad::Members(json!({ "error": { "code": "cancelled", "message": "Cancelled" } })),
+            "swarm_reply",
+        ),
+        (
+            "an error of another code",
+            Drive::ReadChunk,
+            "shell.swarm_ready reachable",
+            Bad::Members(json!({ "error": { "code": "internal", "message": "no" } })),
+            "swarm_reply",
+        ),
+        (
+            "a whole reply without its body",
+            Drive::ReadChunk,
+            "shell.swarm_api chunk",
+            Bad::Members(json!({ "result": whole_ok(json!({})) })),
+            "swarm_reply",
+        ),
+        (
+            "base64 that doesn't decode",
+            Drive::ReadChunk,
+            "shell.swarm_api chunk",
+            Bad::Members(json!({ "result": whole_ok(json!({ "body_base64": "AQ" })) })),
+            "swarm_reply",
+        ),
+        (
+            "a status past 599",
+            Drive::ReadChunk,
+            "shell.swarm_api chunk",
+            Bad::Members(
+                json!({ "result": whole_ok(json!({ "status": 600, "body_base64": "" })) }),
+            ),
+            "swarm_reply",
+        ),
+        (
+            "a reason phrase that isn't a string",
+            Drive::ReadChunk,
+            "shell.swarm_api chunk",
+            Bad::Members(
+                json!({ "result": whole_ok(json!({ "status_text": 200, "body_base64": "" })) }),
+            ),
+            "swarm_reply",
+        ),
+        (
+            "a header of three members",
+            Drive::ReadChunk,
+            "shell.swarm_api chunk",
+            Bad::Members(
+                json!({ "result": whole_ok(json!({ "headers": [["a", "b", "c"]], "body_base64": "" })) }),
+            ),
+            "swarm_reply",
+        ),
+        (
+            "an unknown member",
+            Drive::ReadChunk,
+            "shell.swarm_api chunk",
+            Bad::Members(json!({ "result": whole_ok(json!({ "body_base64": "", "extra": 1 })) })),
+            "swarm_reply",
+        ),
+        (
+            "a failure outside the closed set",
+            Drive::ReadChunk,
+            "shell.swarm_api chunk",
+            Bad::Members(json!({ "result": { "failed": "nonsense" } })),
+            "swarm_reply",
+        ),
+        (
+            "a refusal of no grammar rule",
+            Drive::ReadChunk,
+            "shell.swarm_api chunk",
+            Bad::Members(
+                json!({ "error": { "code": "invalid_argument", "message": "no", "data": { "rule": "nonsense" } } }),
+            ),
+            "swarm_reply",
+        ),
+        (
+            "a chunk past its cap",
+            Drive::ReadChunk,
+            "shell.swarm_api chunk",
+            Bad::Members(json!({ "result": whole_ok(json!({ "body_base64": b64(&[0; 4202]) })) })),
+            "swarm_reply_bounds",
+        ),
+        (
+            "a streamed call answered whole with success",
+            Drive::Latest,
+            "shell.swarm_api feed_latest",
+            Bad::Members(json!({ "result": whole_ok(json!({ "body_base64": b64(b"hello") })) })),
+            "swarm_reply_bounds",
+        ),
+        (
+            "a streamed head with an unknown member",
+            Drive::Latest,
+            "shell.swarm_api feed_latest",
+            Bad::Members(json!({ "result": whole_ok(json!({ "extra": true })) })),
+            "swarm_reply",
+        ),
+        (
+            "a node body's data after its end",
+            Drive::Latest,
+            "shell.swarm_api feed_latest",
+            Bad::Frames(|id| {
+                vec![
+                    common::frame(&json!({ "type": "response", "id": id,
+                    "result": { "status": 200, "status_text": "OK", "headers": [] } })),
+                    stream_frame(KIND_END, id, b""),
+                    stream_frame(KIND_DATA, id, b"more"),
+                ]
+            }),
+            "stream_not_open",
+        ),
+        (
+            "a node body's abort that isn't JSON",
+            Drive::Latest,
+            "shell.swarm_api feed_latest",
+            Bad::Frames(|id| {
+                vec![
+                    common::frame(&json!({ "type": "response", "id": id,
+                    "result": { "status": 200, "status_text": "OK", "headers": [] } })),
+                    stream_frame(KIND_ABORT, id, b"not json"),
+                ]
+            }),
+            "abort_payload",
+        ),
+        (
+            "a part's head of another type",
+            Drive::Publish,
+            "shell.swarm_part",
+            Bad::Members(json!({ "result": { "bytes": "300000" } })),
+            "swarm_reply",
+        ),
+        (
+            "a part's head with an unknown member",
+            Drive::Publish,
+            "shell.swarm_part",
+            Bad::Members(json!({ "result": { "bytes": 300_000, "extra": 1 } })),
+            "swarm_reply",
+        ),
+        (
+            "a part longer than its head",
+            Drive::Publish,
+            "shell.swarm_part",
+            Bad::Frames(|id| {
+                let mut frames = part_frames(id, 10, 11);
+                frames.push(stream_frame(KIND_END, id, b""));
+                frames
+            }),
+            "swarm_part_length",
+        ),
+        (
+            "a part shorter than its head",
+            Drive::Publish,
+            "shell.swarm_part",
+            Bad::Frames(|id| {
+                let mut frames = part_frames(id, 300_000, 10);
+                frames.push(stream_frame(KIND_END, id, b""));
+                frames
+            }),
+            "swarm_part_length",
+        ),
+        (
+            "a part's abort with a code no part has",
+            Drive::Publish,
+            "shell.swarm_part",
+            Bad::Frames(|id| {
+                let mut frames = part_frames(id, 300_000, 10);
+                let abort = json!({ "code": "too_large", "message": "x" }).to_string();
+                frames.push(stream_frame(KIND_ABORT, id, abort.as_bytes()));
+                frames
+            }),
+            "abort_code",
+        ),
+        (
+            "live facts of another type",
+            Drive::Publish,
+            "approval.recheck",
+            Bad::Members(json!({ "result": { "live": "yes", "agent": false } })),
+            "swarm_reply",
+        ),
+        (
+            "live facts without custody",
+            Drive::Publish,
+            "approval.recheck",
+            Bad::Members(json!({ "result": { "live": true } })),
+            "swarm_reply",
+        ),
+        (
+            "an open's id that isn't a string",
+            Drive::Subscribe,
+            "shell.swarm_subscribe",
+            Bad::Members(json!({ "result": { "id": 5 } })),
+            "swarm_reply",
+        ),
+        (
+            "an open both opened and failed",
+            Drive::Subscribe,
+            "shell.swarm_subscribe",
+            Bad::Members(json!({ "result": { "id": "x", "failed": { "message": "no" } } })),
+            "swarm_reply",
+        ),
+        (
+            "an open's failure without its text",
+            Drive::Subscribe,
+            "shell.swarm_subscribe",
+            Bad::Members(json!({ "result": { "failed": { "reason": "x" } } })),
+            "swarm_reply",
+        ),
+        (
+            "a close's answer with a member",
+            Drive::Subscribe,
+            "shell.swarm_unsubscribe",
+            Bad::Members(json!({ "result": { "closed": true } })),
+            "swarm_reply",
+        ),
+        (
+            "a fetch without its body",
+            Drive::Manifest,
+            "shell.swarm_manifest",
+            Bad::Members(json!({ "result": { "status": 200 } })),
+            "swarm_reply",
+        ),
+        (
+            "a fetch past 8 KiB and a byte",
+            Drive::Manifest,
+            "shell.swarm_manifest",
+            Bad::Members(
+                json!({ "result": { "status": 200, "body_base64": b64(&[b' '; 8 * 1024 + 2]) } }),
+            ),
+            "swarm_reply",
+        ),
+        (
+            "a fetch failed: false",
+            Drive::Manifest,
+            "shell.swarm_manifest",
+            Bad::Members(json!({ "result": { "failed": false } })),
+            "swarm_reply",
+        ),
+    ];
+    let start = Instant::now();
+    let mut report = Vec::new();
+    for (what, drive, target, bad, want) in cases {
+        let mut rig = rig_with(&[], &[SITE, BZZ_SITE]);
+        rig.handler = driving(drive, target);
+        send_drive(&mut rig, drive);
+        rig.until(Duration::from_secs(30), what, |rig| {
+            rig.open.values().any(|o| *o == Open::Held)
+        });
+        let id = *rig.open.iter().find(|(_, o)| **o == Open::Held).unwrap().0;
+        match bad {
+            Bad::Members(members) => {
+                let mut message = json!({ "type": "response", "id": id });
+                for (k, v) in members.as_object().unwrap() {
+                    message[k] = v.clone();
+                }
+                rig.main.core.send(&message);
+            }
+            Bad::Frames(frames) => {
+                for frame in frames(id) {
+                    rig.main.core.send_raw(&frame);
+                }
+            }
+        }
+        // The core ends (its stdout read on the harness's thread meanwhile).
+        let code = rig.main.core.exit_code(Duration::from_secs(10));
+        assert_eq!(code, 76, "{what}");
+        let stderr = rig.main.core.stderr();
+        let category = stderr
+            .split(r#""category":""#)
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap_or("")
+            .to_owned();
+        assert!(!category.is_empty(), "{what}: {stderr}");
+        assert_eq!(category, want, "{what}");
+        report.push(format!("{what} ({target}): {category}"));
+    }
+    eprintln!(
+        "[malformed] {} replies, each ending the connection, in {:?}:\n  {}",
+        report.len(),
+        start.elapsed(),
+        report.join("\n  ")
+    );
+}
+
+/// A stalled upload of a 600,000-byte part: its answer, and how long after
+/// main's last frame for it the core answered.
+fn stalled_upload(rig: &mut Rig) -> (Value, Duration, Vec<u64>) {
+    rig.fresh();
+    let id = rig.request(
+        SITE,
+        r#"{"method":{"string":"swarm_publishData"},"params":{"object":[["data",{"bytes":600000,"kind":"Uint8Array","part":0}],["contentType",{"string":"application/octet-stream"}]]},"approval":"user"}"#,
+    );
+    rig.until(Duration::from_secs(120), "the stalled upload", |rig| {
+        rig.answered(id) && rig.open.is_empty() && rig.out.is_empty() && rig.bodies.is_empty()
+    });
+    let idle = rig.answers[&id].1 - rig.progress.unwrap();
+    let cancels = rig.cancels.clone();
+    (rig.answer(id).clone(), idle, cancels)
+}
+
+/// What an upload's call and part were, by their forms.
+fn asks_of(rig: &Rig, name: &str) -> Vec<u64> {
+    rig.asked
+        .iter()
+        .filter(|(a, _)| a.name() == name)
+        .map(|(a, _)| a.id)
+        .collect()
+}
+
+/// A stalled node, at the idle bound (1 s here, D13's 60 s shortened by
+/// its hook): an upload whose picked file stops mid-way, and one whose node
+/// stops taking its body, each end at the bound, the part and the call
+/// cancelled and the page answered with an error; and main's
+/// `swarm.publish` whose `/stamps` reply never comes ends at the whole
+/// reply's bound (300 s, here 1 s). Nothing is held after.
+#[test]
+fn a_stalled_node_ends_an_upload_at_the_idle_bound() {
+    let mut rig = rig_with(
+        &[
+            ("FREEDOM_CORED_TEST_SWARM_IDLE_MS", "1000"),
+            ("FREEDOM_CORED_TEST_SWARM_WHOLE_MS", "1000"),
+        ],
+        &[SITE],
+    );
+    let part = vec![7u8; 600_000];
+    rig.handler = uploads(Some(vec![part.clone()]));
+    // The picked file stops after 200,000 bytes.
+    rig.stall_parts_at = Some(200_000);
+    let (answer, idle, cancels) = stalled_upload(&mut rig);
+    let report = format!("the part stalled: answered {idle:?} after main's last frame");
+    assert!(answer["result"]["error_typed"].is_object(), "{answer}");
+    assert!(
+        cancels.contains(&asks_of(&rig, "shell.swarm_part")[0]),
+        "the part cancelled"
+    );
+    assert!(
+        cancels.contains(&asks_of(&rig, "shell.swarm_api bzz_file")[0]),
+        "the call cancelled"
+    );
+    assert!(
+        idle >= Duration::from_millis(990) && idle < Duration::from_secs(4),
+        "{report}"
+    );
+    rig.settled();
+
+    // The node stops taking the body: main credits none of it.
+    rig.stall_parts_at = None;
+    rig.credit_bodies = false;
+    let (answer, idle2, cancels) = stalled_upload(&mut rig);
+    rig.credit_bodies = true;
+    assert!(answer["result"]["error_typed"].is_object(), "{answer}");
+    assert!(
+        cancels.contains(&asks_of(&rig, "shell.swarm_api bzz_file")[0]),
+        "the call cancelled"
+    );
+    let body = rig.done_bodies.values().next().unwrap();
+    assert!(
+        body.len as u64 <= WINDOW,
+        "the body held to its window: {}",
+        body.len
+    );
+    assert_eq!(body.terminal.as_deref(), Some("cancelled"));
+    assert!(
+        idle2 >= Duration::from_millis(990) && idle2 < Duration::from_secs(4),
+        "{idle2:?}"
+    );
+    rig.settled();
+
+    // main's swarm.publish: its `/stamps` call never answered.
+    rig.fresh();
+    let mut inner = uploads(Some(vec![part]));
+    rig.handler = Box::new(move |asked: &Asked| {
+        if asked.form() == "stamps" {
+            Reply::Hold
+        } else {
+            inner(asked)
+        }
+    });
+    let start = Instant::now();
+    let id = rig.own(
+        "swarm.publish",
+        &json!({
+            "kind": "file", "parts": [{ "bytes": 600_000, "part": 0 }], "name": "notes.txt",
+            "pin": true, "deferred": true, "history": { "type": "file", "name": "notes.txt" },
+        }),
+        "shell",
+    );
+    rig.until(Duration::from_secs(30), "the publish", |rig| {
+        rig.answered(id) && rig.open.is_empty() && rig.out.is_empty() && rig.bodies.is_empty()
+    });
+    let whole = rig.answers[&id].1 - start;
+    let answer = rig.answer(id).clone();
+    assert!(answer["result"]["error_typed"].is_object(), "{answer}");
+    assert!(
+        cancels_of(&rig, "shell.swarm_api stamps"),
+        "the call cancelled at its bound"
+    );
+    assert!(
+        whole >= Duration::from_millis(990) && whole < Duration::from_secs(4),
+        "{whole:?}"
+    );
+    rig.settled();
+    eprintln!(
+        "[stalled] at the 1 s idle bound: {report}; the body uncredited: answered {idle2:?} after; \
+         swarm.publish's unanswered /stamps: answered {whole:?} after it was sent"
+    );
+}
+
+fn cancels_of(rig: &Rig, name: &str) -> bool {
+    asks_of(rig, name).iter().any(|id| rig.cancels.contains(id))
+}
+
+/// D13's real bound, no hook: a picked file that stops mid-way ends its
+/// upload 60 s after main's last frame (a minute: run by hand).
+#[test]
+#[ignore]
+fn a_stalled_node_ends_an_upload_after_60_s_idle() {
+    let mut rig = rig_with(&[], &[SITE]);
+    rig.handler = uploads(Some(vec![vec![7u8; 600_000]]));
+    rig.stall_parts_at = Some(200_000);
+    let (answer, idle, _) = stalled_upload(&mut rig);
+    eprintln!("[stalled] at the shipped bound: answered {idle:?} after main's last frame");
+    assert!(answer["result"]["error_typed"].is_object(), "{answer}");
+    assert!(
+        idle >= Duration::from_secs(60) && idle < Duration::from_secs(63),
+        "{idle:?}"
+    );
+    rig.settled();
+}
+
+// ---------------------------------------------------------------------------
+// Coverage: every case played or named.
+
+/// Cases no pipe test plays, each with why and where the core's own answer
+/// is pinned instead.
+const NAMED: &[(&str, &str)] = &[
+    ("not-connected-unsubscribe-without-page", UNSUBSCRIBE),
+    ("unsubscribe-params-null", UNSUBSCRIBE),
+    ("unsubscribe-id-missing", UNSUBSCRIBE),
+    ("unsubscribe-id-empty", UNSUBSCRIBE),
+    ("unsubscribe-id-number", UNSUBSCRIBE),
+    ("unsubscribe-unknown", UNSUBSCRIBE),
+    ("unsubscribe-without-page-connected", UNSUBSCRIBE),
+];
+
+const UNSUBSCRIBE: &str = "swarm_unsubscribe is main's own (D5): main closes the subscription it \
+    opened, and the core answers the method invalid_argument (tests/swarm.rs, \
+    the_door_answers_before_any_machine_runs)";
+
+/// The string literals of the constant `name` in `source`, each with its
+/// bracket depth and whether it is the first in its tuple.
+fn literals(source: &str, name: &str) -> Vec<(String, usize, bool)> {
+    let at = source
+        .find(&format!("const {name}:"))
+        .unwrap_or_else(|| panic!("no const {name}"));
+    let rest = &source[at..];
+    let rest = &rest[rest.find('=').unwrap() + 1..];
+    let mut out = Vec::new();
+    let (mut depth, mut first) = (0usize, true);
+    let mut chars = rest.chars();
+    let mut started = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '[' | '(' => {
+                depth += 1;
+                started = true;
+                first = true;
+            }
+            ']' | ')' => {
+                depth -= 1;
+                if started && depth == 0 {
+                    break;
+                }
+            }
+            '"' => {
+                let mut text = String::new();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => break,
+                        '\\' => {
+                            let _ = chars.next();
+                        }
+                        c => text.push(c),
+                    }
+                }
+                out.push((text, depth, first));
+                first = false;
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A `[&str; N]` constant's strings.
+fn strings(source: &str, name: &str) -> Vec<String> {
+    literals(source, name)
+        .into_iter()
+        .map(|(s, _, _)| s)
+        .collect()
+}
+
+/// A `&[(&str, &str)]` constant's first strings (the cases' ids).
+fn left_out(source: &str, name: &str) -> Vec<String> {
+    literals(source, name)
+        .into_iter()
+        .filter(|(_, depth, first)| *depth == 2 && *first)
+        .map(|(s, _, _)| s)
+        .collect()
+}
+
+/// The `(name, count)` pairs a test asserts after `marker`.
+fn asserted_counts(source: &str, marker: &str) -> BTreeMap<String, usize> {
+    let at = source.find(marker).unwrap_or_else(|| panic!("no {marker}"));
+    let rest = &source[at..];
+    let rest = &rest[rest.find("assert_eq!(").unwrap()..];
+    let rest = &rest[..rest.find(");").unwrap()];
+    let mut counts = BTreeMap::new();
+    for pair in rest.split('(').skip(2) {
+        let mut it = pair.split(',');
+        let (Some(name), Some(n)) = (it.next(), it.next()) else {
+            continue;
+        };
+        let name = name.trim().trim_matches('"');
+        let n: usize = n
+            .trim_end_matches(|c: char| c == ')' || c == ']' || c.is_whitespace())
+            .trim()
+            .parse()
+            .unwrap();
+        counts.insert(name.to_owned(), n);
+    }
+    counts
+}
+
+/// Every `methods`, `stores` and `shell` case of `vectors/swarm.json` is
+/// one a pipe test plays, by that test's own selection (its constants read
+/// from its source, so the two can't drift), or is named, by a pipe test's
+/// left-out list or [`NAMED`] here, with why. A case nothing plays or names
+/// fails, and so does a name for a case that isn't there.
+#[test]
+fn every_case_is_played_through_the_pipe_or_named() {
+    let swarm = include_str!("swarm.rs");
+    let writes = include_str!("swarm_writes.rs");
+    let shell = include_str!("swarm_shell.rs");
+    let played = strings(swarm, "PLAYED");
+    let groups = [strings(writes, "PUBLISH"), strings(writes, "FEEDS")];
+    let mut named: BTreeMap<String, &str> = BTreeMap::new();
+    for id in left_out(swarm, "LEFT_OUT") {
+        named.insert(id, "tests/swarm.rs");
+    }
+    for id in left_out(writes, "LEFT_OUT") {
+        named.insert(id, "tests/swarm_writes.rs");
+    }
+    for (id, why) in NAMED {
+        assert!(!why.is_empty());
+        named.insert((*id).to_owned(), "tests/swarm_gates.rs");
+    }
+    assert!(
+        !played.is_empty() && groups.iter().all(|g| !g.is_empty()),
+        "{played:?} {groups:?}"
+    );
+
+    let text = logic::text_of("swarm.json");
+    let index = fc_json::index::Index::new(&text).unwrap();
+    let mut seen = BTreeSet::new();
+    let mut unplayed = Vec::new();
+    let mut by: BTreeMap<&str, usize> = BTreeMap::new();
+    for case in logic::get(index.root(), "methods").children() {
+        let id = logic::string(logic::get(case, "id"));
+        seen.insert(id.clone());
+        if let Some(test) = named.get(&id) {
+            *by.entry(test).or_default() += 0;
+            continue;
+        }
+        let steps: Vec<_> = logic::get(case, "steps").children().collect();
+        let methods: Vec<Option<String>> = steps
+            .iter()
+            .map(|s| s.get("method").map(logic::string))
+            .collect();
+        let in_played = |m: &Option<String>| m.as_ref().is_some_and(|m| played.contains(m));
+        // tests/swarm.rs: a case with one of its methods (main's own
+        // unsubscribe and an upload status's uploads beside it), or the
+        // method dispatch's own cases.
+        let dispatch = id.starts_with("method-")
+            && steps.iter().all(|s| {
+                s.get("page")
+                    .is_some_and(|p| p.kind() == fc_json::index::Kind::False)
+            })
+            && !methods.iter().any(in_played);
+        let status = methods
+            .iter()
+            .any(|m| m.as_deref() == Some("swarm_getUploadStatus"));
+        let others = methods.iter().any(|m| {
+            m.as_ref().is_some_and(|m| {
+                !played.contains(m)
+                    && m != "swarm_unsubscribe"
+                    && !(status && m == "swarm_publishFiles")
+            })
+        });
+        let by_swarm = (methods.iter().any(in_played) && !others) || dispatch;
+        // tests/swarm_writes.rs: every method of the case in one group.
+        let by_writes = groups.iter().any(|group| {
+            methods
+                .iter()
+                .all(|m| m.as_ref().is_some_and(|m| group.contains(m)))
+        });
+        if by_swarm {
+            *by.entry("tests/swarm.rs").or_default() += 1;
+        }
+        if by_writes {
+            *by.entry("tests/swarm_writes.rs").or_default() += 1;
+        }
+        if !by_swarm && !by_writes {
+            unplayed.push(format!("{id} {methods:?}"));
+        }
+    }
+    assert!(
+        unplayed.is_empty(),
+        "methods cases no pipe test plays or names:\n  {}",
+        unplayed.join("\n  ")
+    );
+    let stale: Vec<&String> = named.keys().filter(|id| !seen.contains(*id)).collect();
+    assert!(
+        stale.is_empty(),
+        "named cases that aren't in the vectors: {stale:?}"
+    );
+
+    // tests/swarm_shell.rs plays the whole `stores` and `shell` sections
+    // and counts them by kind and method: the counts it asserts are the
+    // sections'.
+    let count = |section: &str, key: &str| {
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for case in logic::get(index.root(), section).children() {
+            *counts
+                .entry(logic::string(logic::get(case, key)))
+                .or_default() += 1;
+        }
+        counts
+    };
+    let stores = count("stores", "kind");
+    let shells = count("shell", "method");
+    assert_eq!(
+        stores,
+        asserted_counts(shell, "fn every_stores_case_through_the_pipe")
+    );
+    assert_eq!(
+        shells,
+        asserted_counts(shell, "fn every_shell_case_through_the_pipe")
+    );
+    eprintln!(
+        "[coverage] {} methods cases: {} by tests/swarm.rs, {} by tests/swarm_writes.rs, {} named \
+         ({} here); stores {stores:?} and shell {shells:?} by tests/swarm_shell.rs",
+        seen.len(),
+        by.get("tests/swarm.rs").copied().unwrap_or(0),
+        by.get("tests/swarm_writes.rs").copied().unwrap_or(0),
+        named.len(),
+        NAMED.len(),
+    );
 }
