@@ -441,7 +441,7 @@ const SWARM_FORMATS = {
     + 'sanitizeV2OriginEntry does) or a manifest file that doesn\'t parse, beside the same .bak copy; for legacy-dates, the legacy file with each '
     + 'timestamp the core doesn\'t take removed.',
   shell: 'main\'s own methods (design 0015, Methods main calls; SWM-4\'s D5, D7 and D12), each case recorded from the reference\'s own code over '
-    + 'the fake node and the stores: { id, method, row (a node method\'s grammar row; swarm.feed:read has none yet, SWM-8\'s), deviation, world, '
+    + 'the fake node and the stores: { id, method, row (a node method\'s grammar row in swarm-grammar.json), deviation, world, '
     + 'concurrent, steps, core, after }. world: node (as `node` above), clock, vault, and for a store op feeds and manifests (the files\' text or '
     + 'null), grants, accounts (accounts.list\'s wallets), history (publish-history.sqlite\'s rows, each cell as stored, a BLOB as { blob: hex }). '
     + 'A step: caller (shell or chrome); params in the wire form, a node method\'s as main\'s JSON (swarm.publish { kind, parts: [{ path?, bytes, '

@@ -14,6 +14,13 @@
 //!   the signatures joined, once each, sorted by owner.
 //! - [`exec_transaction`]: `execTransaction`'s calldata, and [`NonceState`],
 //!   a pending SafeTx against the Safe's nonce.
+//! - [`reads`] and [`check_setup`] (SAFE-2): the reads the Safe's setup is
+//!   checked with, their answers decoded, and the setup compared with the
+//!   record.
+//! - [`safe_tx_hash`], [`safe_message_hash`] and [`exec_call`]: the same
+//!   encodings on any chain and unbounded, for fc-approval's Safe approvals
+//!   (design 0012, APR-3), which hash through this crate (design 0016,
+//!   SAFE-2's D5).
 //!
 //! The reference is freedom-browser's `src/main/wallet/safe/`, over
 //! protocol-kit 8.0.11; `vectors/safe.json`, produced from it, is the
@@ -22,21 +29,26 @@
 //! the owner: `v` 0, 1 or an EIP-155 `v`, or 64 bytes) and `nonce-behind`
 //! (it executes a SafeTx whose nonce is past the Safe's).
 //!
-//! The crate does no I/O: the chain's answers (the Safe's nonce) come in as
-//! parameters.
+//! The crate does no I/O: the chain's answers (the Safe's setup and nonce)
+//! come in as parameters.
 
 pub mod constants;
 mod error;
 mod message;
+pub mod reads;
 mod setup;
 mod signatures;
 mod tx;
 
-pub use error::{Error, SignatureError};
-pub use message::SafeMessage;
+pub use error::{Error, ReadError, ReadProblem, SignatureError};
+pub use message::{SafeMessage, safe_message_hash, safe_message_typed_data};
+pub use reads::{Answers, Change, Read, SetupCheck, check_setup};
 pub use setup::{Deployment, Setup, check_chain, parse_salt};
 pub use signatures::{OwnerSignature, Signatures};
-pub use tx::{MAX_DATA, MAX_NONCE, NonceState, SafeTx, exec_transaction};
+pub use tx::{
+    EXEC_TRANSACTION_SELECTOR, MAX_DATA, MAX_NONCE, NonceState, SafeTx, exec_call,
+    exec_transaction, safe_tx_hash, safe_tx_typed_data,
+};
 
 /// The first four bytes of a function's keccak256 signature hash.
 fn selector(signature: &str) -> [u8; 4] {

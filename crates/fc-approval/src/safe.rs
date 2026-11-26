@@ -38,16 +38,19 @@
 //! call, as the reference builds it (`safe-executor.js`): operation 0
 //! (`CALL`), no refund (`safeTxGas`, `baseGas` and `gasPrice` 0, both
 //! addresses zero). The SafeMessage is `safe-messages.js`'s: the Safe's
-//! domain (`chainId`, `verifyingContract`) and `{ message: digest }`.
+//! domain (`chainId`, `verifyingContract`) and `{ message: digest }`. Both
+//! hashes and `execTransaction`'s calldata are fc-safe's, on the approved
+//! chain (design 0016, SAFE-2's D5).
 
 use std::fmt;
 
 use fc_evm::{
     Transaction, TypedDataView, U256, ViewRequest, eip191_digest, keccak256, parse_address,
-    parse_bytes, parse_json, parse_unsigned, to_hex, typed_data_hash, typed_data_view,
+    parse_bytes, parse_json, parse_unsigned, typed_data_hash, typed_data_view,
 };
+use fc_safe::{EXEC_TRANSACTION_SELECTOR, exec_call, safe_message_hash, safe_tx_hash};
 use rand_core::TryCryptoRng;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 use zeroize::Zeroizing;
 
 use crate::bind::{self, MAX_CHAIN_ID};
@@ -56,14 +59,6 @@ use crate::fee::{Evidence, Fees, judge_fees, reference_fee};
 
 /// How many Safe approvals are open at once; the oldest is dropped.
 pub const MAX_SAFE_APPROVALS: usize = 64;
-
-/// The selector of Safe's `execTransaction`.
-fn exec_selector() -> [u8; 4] {
-    let hash = keccak256(
-        b"execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)",
-    );
-    [hash[0], hash[1], hash[2], hash[3]]
-}
 
 /// The EIP-712 types a Safe's owners sign: a SafeTx, a transaction's
 /// confirmation (`checkSignatures`), and a SafeMessage, EIP-1271's
@@ -571,9 +566,10 @@ impl SafeApprovals {
                     digest,
                 },
             ) => {
-                let chain_id = U256::from_u64(*chain_id);
+                let chain_id = *chain_id;
                 let domain = typed_data.get("domain").ok_or(SafeRefusal::Mismatch)?;
-                let same_chain = domain.get("chainId").and_then(quantity) == Some(chain_id);
+                let same_chain =
+                    domain.get("chainId").and_then(quantity) == Some(U256::from_u64(chain_id));
                 let same_safe = domain
                     .get("verifyingContract")
                     .and_then(Value::as_str)
@@ -582,7 +578,7 @@ impl SafeApprovals {
                 if !(same_chain && same_safe) {
                     return Err(SafeRefusal::Mismatch);
                 }
-                safe_message_hash(safe, &chain_id, digest).ok_or(SafeRefusal::Mismatch)?
+                safe_message_hash(chain_id, safe, digest).map_err(|_| SafeRefusal::Mismatch)?
             }
             (Some(fixed), Approved::Send { .. }) => *fixed,
             (
@@ -600,8 +596,8 @@ impl SafeApprovals {
                     .and_then(|message| message.get("nonce"))
                     .and_then(quantity)
                     .ok_or(SafeRefusal::Mismatch)?;
-                safe_tx_hash(safe, &U256::from_u64(*chain_id), to, value, data, &nonce)
-                    .ok_or(SafeRefusal::Mismatch)?
+                safe_tx_hash(*chain_id, safe, to, value, data, &nonce)
+                    .map_err(|_| SafeRefusal::Mismatch)?
             }
         };
         if expected != *hash {
@@ -736,97 +732,12 @@ fn quantity(value: &Value) -> Option<U256> {
     }
 }
 
-const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
-
-/// The SafeTx's EIP-712 hash, as Safe 1.3.0 and later define it, for one
-/// call with no refund.
-fn safe_tx_hash(
-    safe: &[u8; 20],
-    chain_id: &U256,
-    to: &[u8; 20],
-    value: &U256,
-    data: &[u8],
-    nonce: &U256,
-) -> Option<[u8; 32]> {
-    let field = |name: &str, kind: &str| json!({ "name": name, "type": kind });
-    let types = json!({
-        "SafeTx": [
-            field("to", "address"),
-            field("value", "uint256"),
-            field("data", "bytes"),
-            field("operation", "uint8"),
-            field("safeTxGas", "uint256"),
-            field("baseGas", "uint256"),
-            field("gasPrice", "uint256"),
-            field("gasToken", "address"),
-            field("refundReceiver", "address"),
-            field("nonce", "uint256"),
-        ],
-    });
-    let domain = json!({ "chainId": chain_id.to_decimal(), "verifyingContract": to_hex(safe) });
-    let message = json!({
-        "to": to_hex(to),
-        "value": value.to_decimal(),
-        "data": to_hex(data),
-        "operation": "0",
-        "safeTxGas": "0",
-        "baseGas": "0",
-        "gasPrice": "0",
-        "gasToken": ZERO_ADDRESS,
-        "refundReceiver": ZERO_ADDRESS,
-        "nonce": nonce.to_decimal(),
-    });
-    typed_data_hash(&domain, &types, &message).ok()
-}
-
-/// The SafeMessage's EIP-712 hash (`getEip712MessageTypes` for 1.3.0 and
-/// later).
-fn safe_message_hash(safe: &[u8; 20], chain_id: &U256, digest: &[u8; 32]) -> Option<[u8; 32]> {
-    let types = json!({ "SafeMessage": [{ "name": "message", "type": "bytes" }] });
-    let domain = json!({ "chainId": chain_id.to_decimal(), "verifyingContract": to_hex(safe) });
-    let message = json!({ "message": to_hex(digest) });
-    typed_data_hash(&domain, &types, &message).ok()
-}
-
-fn word(bytes: &[u8]) -> [u8; 32] {
-    let mut word = [0u8; 32];
-    let start = 32usize.saturating_sub(bytes.len());
-    word[start..].copy_from_slice(&bytes[bytes.len().saturating_sub(32)..]);
-    word
-}
-
-fn padded(len: usize) -> usize {
-    len.div_ceil(32).saturating_mul(32)
-}
-
-/// `execTransaction(to, value, data, 0, 0, 0, 0, 0, 0, signatures)`,
-/// ABI-encoded as ethers encodes it.
-fn exec_call(to: &[u8; 20], value: &U256, data: &[u8], signatures: &[u8]) -> Vec<u8> {
-    let head = 10 * 32;
-    let data_offset = head;
-    let signatures_offset = head + 32 + padded(data.len());
-    let mut call = Vec::with_capacity(4 + signatures_offset + 32 + padded(signatures.len()));
-    call.extend_from_slice(&exec_selector());
-    call.extend_from_slice(&word(to));
-    call.extend_from_slice(&value.to_be_bytes());
-    call.extend_from_slice(&word(&(data_offset as u64).to_be_bytes()));
-    // operation, safeTxGas, baseGas, gasPrice, gasToken, refundReceiver.
-    call.extend_from_slice(&[0u8; 6 * 32]);
-    call.extend_from_slice(&word(&(signatures_offset as u64).to_be_bytes()));
-    for bytes in [data, signatures] {
-        call.extend_from_slice(&word(&(bytes.len() as u64).to_be_bytes()));
-        call.extend_from_slice(bytes);
-        call.resize(call.len() + padded(bytes.len()) - bytes.len(), 0);
-    }
-    call
-}
-
 /// The signatures an `execTransaction` call carries, read from where its
 /// own head puts them; `None` when it isn't one. The call is then compared
 /// whole with [`exec_call`]'s encoding, so anything else in it is checked
 /// there.
 fn exec_signatures(call: &[u8]) -> Option<&[u8]> {
-    let body = call.strip_prefix(&exec_selector()[..])?;
+    let body = call.strip_prefix(&EXEC_TRANSACTION_SELECTOR[..])?;
     let read = |at: usize| -> Option<usize> {
         let word = body.get(at..at.checked_add(32)?)?;
         let (high, low) = word.split_at(24);
@@ -845,7 +756,12 @@ fn exec_signatures(call: &[u8]) -> Option<&[u8]> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+    use fc_evm::to_hex;
+    use serde_json::json;
+
     use super::*;
+
+    const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
     struct Counter(u8);
 
@@ -932,21 +848,24 @@ mod tests {
     #[test]
     fn the_safe_tx_hash_is_protocol_kits() {
         let typed = safe_tx(SAFE, json!("7"), "0");
-        assert_eq!(
-            to_hex(&hash_of(&typed)),
-            to_hex(
-                &safe_tx_hash(
-                    &parse_address(SAFE).unwrap(),
-                    &U256::from_u64(100),
-                    &parse_address(TO).unwrap(),
-                    &U256::from_u64(1000),
-                    &[0xa9, 0x05, 0x9c, 0xbb],
-                    &U256::from_u64(7),
-                )
-                .unwrap()
+        let hash = |chain_id| {
+            safe_tx_hash(
+                chain_id,
+                &parse_address(SAFE).unwrap(),
+                &parse_address(TO).unwrap(),
+                &U256::from_u64(1000),
+                &[0xa9, 0x05, 0x9c, 0xbb],
+                &U256::from_u64(7),
             )
-        );
+            .unwrap()
+        };
+        assert_eq!(to_hex(&hash_of(&typed)), to_hex(&hash(100)));
         assert_eq!(to_hex(&hash_of(&typed)), SAFE_TX_HASH);
+        // fc-safe's hash is the approved chain's: chain 1's binding too.
+        let mut on_one = typed;
+        on_one["domain"]["chainId"] = json!(1);
+        assert_eq!(hash_of(&on_one), hash(1));
+        assert_ne!(hash(1), hash(100));
     }
 
     // ethers 6.17's `TypedDataEncoder.hash` and protocol-kit 8.0.7's
@@ -959,16 +878,21 @@ mod tests {
     /// `getEip712MessageTypes('1.4.1')`.
     #[test]
     fn the_safe_message_hash_is_protocol_kits() {
-        let hash = safe_message_hash(
-            &parse_address(SAFE).unwrap(),
-            &U256::from_u64(100),
-            &eip191_digest(b"hello"),
-        )
-        .unwrap();
+        let digest = eip191_digest(b"hello");
+        let hash =
+            |chain_id| safe_message_hash(chain_id, &parse_address(SAFE).unwrap(), &digest).unwrap();
         assert_eq!(
-            to_hex(&hash),
+            to_hex(&hash(100)),
             "0x5f19309ed0ecec869313687ae3a6b8f9135c4d3997dc973eb66bc07f9374925d"
         );
+        // On chain 1, the hash of the same message under chain 1's domain.
+        let typed = json!({
+            "domain": { "chainId": "1", "verifyingContract": SAFE },
+            "types": { "SafeMessage": [{ "name": "message", "type": "bytes" }] },
+            "message": { "message": to_hex(&digest) },
+        });
+        assert_eq!(hash_of(&typed), hash(1));
+        assert_ne!(hash(1), hash(100));
     }
 
     /// `execTransaction`'s call as ethers 6.17's `Interface` encodes it
@@ -996,7 +920,7 @@ mod tests {
             "0".repeat(62),
         );
         assert_eq!(to_hex(&call), expected);
-        assert_eq!(&exec_selector(), &[0x6a, 0x76, 0x12, 0x02]);
+        assert_eq!(EXEC_TRANSACTION_SELECTOR, [0x6a, 0x76, 0x12, 0x02]);
     }
 
     #[test]
@@ -1462,7 +1386,7 @@ mod tests {
         }
         let call = exec_call(&[0x11; 20], &U256::from_u64(1), &[], &[]);
         assert!(is_safe_call(&call));
-        assert!(is_safe_call(&exec_selector()));
+        assert!(is_safe_call(&EXEC_TRANSACTION_SELECTOR));
         assert!(!is_safe_call(&call[1..]));
         assert!(!is_safe_call(&[0xa9, 0x05, 0x9c, 0xbb]));
         assert!(!is_safe_call(&[]));
