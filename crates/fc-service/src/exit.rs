@@ -188,18 +188,17 @@ pub(crate) fn exit_reporting(exit: Exit, bound: Duration, report: impl FnOnce())
 /// queue isn't drained: lines queued before it may be lost, and `line`
 /// goes to stderr directly.
 pub fn fail_stop(exit: Exit, line: &'static [u8]) -> ! {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    // Every Unix target, not only Linux and macOS: `fc-sys`'s `unix` module
+    // is built for all of them, and an ordinary exit could run `atexit`
+    // handlers or take a lock with the heap exhausted (Codex, round 2 on
+    // #521). Any other target has no such exit, and doesn't build.
+    #[cfg(unix)]
     {
         fc_sys::unix::fail_stop(i32::from(exit.code()), line)
     }
     #[cfg(windows)]
     {
         fc_sys::windows::fail_stop(u32::from(exit.code()), line)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        let _ = line;
-        std::process::exit(i32::from(exit.code()))
     }
 }
 
