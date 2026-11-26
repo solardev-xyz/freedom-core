@@ -444,7 +444,15 @@ pub fn operation(case: &Value) -> Result<Operation, fc_ledger::Refusal> {
             fc_ledger::Scheme::parse(request["scheme"].as_str().unwrap()).unwrap(),
             request["start"].as_u64().unwrap(),
             request["count"].as_u64().unwrap(),
-        ),
+        )
+        .and_then(|op| {
+            op.checking(
+                checked_records(case)
+                    .into_iter()
+                    .map(|(_, path)| path)
+                    .collect(),
+            )
+        }),
         "ledger.add" => LedgerPath::parse(request["path"].as_str().unwrap())
             .map(Operation::add)
             .map_err(fc_ledger::Refusal::Path),
@@ -463,6 +471,20 @@ pub fn operation(case: &Value) -> Result<Operation, fc_ledger::Refusal> {
         ),
         other => panic!("no operation {other}"),
     }
+}
+
+/// The records discovery's check reads (design 0016, D1), each with its
+/// path: the case's `records` that account-checks.js reads (a path and an
+/// address, both strings), a scheme's path only, at most 20.
+pub fn checked_records(case: &Value) -> Vec<(&Value, LedgerPath)> {
+    case["records"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["path"].as_str().is_some_and(|p| !p.is_empty()) && r["address"].is_string())
+        .filter_map(|r| Some((r, LedgerPath::parse(r["path"].as_str()?).ok()?)))
+        .take(fc_ledger::MAX_CHECKS)
+        .collect()
 }
 
 pub fn typed_hash(case: &Value) -> [u8; 32] {

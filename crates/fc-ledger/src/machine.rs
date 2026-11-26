@@ -23,6 +23,9 @@ use crate::typed::TypedStream;
 
 /// `ledger.accounts` reads 1 to 20 paths.
 pub const MAX_ACCOUNTS: u64 = 20;
+/// Then it reads the paths of at most 20 Ledger records no device has
+/// matched (design 0016, *Accounts*, D1; deviation `check-bound`).
+pub const MAX_CHECKS: usize = 20;
 /// The Ethereum app's name in `B0 01`'s answer (deviation `app-check`).
 pub const ETHEREUM_APP: &[u8] = b"Ethereum";
 /// A message's next pieces: 150 bytes each, and the first `150 − 5 − 4n`
@@ -80,8 +83,9 @@ pub enum Step {
 /// An operation's result, every check passed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Signed {
-    /// `ledger.accounts`: each path's address, in order.
-    Accounts(Vec<Account>),
+    /// `ledger.accounts`: each path's address, in order, and what the
+    /// records' check read.
+    Accounts(Discovered),
     /// `ledger.add`: the address the device showed at the path.
     Added(Account),
     /// `sign.transaction`: the signed serialization, whose sender is the
@@ -89,6 +93,19 @@ pub enum Signed {
     Transaction(SignedTransaction),
     /// `sign.message` and `sign.typed_data`: `r ‖ s ‖ v`, `v` 27 or 28.
     Signature([u8; 65]),
+}
+
+/// `ledger.accounts`' result (design 0016, *Accounts*, D1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Discovered {
+    /// Each discovery path's address, in order.
+    pub accounts: Vec<Account>,
+    /// The address the device holds at each record's path, in the order
+    /// the paths were given ([`Operation::checking`]); or how the check
+    /// failed, which doesn't fail discovery (`ipc.js:24–33`): a status, main's
+    /// `{ failed }` or refusal, or an answer the core can't read, at any of
+    /// its APDUs.
+    pub checks: Result<Vec<[u8; 20]>, Failure>,
 }
 
 /// How an operation ended without a result.
@@ -171,6 +188,10 @@ pub enum Refusal {
     Path(PathError),
     #[error("ledger.accounts reads 1 to 20 paths")]
     Count,
+    /// More records to check than [`MAX_CHECKS`], or a check for an
+    /// operation other than `ledger.accounts`.
+    #[error("ledger.accounts checks at most 20 records")]
+    Checks,
     /// What a Ledger can't carry (deviation `device-bounds`).
     #[error("too large for a Ledger: {0}")]
     TooLarge(Bound),
@@ -239,6 +260,9 @@ enum Kind {
         start: u32,
         count: usize,
         found: Vec<Account>,
+        /// The records' paths to read after discovery.
+        checks: Vec<LedgerPath>,
+        checked: Vec<[u8; 20]>,
     },
     Add {
         path: LedgerPath,
@@ -303,6 +327,8 @@ enum Typed {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pending {
     Address,
+    /// A record's path, read after discovery.
+    Check,
     App,
     /// A piece of a transaction or a message, its last signed.
     Piece {
@@ -330,7 +356,28 @@ impl Operation {
             start,
             count: count as usize,
             found: Vec::new(),
+            checks: Vec::new(),
+            checked: Vec::new(),
         }))
+    }
+
+    /// `ledger.accounts`' check of the Ledger records no device has matched
+    /// (design 0016, *Accounts*, D1): after its discovery APDUs, in the same
+    /// operation, `E0 02 00 00` at each of `paths`, in order, display off.
+    /// At most [`MAX_CHECKS`]; the caller picks them (the wallet list's
+    /// order, deviation `check-bound`). A failed check doesn't fail
+    /// discovery ([`Discovered::checks`]).
+    pub fn checking(mut self, paths: Vec<LedgerPath>) -> Result<Self, Refusal> {
+        if paths.len() > MAX_CHECKS {
+            return Err(Refusal::Checks);
+        }
+        match &mut self.kind {
+            Kind::Accounts { checks, .. } if !self.started => {
+                *checks = paths;
+                Ok(self)
+            }
+            _ => Err(Refusal::Checks),
+        }
     }
 
     /// `ledger.add`: the address at `path`, shown on the device for the user
@@ -465,9 +512,14 @@ impl Operation {
                 start: _,
                 count: _,
                 found,
+                checks,
+                checked,
             } => {
                 beyond += found.capacity() * size_of::<Account>();
                 beyond += found.iter().map(|a| path_heap(&a.path)).sum::<usize>();
+                beyond += checks.capacity() * size_of::<LedgerPath>();
+                beyond += checks.iter().map(path_heap).sum::<usize>();
+                beyond += checked.capacity() * size_of::<[u8; 20]>();
             }
             Kind::Add { path } => beyond += path_heap(path),
             Kind::Sign(sign) => {
@@ -520,6 +572,28 @@ impl Operation {
 
     /// Main's reply to the APDU last sent: the next APDU, or the end.
     pub fn answer(&mut self, reply: Reply<'_>) -> Step {
+        let checking = self.pending == Some(Pending::Check) && !self.ended;
+        match self.answered(reply) {
+            // A failed check ends the operation with discovery's accounts.
+            Step::Done(Err(failure)) if checking => self.discovered(Err(failure)),
+            step => step,
+        }
+    }
+
+    /// `ledger.accounts`' end: its accounts, and what the check read.
+    fn discovered(&mut self, checks: Result<Vec<[u8; 20]>, Failure>) -> Step {
+        self.ended = true;
+        self.pending = None;
+        let Kind::Accounts { found, .. } = &mut self.kind else {
+            return self.fail(LedgerCode::Unknown, Cause::Internal);
+        };
+        Step::Done(Ok(Signed::Accounts(Discovered {
+            accounts: std::mem::take(found),
+            checks,
+        })))
+    }
+
+    fn answered(&mut self, reply: Reply<'_>) -> Step {
         let Some(pending) = self.pending.take().filter(|_| !self.ended) else {
             return self.fail(LedgerCode::Unknown, Cause::Protocol(ProtocolFault::Order));
         };
@@ -598,17 +672,26 @@ impl Operation {
                 start,
                 count,
                 found,
+                checks,
+                checked,
             } => {
-                if found.len() >= *count {
-                    let accounts = std::mem::take(found);
-                    self.ended = true;
-                    return Step::Done(Ok(Signed::Accounts(accounts)));
+                if found.len() < *count {
+                    let index = u64::from(*start) + found.len() as u64;
+                    let apdu = LedgerPath::new(*scheme, index)
+                        .ok()
+                        .and_then(|path| Apdu::new(header::ADDRESS, &path.encode()));
+                    return self.send(apdu, Pending::Address, false);
                 }
-                let index = u64::from(*start) + found.len() as u64;
-                let apdu = LedgerPath::new(*scheme, index)
-                    .ok()
-                    .and_then(|path| Apdu::new(header::ADDRESS, &path.encode()));
-                self.send(apdu, Pending::Address, false)
+                match checks.get(checked.len()) {
+                    Some(path) => {
+                        let apdu = Apdu::new(header::ADDRESS, &path.encode());
+                        self.send(apdu, Pending::Check, false)
+                    }
+                    None => {
+                        let checked = std::mem::take(checked);
+                        self.discovered(Ok(checked))
+                    }
+                }
             }
             Kind::Add { path } => {
                 let apdu = Apdu::new(header::ADDRESS_DISPLAY, &path.encode());
@@ -653,6 +736,10 @@ impl Operation {
                 let path =
                     LedgerPath::new(*scheme, index).map_err(|_| unknown(AnswerFault::Length))?;
                 found.push(Account { path, address });
+                Ok(None)
+            }
+            (Kind::Accounts { checked, .. }, Pending::Check) => {
+                checked.push(apdu::read_address(body).map_err(unknown)?);
                 Ok(None)
             }
             (Kind::Add { path }, Pending::Address) => {
