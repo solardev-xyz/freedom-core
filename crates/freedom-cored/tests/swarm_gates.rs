@@ -995,7 +995,7 @@ fn rig_with(env: &[(&str, &str)], sites: &[&str]) -> Rig {
 }
 
 /// How many publishes the warm core makes after the first.
-const WARM_PUBLISHES: usize = 4;
+const WARM_PUBLISHES: usize = 6;
 
 /// The publish gate, the vectors' 50 MiB of 100 files, its tar byte for
 /// byte the reference's each time:
@@ -1006,9 +1006,10 @@ const WARM_PUBLISHES: usize = 4;
 ///   against the warm core's settled resident memory with its peak started
 ///   again once before them: the peak over all of them up less than 4 MiB
 ///   (each one's, and whatever they left behind together), and the settled
-///   resident memory after the last within 1 MiB of the warm core's, so it
-///   doesn't grow with the count (a leak of more than a quarter MiB a
-///   publish fails it).
+///   resident memory after the last within 1.5 MiB of the warm core's, so
+///   it doesn't grow with the count (a leak of a quarter MiB a publish
+///   fails it; the allocator's own drift measured 0.1 to 0.5 MiB over
+///   four).
 #[test]
 fn a_50_mib_publish_of_100_files_streams_with_resident_memory_up_under_4_mib() {
     let (request, parts, reference) = fifty_mib_case();
@@ -1078,7 +1079,7 @@ fn a_50_mib_publish_of_100_files_streams_with_resident_memory_up_under_4_mib() {
         "resident memory up {up} KiB over the warm publishes, not under 4 MiB"
     );
     assert!(
-        last <= warm + 1024,
+        last <= warm + 1536,
         "settled resident memory grew from {warm} KiB to {last} KiB over {WARM_PUBLISHES} publishes"
     );
 }
