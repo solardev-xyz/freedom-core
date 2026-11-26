@@ -52,6 +52,7 @@ fn child(case: &str) {
         times: false,
         symlinks: false,
         modes: false,
+        memory_cap: Some(confine::MEMORY_CAP),
     })
     .unwrap();
     println!("FILES {}", report.files == Status::Enforced);

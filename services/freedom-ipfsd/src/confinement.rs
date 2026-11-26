@@ -23,6 +23,8 @@ use fc_service::network::NetworkPolicy;
 ///   `ioctl` this adds, in `direct` mode alone: discovery runs only there.
 ///   Sysfs's `/sys/class/net/<name>` resolves into `/sys/devices`, which no
 ///   grant should cover.
+/// - **`memory_cap`:** 2 GiB ([`confine::MEMORY_CAP`]), for the persistent
+///   and the ephemeral process alike (design 0010, "The memory cap").
 pub fn policy(
     read_write: Vec<PathBuf>,
     network: &NetworkPolicy,
@@ -41,6 +43,7 @@ pub fn policy(
         times: false,
         symlinks: false,
         modes: false,
+        memory_cap: Some(confine::MEMORY_CAP),
     }
 }
 

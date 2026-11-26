@@ -65,6 +65,9 @@ impl Grant {
     /// ([`nat64_grants`]), and `SIOCGIFINDEX` (`interface_index`) for a
     /// link-local resolver's named zone. In `socks5` mode it learns
     /// nothing, so neither is granted.
+    ///
+    /// **The memory cap,** 2 GiB ([`confine::MEMORY_CAP`]; design 0010,
+    /// "The memory cap"), in either mode.
     pub fn policy(&self, network: &NetworkPolicy, descriptors: Vec<i32>) -> Policy {
         let direct = matches!(network, NetworkPolicy::Direct);
         Policy {
@@ -80,6 +83,7 @@ impl Grant {
             times: false,
             symlinks: false,
             modes: false,
+            memory_cap: Some(confine::MEMORY_CAP),
         }
     }
 }
@@ -114,7 +118,8 @@ impl Grant {
     /// copy's checked roots, read only, each from the directory held open
     /// (its descriptor kept with `descriptors`, the gate's lock); and no
     /// network: no TCP rule (ABI 4), seccomp refusing every socket family,
-    /// and nothing granted for name resolution or NAT64 discovery.
+    /// and nothing granted for name resolution or NAT64 discovery. The
+    /// memory cap is the service's ([`confine::MEMORY_CAP`]).
     pub fn import_policy(&self, roots: &[OpenDir], descriptors: Vec<i32>) -> Policy {
         #[cfg(unix)]
         let descriptors = {
@@ -135,6 +140,7 @@ impl Grant {
             times: false,
             symlinks: false,
             modes: false,
+            memory_cap: Some(confine::MEMORY_CAP),
         }
     }
 }
@@ -179,6 +185,10 @@ mod tests {
         assert!(socks5.read_only.is_empty());
         // Both read and write the home and the service's own HOME alone.
         assert_eq!(direct.read_write, socks5.read_write);
+        // The memory cap, whatever the network (design 0010).
+        for policy in [&direct, &socks5] {
+            assert_eq!(policy.memory_cap, Some(confine::MEMORY_CAP));
+        }
     }
 
     #[test]
@@ -205,6 +215,8 @@ mod tests {
         assert_eq!(policy.resolver, confine::Resolver::None);
         assert!(policy.refer && !policy.interface_index);
         assert_eq!(policy.min_abi, MIN_ABI);
+        // The import process's memory cap is the service's (design 0010).
+        assert_eq!(policy.memory_cap, Some(confine::MEMORY_CAP));
         // The gate's lock, and each root's descriptor.
         #[cfg(unix)]
         assert_eq!(

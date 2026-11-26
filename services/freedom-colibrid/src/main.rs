@@ -178,6 +178,9 @@ fn confined(
         times: false,
         symlinks: false,
         modes: false,
+        // No memory cap here yet: 0010's names the IPFS and Radicle
+        // processes, while 0014's Budgets point at 0007's question 9.
+        memory_cap: None,
     }) {
         Ok(report) => Ok(report.to_json()),
         Err(invalid) => {
