@@ -575,6 +575,10 @@
         "shell/feed-update-batch",
         "shell/feed-update-encrypted-reference",
         "shell/feed-update-node-500",
+        "shell/feed-read-latest",
+        "shell/feed-read-empty",
+        "shell/feed-read-probe",
+        "shell/feed-read-node-500",
         "methods/write-feed-10mib+1"
       ]
     },
@@ -128228,6 +128232,7 @@
       "id": "feed-read-latest",
       "method": "swarm.feed",
       "row": "swarm.feed:read",
+      "deviation": "index-probe",
       "world": {
         "node": {
           "latest": [
@@ -128305,7 +128310,7 @@
                 ]
               ],
               "status": 200,
-              "form": "feed_latest",
+              "deviation": "index-probe",
               "reply": {
                 "status": 200,
                 "status_text": "OK",
@@ -128332,6 +128337,7 @@
           ]
         }
       ],
+      "core": "feed_head with swarm-only-root-chunk instead of the whole latest payload; the same index",
       "after": {
         "history": []
       }
@@ -128340,6 +128346,7 @@
       "id": "feed-read-empty",
       "method": "swarm.feed",
       "row": "swarm.feed:read",
+      "deviation": "index-probe",
       "world": {
         "node": {
           "latest": [
@@ -128416,7 +128423,7 @@
                 ]
               ],
               "status": 404,
-              "form": "feed_latest",
+              "deviation": "index-probe",
               "reply": {
                 "status": 404,
                 "status_text": "Not Found",
@@ -128474,6 +128481,7 @@
           ]
         }
       ],
+      "core": "feed_head with swarm-only-root-chunk instead of the whole latest payload; the same index",
       "after": {
         "history": []
       }
@@ -128482,6 +128490,7 @@
       "id": "feed-read-probe",
       "method": "swarm.feed",
       "row": "swarm.feed:read",
+      "deviation": "index-probe",
       "world": {
         "node": {
           "latest": [
@@ -128568,7 +128577,7 @@
                 ]
               ],
               "status": 404,
-              "form": "feed_latest",
+              "deviation": "index-probe",
               "reply": {
                 "status": 404,
                 "status_text": "Not Found",
@@ -128836,6 +128845,7 @@
           ]
         }
       ],
+      "core": "feed_head with swarm-only-root-chunk instead of the whole latest payload; the same index",
       "after": {
         "history": []
       }
@@ -128844,6 +128854,7 @@
       "id": "feed-read-node-500",
       "method": "swarm.feed",
       "row": "swarm.feed:read",
+      "deviation": "index-probe",
       "world": {
         "node": {
           "latest": [
@@ -128926,7 +128937,7 @@
                 ]
               ],
               "status": 500,
-              "form": "feed_latest",
+              "deviation": "index-probe",
               "reply": {
                 "status": 500,
                 "status_text": "Internal Server Error",
@@ -128949,6 +128960,7 @@
           ]
         }
       ],
+      "core": "feed_head with swarm-only-root-chunk instead of the whole latest payload; the same index",
       "after": {
         "history": []
       }

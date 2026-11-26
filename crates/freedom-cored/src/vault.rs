@@ -121,6 +121,9 @@ pub enum Out {
     NameCheck(crate::eip1193::NameCheck),
     /// The name check of page request `tag` is no longer wanted.
     NameCancel(u64),
+    /// A user's change of a Swarm grant (design 0015, D17), for the swarm
+    /// thread, which detaches what a permission manifest managed of it.
+    SwarmChange(crate::approvals::SwarmChange),
 }
 
 /// Why a vault operation failed. Mapped to a code and the method's JS
@@ -1137,13 +1140,12 @@ impl Vault {
     }
 
     /// The Swarm grants' shared handle and, once they have moved, their
-    /// file's path (design 0015's D2), for the swarm thread the hello
-    /// starts.
+    /// file (design 0015's D2), for the swarm thread the hello starts.
     pub fn swarm_grants(
         &self,
     ) -> (
         std::sync::Arc<std::sync::Mutex<fc_approval::stores::SwarmStore>>,
-        Option<std::path::PathBuf>,
+        Option<crate::grants::SwarmFile>,
     ) {
         self.approvals.swarm_grants()
     }
@@ -1691,6 +1693,14 @@ impl Vault {
         // Design 0012: one `approval.changed` per grant change, after the
         // reply that made it.
         out.extend(self.approvals.take_events().into_iter().map(Out::Send));
+        // Design 0015's D17: a user's Swarm grant change goes to the swarm
+        // thread after them, in order.
+        out.extend(
+            self.approvals
+                .take_swarm_changes()
+                .into_iter()
+                .map(Out::SwarmChange),
+        );
         // A dApp revoke or a deleted account: the phone payments' waiting
         // rules it names go.
         for narrowed in self.approvals.take_narrowed() {

@@ -89,7 +89,9 @@
 //!   bounds: 60 s for a place, its base or a charge, a whole node reply's
 //!   300 s, and the idle bound on every other ask of main. The store ops
 //!   (`swarm.identities`, `swarm.history`, `swarm.manifest`) are the
-//!   [`store_ops`] module's.
+//!   [`store_ops`] module's, and so is a user's Swarm grant change the
+//!   event loop wrote, which detaches what a permission manifest managed
+//!   of it (D17, [`Engine::grant_changed`]).
 //!
 //! [`memory`]: super::memory
 //! [`lane`]: super::lane
@@ -338,6 +340,12 @@ pub trait GrantsWriter: Send {
         grants: &Mutex<SwarmStore>,
         change: &mut dyn FnMut(&mut SwarmStore) -> Applied<()>,
     ) -> GrantWritten;
+    /// The file written as `grants` stands, where it is behind memory (a
+    /// narrowing whose write failed), before the manifest store saves
+    /// (D17, [`ops::Grants::settle`]); the failure's text.
+    fn settle(&mut self, _grants: &Mutex<SwarmStore>) -> Option<JsString> {
+        None
+    }
 }
 
 /// What a write of the Swarm grants did.
@@ -981,6 +989,11 @@ pub struct Engine {
     /// What the engine hands its ops back, in order (a deferred change
     /// made, a hold's end).
     op_ready: VecDeque<(u64, OpInput)>,
+    /// The user's Swarm grant changes waiting to detach (D17), in order.
+    detaches: VecDeque<store_ops::Detach>,
+    /// Something that can let a detach go happened since they were last
+    /// tried: one came, an op answered, a hold ended.
+    detach_due: bool,
     /// The mining lane.
     mining: Mining,
     /// Searches with their charge, to submit to the lane in order.
@@ -1039,6 +1052,8 @@ impl Engine {
             tickets: BTreeMap::new(),
             ops: BTreeMap::new(),
             op_ready: VecDeque::new(),
+            detaches: VecDeque::new(),
+            detach_due: false,
             mining: Mining::new(),
             mine_queue: VecDeque::new(),
         }
@@ -1513,8 +1528,10 @@ impl Engine {
             }
         }
         // A hold's end moves an op that waited for one (a manifest
-        // transaction that would revoke a held site's feed grant).
+        // transaction that would revoke a held site's feed grant), and a
+        // detach (D17).
         self.retry_ops();
+        self.detach_due |= !self.detaches.is_empty();
     }
 
     /// `test.swarm_feed_change` `id` (D11): a change to the feed store
@@ -1741,6 +1758,9 @@ impl Engine {
             }
             if let Some((id, input)) = self.op_ready.pop_front() {
                 self.op_input(io, now, id, input)?;
+                continue;
+            }
+            if std::mem::take(&mut self.detach_due) && self.pump_detaches(io, now)? {
                 continue;
             }
             if self.pump_api()

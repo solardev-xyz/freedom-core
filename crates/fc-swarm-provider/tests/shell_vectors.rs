@@ -6,9 +6,10 @@
 //! - **the grammar's scenarios** (`vectors/swarm-grammar.json`): every
 //!   honest scenario of the rows `swarm.publish:data,file`,
 //!   `swarm.publish:collection`, `swarm.feed:create`, `swarm.feed:update`,
-//!   `swarm.stamps` and `swarm.upload_status`, played through the machine
-//!   with exact calls (form, method, path, query, headers, the body byte
-//!   for byte), and every forbidden scenario of those rows never made;
+//!   `swarm.feed:read`, `swarm.stamps` and `swarm.upload_status`, played
+//!   through the machine with exact calls (form, method, path, query,
+//!   headers, the body byte for byte) within its row, and every forbidden
+//!   scenario of those rows never made;
 //! - **`bodies`**: every tar (the `tar-paths` deviation's cases with the
 //!   core's whole names) through a collection, and every single-file body
 //!   through `data`;
@@ -39,22 +40,45 @@ use fc_swarm_provider::machine::shell::{
     AskBound, Deadline, Shell, ShellCall, ShellError, ShellMethod, ShellOutcome, ask_bound,
 };
 use fc_swarm_provider::machine::{
-    Abort, Ask, AskId, Body, Effect, ErrorCode, Event, Failed, Form, Need, NodeCall, Protocol,
-    Reply, Rule, SignKey, SignSoc, Signed, StoreWrite, UPLOAD_CHARGE, whole_charge,
+    Abort, Ask, AskId, Body, Effect, ErrorCode, Event, Failed, Form, Need, NodeCall, Outcome,
+    Protocol, Reply, Rule, SignKey, SignSoc, Signed, StoreWrite, UPLOAD_CHARGE, whole_charge,
 };
 use fc_swarm_provider::methods::shell_publish::{EARLY_ANSWER_MESSAGE, USER_ORIGIN};
 use fc_swarm_provider::stores::history::{self, Bind, Cell, Statement};
 use fc_swarm_provider::value::Value;
 
 /// The rows these machines make calls under.
-const ROWS: [&str; 6] = [
+const ROWS: [&str; 7] = [
     "swarm.publish:data,file",
     "swarm.publish:collection",
     "swarm.feed:create",
     "swarm.feed:update",
+    "swarm.feed:read",
     "swarm.stamps",
     "swarm.upload_status",
 ];
+
+/// The calls' forms within `row`'s in the grammar file, in order and
+/// within their counts (common's `check_row_shape`; the machines ask one
+/// call at a time, which the property test checks).
+fn within_row(id: &str, grammar: V<'_, '_>, row: &str, played: &Played) {
+    let ran = common::Ran {
+        outcome: Outcome::Cancelled,
+        ready: Vec::new(),
+        calls: played
+            .calls
+            .iter()
+            .map(|c| Logged {
+                call: c.call.clone(),
+                charge: 0,
+                body: None,
+            })
+            .collect(),
+        cancels_after_outcome: 0,
+        most_open: 0,
+    };
+    check_row_shape(id, grammar, row, &ran);
+}
 
 /// The vectors' clock (`bodies`' `mtime_ms`; the feed update's timestamp
 /// is its second).
@@ -767,10 +791,24 @@ fn every_honest_scenario_makes_its_calls_exactly() {
         for (got, want) in played.calls.iter().zip(&wants) {
             same_call(got, *want).unwrap_or_else(|why| panic!("{id}: {why}"));
         }
-        let ShellOutcome::Result(result) = &outcome else {
-            panic!("{id}: {outcome:?}")
-        };
-        check_scenario_result(&id, result, &played);
+        within_row(&id, grammar_index.root(), &row, &played);
+        match &outcome {
+            ShellOutcome::Result(result) => check_scenario_result(&id, result, &played),
+            // readFeedState throws a 500 with bee-js's text, the node's
+            // body after the reason phrase, and probes nothing.
+            ShellOutcome::Error(err) if id == "swarm.feed-read-node-500" => assert_eq!(
+                err.to_value(),
+                Value::object([
+                    (
+                        "message",
+                        Value::str(r#"Internal Server Error: {"code":404,"message":"Not Found"}"#)
+                    ),
+                    ("status", Value::int(500)),
+                ]),
+                "{id}"
+            ),
+            other => panic!("{id}: {other:?}"),
+        }
         *played_rows.entry(row).or_insert(0) += 1;
     }
     for row in ROWS {
@@ -812,6 +850,14 @@ fn check_scenario_result(id: &str, result: &Value, played: &Played) {
         ]),
         // `Math.max(minIndex, nextIndex)`: 9 over the head's next, 3.
         "swarm.feed-update-min-index" => Value::object([("index", Value::int(9))]),
+        // readFeedState: the head's own index, or the probe's head.
+        "swarm.feed-read-latest" => {
+            Value::object([("exists", Value::Bool(true)), ("index", Value::int(2))])
+        }
+        "swarm.feed-read-empty" => Value::object([("exists", Value::Bool(false))]),
+        "swarm.feed-read-probe" => {
+            Value::object([("exists", Value::Bool(true)), ("index", Value::int(4))])
+        }
         // mapPostageBatch's fields, then the raw flags and TTL.
         "swarm.stamps-list" => Value::array([Value::object([
             ("batchID", Value::str(&a1)),
@@ -914,11 +960,41 @@ fn no_forbidden_alternative_is_made() {
                     .iter()
                     .all(|c| matches!(c.call.form, Form::Stamps | Form::Stamp))
             ),
+            // swarm.feed's read: one feed_head, the probe only after its
+            // 404, and nothing else.
+            "swarm.feed-read-whole-latest" => {
+                assert!(played.calls.iter().all(|c| c.call.form != Form::FeedLatest));
+            }
+            "swarm.feed-read-probe-after-found" | "swarm.feed-read-probe-after-500" => {
+                assert!(played.calls.iter().all(|c| c.call.form == Form::FeedHead));
+            }
+            "swarm.feed-read-probe-other-index" => {
+                let indices: Vec<u64> = played
+                    .calls
+                    .iter()
+                    .filter_map(|c| c.call.feed.as_ref().map(|f| f.index))
+                    .collect();
+                assert_eq!(indices, [0, 1, 2, 4, 8, 6, 5], "{id}");
+            }
+            "swarm.feed-read-second-head" => assert_eq!(
+                played
+                    .calls
+                    .iter()
+                    .filter(|c| c.call.form == Form::FeedHead)
+                    .count(),
+                1
+            ),
+            "swarm.feed-read-write" => assert!(
+                played
+                    .calls
+                    .iter()
+                    .all(|c| matches!(c.call.form, Form::FeedHead | Form::Chunk))
+            ),
             other => panic!("{other}: no property written for it"),
         }
         checked += 1;
     }
-    assert_eq!(checked, 4);
+    assert_eq!(checked, 10);
 }
 
 // ---------------------------------------------------------------------------
@@ -2778,30 +2854,15 @@ fn recorded_reply(reply: V<'_, '_>, keep: &[&str]) -> Reply {
 
 /// The calls the core makes for a step's recorded requests: the reference's
 /// own, but its second `/stamps` dropped (`stamps-one-read`) and its whole
-/// `GET /feeds` index lookup asked as `feed_head` (`index-probe`).
-/// `swarm.feed`'s read (readFeedState) learns the latest index by the same
-/// whole download (bee-js's `downloadPayload`, recorded as `feed_latest`,
-/// unmarked while the read has no grammar row): the core asks `feed_head`
-/// for it too, as for the update.
+/// `GET /feeds` index lookup (an update's and a read's) asked as
+/// `feed_head` (`index-probe`).
 fn want_calls(step: V<'_, '_>) -> Vec<WantCall> {
     let mut out = Vec::new();
     for r in get(step, "requests").children() {
         let reply = get(r, "reply");
         let deviation = r.get("deviation").map(string);
-        let read_lookup =
-            deviation.is_none() && r.get("form").map(string).as_deref() == Some("feed_latest");
         match deviation.as_deref() {
             Some("stamps-one-read") => continue,
-            _ if read_lookup => out.push(WantCall {
-                form: "feed_head".to_owned(),
-                method: "GET".to_owned(),
-                path: string(get(r, "path")),
-                query: Vec::new(),
-                headers: vec![("swarm-only-root-chunk".to_owned(), "true".to_owned())],
-                body: None,
-                feed: None,
-                reply: recorded_reply(reply, &["swarm-feed-index", "swarm-feed-index-next"]),
-            }),
             Some("index-probe") => out.push(WantCall {
                 form: "feed_head".to_owned(),
                 method: "GET".to_owned(),
@@ -2901,6 +2962,7 @@ fn shell_method(name: &str) -> Option<ShellMethod> {
 fn every_shell_case_through_the_machines() {
     let v = Vectors::load();
     let swarm_index = Index::new(&v.swarm).unwrap();
+    let grammar_index = Index::new(&v.grammar).unwrap();
     let keys = keys_of(&v);
     let mut played = 0usize;
     let mut left_out = Vec::new();
@@ -2914,8 +2976,8 @@ fn every_shell_case_through_the_machines() {
             left_out.push(id);
             continue;
         }
-        // A feed update's index lookup is feed_head (`index-probe`), which
-        // want_calls asks for. A picked file whose read fails once its
+        // A feed update's and a read's index lookup is feed_head
+        // (`index-probe`), which want_calls asks for. A picked file whose read fails once its
         // upload started (`picked-read-text`): the reference's fetch fails
         // before any request reaches the node; the core makes its upload
         // call, main ends the part with the errno's name, and the core
@@ -2956,6 +3018,7 @@ fn every_shell_case_through_the_machines() {
             main.db = Some(HistoryDb::open());
         }
         let (outcome, ran, _) = main.play(parse(method, &params));
+        within_row(&id, grammar_index.root(), &string(get(case, "row")), &ran);
         let extra = usize::from(picked_read);
         assert_eq!(
             ran.calls.len(),

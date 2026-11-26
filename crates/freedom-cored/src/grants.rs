@@ -37,10 +37,16 @@
 //! (`swarm.manifest`). Each write holds the lock from the copy it changes
 //! to the change put in place, its file written between ([`write_swarm`]),
 //! so the two writers' changes are serialised and neither loses the
-//! other's.
+//! other's. Whether the file is behind memory (a narrowing whose write
+//! failed) is shared too ([`SwarmFile`]): the swarm thread's write of a
+//! change that leaves the store as it is still writes a file that is
+//! behind, so the file holds memory's store before a manifest transaction
+//! that changed it goes on (D17: the user's revoke whose write failed,
+//! which the detach's disconnect finds already made).
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use fc_approval::stores::{
@@ -156,17 +162,32 @@ pub struct Written<T> {
     pub durable: bool,
 }
 
+/// `swarm-permissions.json` once the core writes it, for the swarm
+/// thread's writes ([`write_swarm`], D2): its path, and whether it is
+/// behind memory (a narrowing applied in memory whose write failed, and no
+/// write since), which the event loop's writes and the swarm thread's share,
+/// each reading and setting it under the Swarm store's lock.
+#[derive(Debug, Clone)]
+pub struct SwarmFile {
+    pub path: PathBuf,
+    behind: Arc<AtomicBool>,
+}
+
 /// The four stores and where they live.
 #[derive(Default)]
 pub struct Grants {
     root: Option<PathBuf>,
     moved: Vec<StoreKind>,
-    /// The stores whose file is behind memory: a narrowing applied in
-    /// memory whose write failed, and no write of that store since.
+    /// The stores other than the Swarm one whose file is behind memory: a
+    /// narrowing applied in memory whose write failed, and no write of
+    /// that store since.
     behind: Vec<StoreKind>,
     dapp: DappStore,
     /// Shared with the swarm thread (D2).
     swarm: Arc<Mutex<SwarmStore>>,
+    /// The Swarm store's file is behind memory, shared with the swarm
+    /// thread ([`SwarmFile`]).
+    swarm_behind: Arc<AtomicBool>,
     radicle: RadicleStore,
     x402: CapStore,
 }
@@ -184,13 +205,16 @@ impl Grants {
         Arc::clone(&self.swarm)
     }
 
-    /// `swarm-permissions.json`'s path once the core writes it (`swarm` in
+    /// `swarm-permissions.json` once the core writes it (`swarm` in
     /// `grant_moved`), for the swarm thread's writes ([`write_swarm`]).
-    pub fn swarm_path(&self) -> Option<PathBuf> {
+    pub fn swarm_file(&self) -> Option<SwarmFile> {
         if !self.moved(StoreKind::Swarm) {
             return None;
         }
-        self.path(StoreKind::Swarm)
+        Some(SwarmFile {
+            path: self.path(StoreKind::Swarm)?,
+            behind: Arc::clone(&self.swarm_behind),
+        })
     }
 
     /// The shared Swarm store, locked. A poisoned lock still holds a whole
@@ -309,14 +333,28 @@ impl Grants {
         let Some(path) = self.path(S::KIND) else {
             return Err(WriteFailure::NotMoved);
         };
-        let behind = through && self.behind.contains(&S::KIND);
+        // The Swarm store's file state is shared with the swarm thread, and
+        // read and set under the store's lock (D2).
+        let shared = (S::KIND == StoreKind::Swarm).then(|| Arc::clone(&self.swarm_behind));
+        let own = self.behind.contains(&S::KIND);
         // The copy, its file and the change put in place under one lock,
         // so another writer of the shared Swarm store waits (D2).
-        let (result, file) = S::locked(self, |slot| write_slot(slot, &path, change, behind));
-        match file {
-            File::Current => self.behind.retain(|kind| *kind != S::KIND),
-            File::Behind if !self.behind.contains(&S::KIND) => self.behind.push(S::KIND),
-            File::Behind | File::Unchanged => {}
+        let (result, file) = S::locked(self, |slot| {
+            let behind = shared
+                .as_ref()
+                .map_or(own, |behind| behind.load(Ordering::SeqCst));
+            let (result, file) = write_slot(slot, &path, change, through && behind);
+            if let Some(behind) = &shared {
+                file.mark(behind);
+            }
+            (result, file)
+        });
+        if shared.is_none() {
+            match file {
+                File::Current => self.behind.retain(|kind| *kind != S::KIND),
+                File::Behind if !own => self.behind.push(S::KIND),
+                File::Behind | File::Unchanged => {}
+            }
         }
         result
     }
@@ -330,6 +368,17 @@ enum File {
     Behind,
     /// Not written, and memory as it was.
     Unchanged,
+}
+
+impl File {
+    /// The shared Swarm store's file state after the write.
+    fn mark(&self, behind: &AtomicBool) {
+        match self {
+            File::Current => behind.store(false, Ordering::SeqCst),
+            File::Behind => behind.store(true, Ordering::SeqCst),
+            File::Unchanged => {}
+        }
+    }
 }
 
 /// `change` on a copy of `slot`, the copy's text written to `path`, and the
@@ -390,20 +439,49 @@ fn write_slot<S: StoreFile, T>(
 
 /// The swarm thread's write of the shared Swarm store (design 0015's D2:
 /// a permission manifest's projection): as the loop's
-/// ([`Grants::write`]), `change` on a copy, `swarm-permissions.json` at
-/// `path` written, and the copy put in place, all under the store's lock,
-/// so the loop's writes and the thread's are serialised. A narrowing whose
-/// write fails is in place all the same, as the loop's is; the loop's next
-/// write of the store carries it.
+/// ([`Grants::write`]), `change` on a copy, `swarm-permissions.json`
+/// written, and the copy put in place, all under the store's lock, so the
+/// loop's writes and the thread's are serialised. A narrowing whose write
+/// fails is in place all the same, as the loop's is, and either writer's
+/// next write carries it. While the file is behind memory, a change that
+/// leaves the store as it is writes it all the same
+/// ([`Grants::write_through`]'s rule), so the file holds memory's store
+/// before the projection's transaction goes on: a revoke the loop made in
+/// memory alone is on disk before a detach commits the record's removal
+/// (D17).
 pub fn write_swarm<T>(
     handle: &Mutex<SwarmStore>,
-    path: &Path,
+    file: &SwarmFile,
     change: impl FnOnce(&mut SwarmStore) -> Applied<T>,
 ) -> Result<Written<T>, WriteFailure> {
     let mut store = handle
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    write_slot(&mut *store, path, change, false).0
+    let behind = file.behind.load(Ordering::SeqCst);
+    let (result, written) = write_slot(&mut *store, &file.path, change, behind);
+    written.mark(&file.behind);
+    result
+}
+
+/// The swarm thread's write of `swarm-permissions.json` where it is behind
+/// memory (D2, D17): the store as it stands written under its lock, so the
+/// file holds what memory does before the manifest store saves
+/// ([`crate::swarm::engine::GrantsWriter::settle`]). Nothing while the
+/// file is current.
+pub fn settle_swarm(handle: &Mutex<SwarmStore>, file: &SwarmFile) -> Result<(), WriteFailure> {
+    let mut store = handle
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !file.behind.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    let unchanged = |_: &mut SwarmStore| Applied {
+        value: (),
+        effect: Effect::Unchanged,
+    };
+    let (result, written) = write_slot(&mut *store, &file.path, unchanged, true);
+    written.mark(&file.behind);
+    result.map(drop)
 }
 
 #[cfg(test)]
@@ -424,7 +502,7 @@ mod tests {
         let mut grants = Grants::new();
         grants.configure(dir.path().to_path_buf(), vec![StoreKind::Swarm], 0);
         let handle = grants.swarm_handle();
-        let path = grants.swarm_path().unwrap();
+        let path = grants.swarm_file().unwrap();
         let mut thread = None;
         grants
             .write::<SwarmStore, _>(|store| {
@@ -444,7 +522,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(thread.unwrap().join().unwrap(), Effect::Widening);
-        let file = SwarmStore::load(&std::fs::read(&path).unwrap()).unwrap();
+        let file = SwarmStore::load(&std::fs::read(&path.path).unwrap()).unwrap();
         for store in [&*handle.lock().unwrap(), &file] {
             assert!(store.entry("https://a.example").is_some());
             assert!(store.entry("https://b.example").is_some());
@@ -455,7 +533,7 @@ mod tests {
             store.revoke("https://a.example")
         })
         .unwrap();
-        let file = SwarmStore::load(&std::fs::read(&path).unwrap()).unwrap();
+        let file = SwarmStore::load(&std::fs::read(&path.path).unwrap()).unwrap();
         assert!(file.entry("https://a.example").is_none());
         assert!(
             grants
@@ -466,6 +544,49 @@ mod tests {
         // Not moved: no path for the thread, and the loop writes nothing.
         let mut unmoved = Grants::new();
         unmoved.configure(dir.path().to_path_buf(), Vec::new(), 0);
-        assert!(unmoved.swarm_path().is_none());
+        assert!(unmoved.swarm_file().is_none());
+    }
+
+    /// D2 and D17: a narrowing whose write failed leaves the file behind
+    /// memory, and the swarm thread's next write carries it, even one whose
+    /// change leaves the store as it is (a detach's disconnect of a site
+    /// the loop's revoke already took out of memory); the file is then
+    /// current for both writers.
+    #[test]
+    fn the_thread_writes_a_file_the_loop_left_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut grants = Grants::new();
+        grants.configure(dir.path().to_path_buf(), vec![StoreKind::Swarm], 0);
+        let handle = grants.swarm_handle();
+        let file = grants.swarm_file().unwrap();
+        let site = "https://a.example";
+        grants
+            .write::<SwarmStore, _>(|store| store.connect(site, 1))
+            .unwrap();
+        let on_disk = |file: &SwarmFile| {
+            SwarmStore::load(&std::fs::read(&file.path).unwrap())
+                .unwrap()
+                .entry(site)
+                .is_some()
+        };
+        // The revoke's rename fails: a directory stands where the file goes.
+        let saved = std::fs::read(&file.path).unwrap();
+        std::fs::remove_file(&file.path).unwrap();
+        std::fs::create_dir(&file.path).unwrap();
+        std::fs::write(file.path.join("in-the-way"), b"").unwrap();
+        let failed = grants.write::<SwarmStore, _>(|store| store.revoke(site));
+        assert!(matches!(failed, Err(WriteFailure::Io { applied: true })));
+        std::fs::remove_dir_all(&file.path).unwrap();
+        std::fs::write(&file.path, saved).unwrap();
+        assert!(on_disk(&file), "the file is behind memory");
+        assert!(handle.lock().unwrap().entry(site).is_none());
+        // The thread's revoke changes nothing in memory, and writes the file.
+        let written = write_swarm(&handle, &file, |store| store.revoke(site)).unwrap();
+        assert_eq!(written.effect, Effect::Unchanged);
+        assert!(!on_disk(&file));
+        // Current again: an unchanged write writes nothing.
+        std::fs::remove_file(&file.path).unwrap();
+        write_swarm(&handle, &file, |store| store.revoke(site)).unwrap();
+        assert!(!file.path.exists());
     }
 }

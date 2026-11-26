@@ -52,6 +52,8 @@ struct Fake {
     vaults: Vec<(u64, VaultAsk)>,
     /// `approval.changed`'s keys, in order.
     changed: Vec<String>,
+    /// `swarm-manifest-grants.json`'s texts saved, in order.
+    manifest_saves: Vec<String>,
     /// The mining batches handed out, with their lane thread.
     batches: Vec<(u64, fc_swarm_provider::mining::Batch)>,
 }
@@ -117,7 +119,8 @@ impl Io for Fake {
         self.feed_texts.push(text.to_owned());
         Ok(())
     }
-    fn save_manifests(&mut self, _save: &Save) -> Result<(), JsString> {
+    fn save_manifests(&mut self, save: &Save) -> Result<(), JsString> {
+        self.manifest_saves.push(save.text.clone());
         Ok(())
     }
     fn history(&mut self, statements: &[Statement]) -> Result<(), JsString> {

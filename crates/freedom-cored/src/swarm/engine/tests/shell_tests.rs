@@ -746,6 +746,237 @@ fn a_held_change_is_answered_to_its_op() {
     assert_eq!((engine.memory_used(), engine.requests()), (0, 0));
 }
 
+// --- D17: a user's Swarm grant change detaches -----------------------------------
+
+/// `SITE_BZZ`'s record: a manifest that manages the connection and the
+/// publish rule, the publish capability acknowledged.
+const MANAGED: &str = r#"{"managed":{"connection":["publish"],"autoApprove.publish":["publish"]},"acknowledged":{"publish":{"decision":"managed","source":"sheet","decidedAt":1}},"revision":1}"#;
+
+/// An engine whose stores and grants have moved, the manifest store
+/// holding `SITE_BZZ`'s record [`MANAGED`] and the grants its connection
+/// with the publish rule.
+fn managed() -> Engine {
+    let mut engine = moved(Bounds::default());
+    let shared = engine.shared_mut();
+    let file = format!(r#"{{"version":1,"records":{{"{SITE_BZZ}":{MANAGED}}}}}"#);
+    shared
+        .manifests
+        .load(Some(file.as_bytes()), || None)
+        .unwrap();
+    let mut grants = shared.grants.lock().unwrap();
+    let _ = grants.connect(SITE_BZZ, 1);
+    let _ = grants.set_flag(SITE_BZZ, SwarmFlag::Publish, true);
+    drop(grants);
+    engine
+}
+
+/// The site's record in the last text the manifest store saved.
+fn saved_record(io: &Fake, site: &str) -> Option<String> {
+    let text = io.manifest_saves.last()?;
+    let file: serde_json::Value = serde_json::from_str(text).unwrap();
+    let record = &file["records"][site];
+    (!record.is_null()).then(|| record.to_string())
+}
+
+fn get_params(site: &str) -> String {
+    format!(r#"{{"op":"get","origin":{{"string":"{site}"}}}}"#)
+}
+
+/// D17: a user's change of a rule detaches that projection from the site's
+/// record as `detachManaged` does (marked detached, no longer managed, the
+/// revision moved on, saved through its journal), the other projections
+/// staying managed; nothing is answered or told. A connection the user
+/// revoked disconnects: the record goes. A site with no record, or a core
+/// whose stores haven't moved, changes nothing.
+#[test]
+fn a_users_grant_change_detaches_its_projection() {
+    use fc_swarm_provider::stores::manifests::{Capability, Projection};
+    let mut engine = managed();
+    let mut io = Fake::default();
+    let publish = Projection::AutoApprove(Capability::Publish);
+    engine.grant_changed(&mut io, 0, SITE_BZZ, publish).unwrap();
+    // The journal, then the commit.
+    assert_eq!(io.manifest_saves.len(), 2);
+    assert!(io.manifest_saves[0].contains(r#""pending""#));
+    assert_eq!(
+        saved_record(&io, SITE_BZZ).unwrap(),
+        r#"{"managed":{"connection":["publish"]},"acknowledged":{"publish":{"decision":"managed","source":"sheet","decidedAt":1}},"revision":2,"detached":{"autoApprove.publish":true}}"#
+    );
+    assert!(io.answers.is_empty());
+    assert!(io.changed.is_empty());
+    assert_eq!(engine.requests(), 0);
+    // A site with no record: nothing saved.
+    engine
+        .grant_changed(&mut io, 0, "https://b.example", publish)
+        .unwrap();
+    assert_eq!(io.manifest_saves.len(), 2);
+    // The connection, which the event loop revoked first: the record goes,
+    // and nothing is told (the revoke finds no grant left).
+    let _ = engine.shared_mut().grants.lock().unwrap().revoke(SITE_BZZ);
+    engine
+        .grant_changed(&mut io, 0, SITE_BZZ, Projection::Connection)
+        .unwrap();
+    assert_eq!(io.manifest_saves.len(), 4);
+    assert_eq!(saved_record(&io, SITE_BZZ), None);
+    assert!(io.changed.is_empty());
+    // Before the stores move, main holds the manifest store.
+    let mut unmoved = Engine::new(
+        Bounds::default(),
+        Shared::new(grants(), Bindings::default()),
+        true,
+    );
+    let mut io = Fake::default();
+    unmoved.grant_changed(&mut io, 0, SITE, publish).unwrap();
+    assert!(io.manifest_saves.is_empty());
+    assert!(!unmoved.shared_mut().manifests.is_loaded());
+}
+
+/// D17's order: a detach waits for the site's `swarm.manifest` op that came
+/// before it (a check whose fetch is out, which read the record and would
+/// put it back as it read it), and the site's op that comes after it waits
+/// for the detach; another site's op goes on.
+#[test]
+fn a_detach_keeps_its_place_among_the_sites_ops() {
+    use fc_swarm_provider::stores::manifests::{Capability, Projection};
+    let mut engine = managed();
+    let mut io = Fake::default();
+    engine
+        .op(
+            &mut io,
+            0,
+            1,
+            ops::MANIFEST,
+            Some(&check_params()),
+            ops::Caller::Shell,
+        )
+        .unwrap();
+    let (fetch, method, _) = io.last();
+    assert_eq!(method, "shell.swarm_manifest");
+    let publish = Projection::AutoApprove(Capability::Publish);
+    engine.grant_changed(&mut io, 0, SITE_BZZ, publish).unwrap();
+    assert!(
+        io.manifest_saves.is_empty(),
+        "the detach waits for the check"
+    );
+    // The site's own op waits behind the detach; another site's doesn't.
+    engine
+        .op(
+            &mut io,
+            0,
+            2,
+            ops::MANIFEST,
+            Some(&get_params(SITE_BZZ)),
+            ops::Caller::Shell,
+        )
+        .unwrap();
+    engine
+        .op(
+            &mut io,
+            0,
+            3,
+            ops::MANIFEST,
+            Some(&get_params("https://b.example")),
+            ops::Caller::Shell,
+        )
+        .unwrap();
+    assert_eq!(
+        result_of(io.answer_of(3)),
+        r#"{"result_typed":{"null":true}}"#
+    );
+    assert!(io.answers.is_empty());
+    // The check's manifest: it answers and keeps the record it read, with
+    // what it observed; then the detach; then the site's op.
+    let reply = serde_json::json!({
+        "status": 200,
+        "body_base64": fc_swarm_provider::value::encode_base64(MANIFEST.as_bytes()),
+    })
+    .to_string();
+    engine.response(&mut io, 0, fetch, Ok(&reply)).unwrap();
+    let answered: Vec<u64> = io.answers.iter().map(|(id, _)| *id).collect();
+    assert_eq!(answered, [1, 2]);
+    assert!(result_of(io.answer_of(1)).contains(r#"["kind",{"string":"ready"}]"#));
+    assert_eq!(
+        io.manifest_saves.len(),
+        3,
+        "the check's save, then the detach's two"
+    );
+    let record: serde_json::Value =
+        serde_json::from_str(&saved_record(&io, SITE_BZZ).unwrap()).unwrap();
+    assert!(record["observed"].is_object(), "{record}");
+    assert_eq!(
+        record["detached"],
+        serde_json::json!({ "autoApprove.publish": true })
+    );
+    assert_eq!(
+        record["managed"],
+        serde_json::json!({ "connection": ["publish"] })
+    );
+    assert_eq!(record["revision"], 2);
+    let text = result_of(io.answer_of(2));
+    assert!(
+        text.contains(r#"["autoApprove.publish",{"boolean":true}]"#),
+        "{text}"
+    );
+    assert!(text.contains(r#"["revision",{"number":"2"}]"#), "{text}");
+    for id in 1..=3 {
+        engine.written(&mut io, 0, id).unwrap();
+    }
+    assert_eq!((engine.memory_used(), engine.requests()), (0, 0));
+}
+
+/// D17 and SW-1's hold: a connection the user revoked disconnects, which
+/// revokes the site's feed grant; while the site's SOC holds the keeper,
+/// that revoke would be deferred, so the detach waits, whole, for the
+/// hold's end, and the site's ops after it wait too.
+#[test]
+fn a_detach_waits_for_a_hold_on_its_site() {
+    use fc_swarm_provider::machine::keeper::{HoldId, Keeper};
+    use fc_swarm_provider::stores::feeds::FeedStore;
+    use fc_swarm_provider::stores::manifests::Projection;
+    let mut engine = managed();
+    let mut io = Fake::default();
+    let feeds = format!(
+        r#"{{"version":2,"nextPublisherKeyIndex":0,"origins":{{"{SITE_BZZ}":{{"activeIdentityId":"bee-wallet","identities":{{"bee-wallet":{{"id":"bee-wallet","mode":"bee-wallet","publisherKeyIndex":null,"walletIndex":null,"label":"Bee","createdAt":1,"lastUsedAt":null}}}},"feedGranted":true,"grantedAt":1,"feeds":{{}}}}}}}}"#
+    );
+    let shared = engine.shared_mut();
+    shared.keeper = Keeper::new(FeedStore::load(Some(feeds.as_bytes()), 0, |_| false).store);
+    shared.keeper.hold(HoldId(7), JsString::from(SITE_BZZ));
+    let _ = shared.grants.lock().unwrap().revoke(SITE_BZZ);
+    engine
+        .grant_changed(&mut io, 0, SITE_BZZ, Projection::Connection)
+        .unwrap();
+    assert!(io.manifest_saves.is_empty());
+    assert!(io.feed_texts.is_empty());
+    engine
+        .op(
+            &mut io,
+            0,
+            1,
+            ops::MANIFEST,
+            Some(&get_params(SITE_BZZ)),
+            ops::Caller::Shell,
+        )
+        .unwrap();
+    assert!(io.answers.is_empty());
+    engine.release_hold(&mut io, HoldId(7));
+    engine.room(&mut io, 0).unwrap();
+    assert_eq!(saved_record(&io, SITE_BZZ), None);
+    assert_eq!(io.feed_texts.len(), 1);
+    assert!(
+        !engine
+            .shared_mut()
+            .keeper
+            .store()
+            .has_feed_grant(&JsString::from(SITE_BZZ))
+    );
+    assert_eq!(
+        result_of(io.answer_of(1)),
+        r#"{"result_typed":{"null":true}}"#
+    );
+    engine.written(&mut io, 0, 1).unwrap();
+    assert_eq!((engine.memory_used(), engine.requests()), (0, 0));
+}
+
 /// An `invalid_argument`'s text is at most 256 bytes, its ellipsis within
 /// the bound, cut at a character's boundary.
 #[test]

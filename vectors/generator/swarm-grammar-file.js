@@ -545,7 +545,9 @@ async function mainRows(env) {
       const c = coreCall({ ...r, status: r.status }, form);
       return c;
     });
-    out.push({ id, row, from: 'publish-service.js / feed-service.js at the swarm reference', params, calls });
+    const indexHeaders = requests.map((r) => Object.fromEntries(Object.entries(r.raw.replyHeaders || {})
+      .map(([n, v]) => [n.toLowerCase(), String(v)]).filter(([n]) => n.startsWith('swarm-feed-index'))));
+    out.push({ id, row, from: 'publish-service.js / feed-service.js at the swarm reference', params, calls, ...(row === 'swarm.feed:read' ? { indexHeaders } : {}) });
   };
   const stamps = { stamps: C.STAMPS.usable };
   await record('swarm.publish-data-default', 'swarm.publish:data,file', { kind: 'data', parts: [{ bytes: 5 }] }, stamps,
@@ -569,6 +571,26 @@ async function mainRows(env) {
     reference: C.REF, min_index: 9 }, { ...stamps, latest: [{ key: 'bee', topic: agentTopic, reply: { status: 200,
     headers: { 'swarm-feed-index': '0000000000000002', 'swarm-feed-index-next': '0000000000000003' }, body_utf8: 'x' } }] },
   async (ref) => ref.feedService.updateFeed(await signer(ref), agentTopic, C.REF, undefined, { minIndex: 9 }));
+  // readFeedState (swarm.feed's read): the lookup, then the head probe
+  // after its 404.
+  const readParams = { op: 'read', key: { kind: 'bee_wallet' }, topic: env.beeJs.Topic.fromString(agentTopic).toHex() };
+  const beeOwner = env.keyOf('bee').address;
+  const latest = (reply) => [{ key: 'bee', topic: agentTopic, reply }];
+  const missing = { status: 404, json: { code: 404, message: 'Not Found' } };
+  const readState = (ref) => ref.feedService.readFeedState(beeOwner, agentTopic);
+  await record('swarm.feed-read-latest', 'swarm.feed:read', readParams, { latest: latest({ status: 200,
+    headers: { 'swarm-feed-index': '0000000000000002', 'swarm-feed-index-next': '0000000000000003' }, body_utf8: 'x' }) }, readState);
+  await record('swarm.feed-read-empty', 'swarm.feed:read', readParams, { latest: latest(missing),
+    probes: [{ key: 'bee', topic: agentTopic, targets: [] }] }, readState);
+  await record('swarm.feed-read-probe', 'swarm.feed:read', readParams, { latest: latest(missing),
+    probes: [{ key: 'bee', topic: agentTopic, head: 4, targets: [5] }] }, readState);
+  // A 500 is thrown with bee-js's text, with no probe.
+  await record('swarm.feed-read-node-500', 'swarm.feed:read', readParams, { latest: latest({ status: 500, json: { code: 500, message: 'feed lookup failed' } }) },
+    (ref) => readState(ref).then(() => {
+      throw new Error('readFeedState answered a 500');
+    }, (err) => {
+      if (err?.status !== 500) throw err;
+    }));
   await record('swarm.stamps-list', 'swarm.stamps', {}, stamps, (ref) => ref.swarmService.getBee().stamp.getAll());
   await record('swarm.upload_status', 'swarm.upload_status', { tag_uid: 101 }, { tags: { 101: { uid: 101, split: 1, seen: 0, stored: 1, sent: 1, synced: 1, address: 'ab'.repeat(32), startedAt: '2026-01-01T00:00:00Z' } } },
     (ref) => ref.publishService.getUploadStatus(101));
@@ -577,6 +599,16 @@ async function mainRows(env) {
     s.calls = s.calls.map((c) => (c.form === 'feed_latest' && s.row === 'swarm.feed:update'
       ? { ...c, form: 'feed_head', headers: mainHeaders([['swarm-only-root-chunk', 'true']]), reply: { status: 200, headers: {
         'swarm-feed-index': '0000000000000002', 'swarm-feed-index-next': '0000000000000003' } } } : c));
+  }
+  // And in readFeedState's (index-probe), its reply's index headers kept.
+  for (const s of out.filter((r) => r.row === 'swarm.feed:read')) {
+    s.calls = s.calls.map((c, k) => {
+      if (c.form !== 'feed_latest') return c;
+      const reply = { status: c.reply.status };
+      if (reply.status >= 200 && reply.status < 300) reply.headers = s.indexHeaders[k];
+      return { ...c, form: 'feed_head', headers: mainHeaders([['swarm-only-root-chunk', 'true']]), reply };
+    });
+    delete s.indexHeaders;
   }
   return out;
 }
@@ -745,6 +777,30 @@ function forbiddenFrom(honest, env) {
   });
   add('swarm.stamps-write', 'swarm.stamps-list', 'form', 'any write under swarm.stamps', () => [call('chunk_up', 'POST', '/chunks',
     { headers: mainHeaders([['content-type', 'application/octet-stream']]), body: Buffer.alloc(9) })]);
+  // swarm.feed's read: feed_head once, and the head probe only after its 404.
+  const readProbe = (calls, index) => {
+    const [, , owner, topic] = calls[0].path.split('/');
+    return call('chunk', 'GET', `/chunks/${feedAddress(env, topic, owner, index)}`, { headers: mainHeaders(), feed: { owner, index } });
+  };
+  add('swarm.feed-read-whole-latest', 'swarm.feed-read-latest', 'form', 'a whole feed_latest for the read\'s lookup', (calls) => {
+    calls[0].form = 'feed_latest';
+    calls[0].headers = calls[0].headers.filter(([n]) => n !== 'swarm-only-root-chunk');
+  });
+  add('swarm.feed-read-probe-after-found', 'swarm.feed-read-latest', 'order', 'a probe chunk after feed_head found the index', (calls) => [...calls, readProbe(calls, 0)]);
+  add('swarm.feed-read-probe-after-500', 'swarm.feed-read-node-500', 'order', 'a probe chunk after feed_head\'s 500 (the read throws it)',
+    (calls) => [...calls, readProbe(calls, 0)]);
+  add('swarm.feed-read-probe-other-index', 'swarm.feed-read-probe', 'value', 'a probe chunk at another index than the probe asks next', (calls) => {
+    const probes = calls.filter((c) => c.feed);
+    const third = probes[2];
+    const wrong = readProbe(calls, third.feed.index + 1);
+    return [...calls.slice(0, calls.indexOf(third)), wrong];
+  });
+  add('swarm.feed-read-second-head', 'swarm.feed-read-latest', 'count', 'a second feed_head', (calls) => [...calls, structuredClone(calls[0])]);
+  add('swarm.feed-read-write', 'swarm.feed-read-latest', 'form', 'a soc_up under swarm.feed\'s read', (calls) => {
+    const [, , owner] = calls[0].path.split('/');
+    return [...calls, call('soc_up', 'POST', `/soc/${owner}/${'ab'.repeat(32)}`, { query: [['sig', 'cd'.repeat(65)]],
+      headers: mainHeaders([['content-type', 'application/octet-stream'], ['swarm-postage-batch-id', C.BATCH_A]]), body: Buffer.alloc(48) })];
+  });
   return out;
 }
 
