@@ -824,6 +824,7 @@ dependencies = [
  "fc-json",
  "fc-keys",
  "fc-keystore",
+ "fc-ledger",
  "fc-naming",
  "fc-profile",
  "fc-protocol",
