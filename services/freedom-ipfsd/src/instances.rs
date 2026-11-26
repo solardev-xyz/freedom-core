@@ -975,6 +975,7 @@ fn stopped() -> ErrorBody {
 /// A fixed name for a store error: its text can carry a path.
 fn store_error_kind(error: &StoreError) -> &'static str {
     match error {
+        StoreError::OutOfMemory(_) => "out_of_memory",
         StoreError::Sqlite(_) => "sqlite",
         StoreError::Core(_) => "core",
         StoreError::Json(_) => "json",
