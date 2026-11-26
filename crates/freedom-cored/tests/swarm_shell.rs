@@ -1533,7 +1533,12 @@ fn shell_swarm_manifest_answers_and_its_bound() {
         &check(),
         "shell",
     )));
-    assert!(started.elapsed() >= std::time::Duration::from_millis(400));
+    // The thread's clock floors to whole milliseconds: the bound can pass
+    // up to 1 ms early by this test's clock.
+    assert!(
+        started.elapsed() + std::time::Duration::from_millis(2)
+            >= std::time::Duration::from_millis(400)
+    );
     assert_eq!(own.cancels, 1);
     assert_eq!(text_at(&answer, "reason"), "unresolved");
 }
