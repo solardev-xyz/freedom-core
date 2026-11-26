@@ -195,6 +195,9 @@ pub struct Bounds {
     /// D13: a whole node reply's bound in all under a parent with no total
     /// deadline (300 s).
     pub whole_ms: Ms,
+    /// The total deadline of main's own methods under the Swarm deadline
+    /// (300 s; the test hooks' shorter).
+    pub deadline_ms: Ms,
 }
 
 impl Default for Bounds {
@@ -209,6 +212,7 @@ impl Default for Bounds {
             idle_ms: IDLE_MS,
             wait_ms: fc_swarm_provider::machine::shell::MEMORY_WAIT_MS,
             whole_ms: fc_swarm_provider::machine::shell::WHOLE_REPLY_MS,
+            deadline_ms: fc_swarm_provider::machine::shell::SWARM_DEADLINE_MS,
         }
     }
 }
@@ -398,23 +402,35 @@ pub struct OwnSignAsk {
     pub cancelled: Cancelled,
 }
 
-/// A request's cancellation (design 0015, "Deadlines and cancel": nothing
-/// is signed after the cancel). The event loop sets it as it reads main's
+/// A request's end, as the vault's signatures see it (design 0015,
+/// "Deadlines and cancel": nothing is signed after the cancel, nor once the
+/// request has answered): whether it has ended, behind a lock the vault
+/// holds from its check to the signature's end
+/// ([`Cancelled::unless_ended`]). The event loop ends it as it reads main's
 /// cancel of the request, before it handles any vault ask that came behind
-/// that cancel, and the engine as the request answers; the vault checks it
-/// just before it signs, and signs nothing once it is set. A vault ask
-/// already on the loop's queue when the swarm thread hears of the cancel
-/// is so refused, not signed and dropped.
+/// that cancel, and the engine as the request answers, by its deadline or
+/// any other end; each takes the lock, so it waits for a signature being
+/// made, which is quick. So a signature is made wholly before its
+/// request's end, or not at all: a vault ask still on the loop's queue
+/// once its request has ended is refused, not signed and dropped.
 #[derive(Debug, Clone, Default)]
-pub struct Cancelled(Arc<std::sync::atomic::AtomicBool>);
+pub struct Cancelled(Arc<Mutex<bool>>);
 
 impl Cancelled {
+    /// The request has ended: once a signature being made under it is
+    /// done, none is.
     pub fn set(&self) {
-        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        *ended(&self.0) = true;
     }
 
-    pub fn is_set(&self) -> bool {
-        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    /// `sign`'s result, made holding the request's state, unless the
+    /// request has ended (`None`): its end waits for `sign` meanwhile.
+    pub fn unless_ended<T>(&self, sign: impl FnOnce() -> T) -> Option<T> {
+        let ended = ended(&self.0);
+        if *ended {
+            return None;
+        }
+        Some(sign())
     }
 
     /// The event loop's hold on it, which doesn't keep it alive: it goes
@@ -422,6 +438,14 @@ impl Cancelled {
     pub fn watch(&self) -> CancelWatch {
         CancelWatch(Arc::downgrade(&self.0))
     }
+}
+
+/// A request's state, locked: nothing holds it past a signature, and a
+/// holder that panicked leaves it as it was.
+fn ended(state: &Mutex<bool>) -> MutexGuard<'_, bool> {
+    state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl PartialEq for Cancelled {
@@ -432,13 +456,13 @@ impl PartialEq for Cancelled {
 
 /// The event loop's side of a [`Cancelled`].
 #[derive(Debug, Clone)]
-pub struct CancelWatch(std::sync::Weak<std::sync::atomic::AtomicBool>);
+pub struct CancelWatch(std::sync::Weak<Mutex<bool>>);
 
 impl CancelWatch {
-    /// Main cancelled the request: set, if the request is still there.
+    /// Main cancelled the request: ended, if the request is still there.
     pub fn set(&self) {
-        if let Some(flag) = self.0.upgrade() {
-            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(state) = self.0.upgrade() {
+            *ended(&state) = true;
         }
     }
 
@@ -1226,9 +1250,9 @@ impl Engine {
             return Ok(());
         }
         let bound = method.deadline();
-        let deadline = bound
-            .total_ms(None)
-            .map_or(Ms::MAX, |total| now.saturating_add(total));
+        let deadline = bound.total_ms(None).map_or(Ms::MAX, |total| {
+            now.saturating_add(total.min(self.bounds.deadline_ms))
+        });
         self.slots.insert(
             id,
             Slot {
