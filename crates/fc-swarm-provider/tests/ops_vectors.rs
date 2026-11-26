@@ -1758,6 +1758,60 @@ fn a_users_grant_change_detaches_as_detach_managed_does() {
     assert!(!world.grants.connected(&key("a")));
 }
 
+/// D17: the manifest store saves only once the grants' file holds what
+/// memory does (`Grants::settle`): a settle that fails fails the save, so a
+/// detach's disconnect commits nothing, its journal included, and the
+/// record stays until a detach whose settle succeeds.
+#[test]
+fn a_detach_commits_nothing_while_the_grants_file_cannot_be_settled() {
+    use fc_swarm_provider::stores::manifests::Projection;
+    struct Unsettled<'a>(&'a mut GrantMirror);
+    impl Grants for Unsettled<'_> {
+        fn connected(&self, key: &JsString) -> bool {
+            self.0.connected(key)
+        }
+        fn messaging(&self, key: &JsString) -> bool {
+            self.0.messaging(key)
+        }
+        fn auto_approve(&self, key: &JsString, capability: Capability) -> bool {
+            self.0.auto_approve(key, capability)
+        }
+        fn apply(&mut self, key: &JsString, effect: Effect) -> Result<(), JsString> {
+            self.0.apply(key, effect)
+        }
+        fn settle(&mut self) -> Result<(), JsString> {
+            Err(JsString::from("The Swarm grants could not be written"))
+        }
+    }
+    let managed = r#"{"version":1,"records":{"a":{"managed":{"connection":["feeds"]},"acknowledged":{"feeds":{"decision":"managed","source":"sheet","decidedAt":1}},"revision":3}}}"#;
+    let mut world = feeds_world(HELD_FEEDS, "{}", Some(managed));
+    let before = world.disk.dir.clone();
+    let World {
+        keeper,
+        manifests,
+        grants,
+        disk,
+        ..
+    } = &mut world;
+    let mut unsettled = Unsettled(grants);
+    let mut stores = Stores {
+        now_ms: T0,
+        keeper,
+        manifests,
+        grants: &mut unsettled,
+        io: disk,
+    };
+    assert!(ops::detach(&mut stores, &key("a"), Projection::Connection));
+    assert_eq!(world.disk.dir, before, "nothing saved");
+    assert!(ops::detach(
+        &mut world.stores(T0),
+        &key("a"),
+        Projection::Connection
+    ));
+    let file = js(&world.disk.dir[manifests::FILE_NAME]);
+    assert_eq!(file.get("records").and_then(|r| r.get("a")), None);
+}
+
 /// Owners (identity-manager.js's): every owner a list needs is asked at
 /// once; the answer is read when the last arrives, in the reference's
 /// order, and an owner a change made meanwhile needs is asked then.
