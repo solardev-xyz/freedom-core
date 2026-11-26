@@ -1654,16 +1654,16 @@ impl Approvals {
     }
 
     /// The Swarm grants' shared handle and, once `swarm` is in
-    /// `grant_moved`, `swarm-permissions.json`'s path (design 0015's D2),
-    /// for the swarm thread, which writes a permission manifest's
-    /// projections there ([`crate::grants::write_swarm`]).
+    /// `grant_moved`, `swarm-permissions.json` (design 0015's D2), for the
+    /// swarm thread, which writes a permission manifest's projections there
+    /// ([`crate::grants::write_swarm`]).
     pub fn swarm_grants(
         &self,
     ) -> (
         std::sync::Arc<std::sync::Mutex<SwarmStore>>,
-        Option<std::path::PathBuf>,
+        Option<crate::grants::SwarmFile>,
     ) {
-        (self.grants.swarm_handle(), self.grants.swarm_path())
+        (self.grants.swarm_handle(), self.grants.swarm_file())
     }
 
     /// A page's approved connect (APR-5c): the key's grant, from the
@@ -3314,5 +3314,35 @@ mod tests {
         // Main's revoke of a connection is a manifest's projection.
         run("approval.grant", grant(json!({ "op": "connect" })), &page);
         assert!(run("approval.revoke", revoke(json!("grant")), &shell()).is_empty());
+        run("approval.grant", grant(json!({ "op": "connect" })), &page);
+        // A write that fails: a directory stands where the file is renamed
+        // to. A widening isn't made and reports nothing (the reference's
+        // write rejected); a narrowing stands in memory, unsaved, and
+        // reports (main's write resolved with a warning).
+        let file = dir.path().join("swarm-permissions.json");
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        std::fs::write(file.join("in-the-way"), b"").unwrap();
+        let failing =
+            |approvals: &mut Approvals, method: &str, params: Value, context: &Context| {
+                let error = approvals
+                    .request(1, method, &params, context, CLOCKS)
+                    .unwrap_err();
+                assert_eq!(error.code, ErrorCode::Storage, "{method}");
+                (
+                    error.data.unwrap()["applied"].clone(),
+                    approvals.take_swarm_changes(),
+                )
+            };
+        let flag = json!({ "store": "swarm", "change": { "op": "flag", "flag": "feeds" } });
+        assert_eq!(
+            failing(&mut approvals, "approval.grant", flag, &page),
+            (json!(false), Vec::new())
+        );
+        let gone = json!({ "store": "swarm", "key": site, "what": "grant" });
+        assert_eq!(
+            failing(&mut approvals, "approval.revoke", gone, &Context::chrome()),
+            (json!(true), change(Projection::Connection))
+        );
     }
 }

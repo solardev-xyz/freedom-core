@@ -82,7 +82,6 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::Range;
-use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -281,7 +280,7 @@ pub struct Spawn {
     /// have moved (`grant_moved: swarm`) their file, which a manifest's
     /// projections write ([`crate::grants::write_swarm`]).
     pub grants: Arc<Mutex<SwarmStore>>,
-    pub grants_file: Option<PathBuf>,
+    pub grants_file: Option<crate::grants::SwarmFile>,
     /// The ended name bindings, shared with the event loop's page requests
     /// (D1).
     pub bindings: crate::eip1193::Bindings,
@@ -341,8 +340,8 @@ pub fn spawn(start: Spawn) -> std::io::Result<Handle> {
                 lane: None,
             };
             let mut shared = Shared::new(grants, bindings);
-            if let Some(path) = grants_file {
-                shared.grants_writer = Some(Box::new(GrantsFile { path }));
+            if let Some(file) = grants_file {
+                shared.grants_writer = Some(Box::new(GrantsFile { file }));
             }
             // The stores load as the thread starts (D3), off the event loop.
             if let Some(place) = stores {
@@ -1397,9 +1396,11 @@ impl Io for Wire {
 }
 
 /// `swarm-permissions.json`, which a permission manifest's projections
-/// write from the swarm thread (D2), under the shared store's lock.
+/// write from the swarm thread (D2), under the shared store's lock; while
+/// the event loop's failed narrowing left it behind memory, every write
+/// writes it (D17).
 struct GrantsFile {
-    path: PathBuf,
+    file: crate::grants::SwarmFile,
 }
 
 /// What a caller reads when the Swarm grants' write fails: a fixed text,
@@ -1415,7 +1416,7 @@ impl GrantsWriter for GrantsFile {
         use crate::grants::WriteFailure;
         use fc_approval::stores::Effect;
         let mut effect = Effect::Unchanged;
-        let written = crate::grants::write_swarm(grants, &self.path, |store| {
+        let written = crate::grants::write_swarm(grants, &self.file, |store| {
             let applied = change(store);
             effect = applied.effect;
             applied
@@ -1436,6 +1437,12 @@ impl GrantsWriter for GrantsFile {
                 error: Some(fc_json::JsString::from(GRANTS_WRITE_FAILED)),
             },
         }
+    }
+
+    fn settle(&mut self, grants: &Mutex<SwarmStore>) -> Option<fc_json::JsString> {
+        crate::grants::settle_swarm(grants, &self.file)
+            .err()
+            .map(|_| fc_json::JsString::from(GRANTS_WRITE_FAILED))
     }
 }
 

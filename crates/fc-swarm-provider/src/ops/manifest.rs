@@ -517,7 +517,9 @@ impl manifests::World for World<'_> {
         }
     }
 
+    /// The grants' file first, where it is behind memory ([`Grants::settle`]).
     fn save(&mut self, save: &manifests::Save) -> Result<(), WorldError> {
+        self.grants.settle().map_err(WorldError::Write)?;
         self.io.save_manifests(save).map_err(WorldError::Write)
     }
 }

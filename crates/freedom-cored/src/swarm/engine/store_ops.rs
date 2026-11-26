@@ -938,6 +938,17 @@ impl ops::Grants for GrantsWorld<'_> {
             None => Ok(()),
         }
     }
+
+    fn settle(&mut self) -> Result<(), JsString> {
+        match self
+            .writer
+            .as_deref_mut()
+            .and_then(|w| w.settle(self.grants))
+        {
+            Some(text) => Err(text),
+            None => Ok(()),
+        }
+    }
 }
 
 fn flag_of(capability: fc_swarm_provider::stores::manifests::Capability) -> SwarmFlag {

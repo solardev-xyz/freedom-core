@@ -127,6 +127,17 @@ pub trait Grants {
     /// [`Effect::Disconnect`], [`Effect::Flag`], [`Effect::Messaging`]),
     /// written durably as main's own change; the write's text if it fails.
     fn apply(&mut self, key: &JsString, effect: Effect) -> Result<(), JsString>;
+    /// The grants' file made to hold the store as memory has it, where an
+    /// earlier write left it behind (a narrowing whose write failed stands
+    /// in memory alone); the write's text if it fails. The manifest store
+    /// saves only after it (D17): a record a transaction removes, or a
+    /// projection it marks off, is never on disk while the grants' file
+    /// still holds what memory no longer does (the user's revoke whose
+    /// write failed, which a disconnect then finds already made and
+    /// leaves). Nothing to do by default.
+    fn settle(&mut self) -> Result<(), JsString> {
+        Ok(())
+    }
 }
 
 /// The stores' files, their randomness and the history's database: the

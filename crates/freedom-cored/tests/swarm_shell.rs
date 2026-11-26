@@ -1752,6 +1752,57 @@ fn a_users_grant_change_detaches_through_the_pipe() {
     main.settled();
 }
 
+/// D17 and a failed narrowing: the chrome's revoke whose rename fails
+/// stands in memory, unsaved (`storage`, `applied: true`), and still
+/// detaches. The detach's disconnect finds the connection already gone in
+/// memory, and writes the file the loop left behind before the record's
+/// removal commits, so a restart reads the site disconnected, its record
+/// and its feed grant gone.
+#[test]
+fn a_failed_revoke_detaches_and_stays_after_a_restart() {
+    let hooks = tempfile::tempdir().unwrap();
+    let hook = hooks.path().join("grant-write-fail");
+    std::fs::write(&hook, "").unwrap();
+    let hook_env = hook.to_string_lossy().into_owned();
+    let env = [("FREEDOM_CORED_TEST_GRANT_WRITE_FAIL", hook_env.as_str())];
+    let mut main = swarm_world::main_with(&["swarm"], &env);
+    let root = main.core.grant_root.clone();
+    let grants = connected(&[SITE]);
+    let mut dir = Dir::new();
+    dir.insert(
+        manifests::FILE_NAME.to_owned(),
+        format!(r#"{{"version":1,"records":{{"{SITE}":{MANAGED}}}}}"#),
+    );
+    dir.insert(feeds::FILE_NAME.to_owned(), site_feeds());
+    dir.insert("swarm-permissions.json".to_owned(), grants.stringify());
+    set_up(&mut main, &dir, &grants, T0);
+    // The loop's write alone: the swarm thread's after it succeeds.
+    std::fs::write(&hook, "swarm:rename-once").unwrap();
+    let id = main.id();
+    main.core.send(&json!({
+        "type": "request", "id": id, "method": "approval.revoke",
+        "params": { "store": "swarm", "key": SITE, "what": "grant" },
+        "context": { "caller": "chrome" },
+    }));
+    let reply = main.core.response(id);
+    assert_eq!(reply["error"]["code"], "storage", "{reply}");
+    assert_eq!(
+        reply["error"]["data"],
+        json!({ "store": "swarm", "applied": true })
+    );
+    std::fs::write(&hook, "").unwrap();
+    assert_eq!(record_of(&mut main, SITE), JsValue::Null);
+    let file = std::fs::read_to_string(root.join("swarm-permissions.json")).unwrap();
+    assert!(!file.contains(SITE), "the detach wrote the file: {file}");
+    told_once(&mut main, SITE);
+    main.settled();
+    let mut main = main.restart(&env);
+    assert!(!grants_read(&mut main).contains_key(SITE));
+    assert_eq!(record_of(&mut main, SITE), JsValue::Null);
+    assert!(!feeds_on_disk(&root).has_feed_grant(&JsString::from(SITE)));
+    main.settled();
+}
+
 /// D17: a manifest's own projections detach nothing: a decision's
 /// connection and rule, which the swarm thread writes, and main's own
 /// grant writes (`shell`, a manifest's projection under the old path).

@@ -1140,13 +1140,12 @@ impl Vault {
     }
 
     /// The Swarm grants' shared handle and, once they have moved, their
-    /// file's path (design 0015's D2), for the swarm thread the hello
-    /// starts.
+    /// file (design 0015's D2), for the swarm thread the hello starts.
     pub fn swarm_grants(
         &self,
     ) -> (
         std::sync::Arc<std::sync::Mutex<fc_approval::stores::SwarmStore>>,
-        Option<std::path::PathBuf>,
+        Option<crate::grants::SwarmFile>,
     ) {
         self.approvals.swarm_grants()
     }

@@ -336,6 +336,12 @@ pub trait GrantsWriter: Send {
         grants: &Mutex<SwarmStore>,
         change: &mut dyn FnMut(&mut SwarmStore) -> Applied<()>,
     ) -> GrantWritten;
+    /// The file written as `grants` stands, where it is behind memory (a
+    /// narrowing whose write failed), before the manifest store saves
+    /// (D17, [`ops::Grants::settle`]); the failure's text.
+    fn settle(&mut self, _grants: &Mutex<SwarmStore>) -> Option<JsString> {
+        None
+    }
 }
 
 /// What a write of the Swarm grants did.
