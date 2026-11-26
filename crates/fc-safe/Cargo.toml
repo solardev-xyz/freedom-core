@@ -1,6 +1,6 @@
 [package]
 name = "fc-safe"
-description = "Freedom's Safes in the core (design 0016, SAFE-1): Safe 1.4.1 on Gnosis, its address and deployment, the SafeTx and SafeMessage, owner signatures and execTransaction"
+description = "Freedom's Safes in the core (design 0016, SAFE-1 and SAFE-2): Safe 1.4.1 on Gnosis, its address and deployment, the SafeTx and SafeMessage, owner signatures, execTransaction, and the setup reads"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
