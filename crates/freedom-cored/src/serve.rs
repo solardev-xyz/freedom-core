@@ -1830,8 +1830,8 @@ impl Core {
                     self.credit.take(),
                 )
             }),
-            // No device lane runs yet, so no request is its (0016, LDG-2's
-            // L2).
+            // No method drives the device lane yet, so no request is its
+            // (0016: ledger.* with LDG-2's L3, a Ledger key with L4).
             (Owner::Ledger, _) => false,
             // The dweb thread reads its piece's reply where it lies, as the
             // chain thread does.

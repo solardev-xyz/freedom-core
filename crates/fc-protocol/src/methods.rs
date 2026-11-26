@@ -100,14 +100,27 @@ pub enum Deadline {
     Idle,
     /// A request that may drive a Ledger (design 0016, API: "Deadlines";
     /// "Deadlines, cancel and unplugging"): `sign.*`, `ledger.*`,
-    /// `x402.settle` and `safe.sign_owner`. No overall deadline: each APDU
-    /// has its own on the exchange, [`DEVICE_APDU_MS`], or
-    /// [`DEVICE_CONFIRM_MS`] for the one the user confirms
-    /// ([`device_apdu_ms`]), and the lane its own bounds. Main treats such
-    /// a request as immediate until a `shell.ledger_apdu` names it in
-    /// `for` (a vault key never sends one), and its hang watchdog then
-    /// skips it, as 0012 has it skip a request with an open prompt.
-    /// `schema.json` writes it `"device"`, apart from `null`.
+    /// `x402.settle`, `safe.sign_owner` and `safe.message_sign`. No overall
+    /// deadline: each APDU has its own on the exchange, [`DEVICE_APDU_MS`],
+    /// or [`DEVICE_CONFIRM_MS`] for the one the user confirms
+    /// ([`device_apdu_ms`]), sent as its `shell.ledger_apdu`'s
+    /// `deadline_ms`, and the lane its own bounds: no request waits in its
+    /// queue past 5 minutes.
+    ///
+    /// Main picks its hang watchdog from the class and the request's
+    /// params. A request it can see will use the device (a `sign.*` whose
+    /// `key.kind` is `"ledger"`, every `ledger.*`, `x402.settle`'s Ledger
+    /// form, a Ledger owner's `safe.sign_owner` or `safe.message_sign`)
+    /// gets 5 minutes and 15 s until a `shell.ledger_apdu` first names it in
+    /// `for` (the lane's longest wait in the queue, plus 0001's 15 s
+    /// margin), then each APDU's `deadline_ms` plus the margin, reset by
+    /// each APDU and each answer, and none once the request ends. Every
+    /// other request of the class, a vault key's `sign.*` included, keeps
+    /// the immediate 15 s, but for `safe.sign_owner` and
+    /// `safe.message_sign`, whose chain reads come first: 135 s for vault
+    /// owners, and 7 minutes and 15 s before a Ledger owner's first
+    /// `shell.ledger_apdu`. `schema.json` writes it `"device"`, apart from
+    /// `null`.
     Device,
 }
 
