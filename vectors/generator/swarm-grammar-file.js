@@ -835,7 +835,9 @@ async function buildGrammar(env, methods, nodeBodies, dwebVerify, meta) {
     reply_headers: { read: ['content-type', 'content-length', 'swarm-tag', 'swarm-feed-index', 'swarm-feed-index-next'], max: 8, name_bytes: 64,
       value_bytes: 1024, reason_bytes: 1024 },
     error_reply: { whole: 8192 },
-    failed: ['unreachable', 'error', 'aborted', 'too_large', 'busy'],
+    // 0009's closed set plus busy and stopped (design 0015, shell.swarm_api:
+    // `failed`; freedom-cored's swarm/wire.rs reads the same six).
+    failed: ['unreachable', 'error', 'aborted', 'too_large', 'busy', 'stopped'],
     rules: ['form', 'order', 'count', 'value', 'header', 'query', 'body', 'ended'],
     forms: FORMS,
     rows: ROWS,

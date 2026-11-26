@@ -59,7 +59,8 @@
     "error",
     "aborted",
     "too_large",
-    "busy"
+    "busy",
+    "stopped"
   ],
   "rules": [
     "form",
@@ -447,7 +448,7 @@
             2563
           ],
           "when": "the root's size n is over 4,096 bytes (at most n ≤ B)",
-          "binds": "bytes at most once: <a> = params.reference, range: bytes=0-<n − 1>, max_bytes = n; every later chunk with tree { length, depth }, an unfetched occurrence of a data child of an intermediate main returned (0009's geometry); chunk at most 2 + 2⌈B / 4,096⌉ = 2,562 in all, 8 open at once"
+          "binds": "bytes at most once: <a> = params.reference, range: bytes=0-<n − 1>, max_bytes = n; every later chunk with tree { length, depth }, an unfetched occurrence of a data child of an intermediate main returned (0009's geometry); chunk at most 2 + 2⌈B / 4,096⌉ = 2,562 after the root, 8 open at once"
         }
       ]
     },
