@@ -452,6 +452,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fc-ledger"
+version = "0.29.0"
+dependencies = [
+ "fc-evm",
+ "fc-keys",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "fc-naming"
 version = "0.29.0"
 dependencies = [
@@ -548,8 +558,10 @@ dependencies = [
  "aes-gcm",
  "base64",
  "fc-chain",
+ "fc-evm",
  "fc-json",
  "fc-keys",
+ "fc-ledger",
  "fc-naming",
  "fc-protocol",
  "fc-seal",

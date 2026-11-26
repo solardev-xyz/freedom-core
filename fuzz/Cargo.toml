@@ -1,6 +1,7 @@
 # cargo-fuzz targets for the parsers that take untrusted bytes (design 0001,
 # Testing): the frame codec, fragment reassembly and stream frames, the
-# message decoder and secret fields, fc-json, and the vault file.
+# message decoder and secret fields, fc-json, the vault file, and a
+# Ledger's answers (design 0016).
 #
 # Run one locally (nightly; CI pins the same toolchain in ci.yml):
 #
@@ -30,8 +31,11 @@ cargo-fuzz = true
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
 base64 = "0.22.1"
 fc-chain = { path = "../crates/fc-chain" }
+# The Ledger target builds its transactions and checks its signatures.
+fc-evm = { path = "../crates/fc-evm" }
 fc-json = { path = "../crates/fc-json" }
 fc-keys = { path = "../crates/fc-keys" }
+fc-ledger = { path = "../crates/fc-ledger" }
 # The naming target compares a bounded ABI decode with `decode_counted`.
 fc-naming = { path = "../crates/fc-naming", features = ["fuzzing"] }
 fc-protocol = { path = "../crates/fc-protocol" }
@@ -83,6 +87,13 @@ bench = false
 [[bin]]
 name = "chain_answer"
 path = "fuzz_targets/chain_answer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ledger_answer"
+path = "fuzz_targets/ledger_answer.rs"
 test = false
 doc = false
 bench = false
