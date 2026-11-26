@@ -52,6 +52,9 @@ FILES.push('swarm.json', 'swarm-grammar.json', 'dweb-verify.json', 'generator/sw
   'generator/swarm-node.js', 'generator/swarm-world.js', 'generator/swarm-typed.js', 'generator/swarm-sections.js', 'generator/swarm-grammar.js',
   'generator/swarm-grammar-file.js', 'generator/swarm-worker.js', 'generator/swarm-gsoc-worker.js', 'generator/swarm-shell.js');
 
+FILES.push('ledger.json', 'ledger-grammar.json', 'generator/ledger.js', 'generator/ledger-device.js', 'generator/ledger-cases.js',
+  'generator/ledger-grammar.js', 'generator/ledger-grammar-file.js');
+
 function checkArgs(generator, overrides = {}) {
   const refs = { freedom: REFERENCE, radicle: RADICLE_REFERENCE, approvals: APPROVALS_REFERENCE, stores: STORES_REFERENCE,
     colibri: COLIBRI_REFERENCE, swarm: SWARM_REFERENCE, ...overrides };
@@ -1235,6 +1238,96 @@ test('the swarm vectors refuse any bee-js or core-sdk but 13.2.0 and 0.2.2', () 
     install('@ethersphere/bee-js', '13.2.0');
     install('@ethersphere/core-sdk', '0.2.3');
     assert.throws(() => loadPackages(root), /has bee-js 13.2.0 and core-sdk 0.2.3/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Design 0016's Ledger vectors (LDG-1), built right after keys.json, so
+// these checks stop early.
+const LEDGER_DAMAGES = [
+  ['ledger.json', 'a changed Ledger APDU', (contents) => {
+    const step = contents.cases.find((item) => item.id === 'typed-mail').exchanges[5];
+    step.apdu = step.apdu.slice(0, -2) + (step.apdu.endsWith('00') ? '01' : '00');
+  }],
+  ['ledger.json', 'a changed Ledger device answer', (contents) => {
+    contents.cases.find((item) => item.id === 'discovery-live-0-1').exchanges[0].answer = '6985';
+  }],
+  ['ledger.json', 'a changed Ledger result', (contents) => {
+    contents.cases.find((item) => item.id === 'answer-tx-type0-high-s').result = { status: 'error', code: 'LEDGER_BAD_SIGNATURE' };
+  }],
+  ['ledger.json', 'a changed Ledger deviation mark', (contents) => {
+    delete contents.cases.find((item) => item.id === 'value-string-encoding-256').deviation;
+  }],
+  ['ledger.json', 'a changed Ledger package version', (contents) => {
+    contents.meta.packages['@ledgerhq/hw-app-eth'] = '7.10.0';
+  }],
+  ['ledger-grammar.json', 'a changed honest Ledger stream', (contents) => {
+    contents.honest.find((item) => item.case === 'msg-live-126').apdus.pop();
+  }],
+  ['ledger-grammar.json', 'a changed Ledger forbidden APDU\'s rule', (contents) => {
+    contents.forbidden.find((item) => item.rule === 'path').rule = 'payload';
+  }],
+  ['ledger-grammar.json', 'a changed Ledger x402 rebuild case', (contents) => {
+    contents.x402_changes.find((item) => item.change === 'domain.chainId').typed_data.domain.chainId = 8453;
+  }],
+];
+for (const [file, what, corrupt] of LEDGER_DAMAGES) {
+  test(`check rejects ${what}`, () => {
+    const stderr = corruptedCheck(file, corrupt);
+    assert.match(stderr, new RegExp(`Byte mismatch: ${file.replace('.', '\\.')}`));
+  });
+}
+
+test('check refuses a recorded Ledger APDU outside its grammar row', () => {
+  // The grammar narrowed in the copy: a message's first piece one byte
+  // shorter, which no stream the reference sends is.
+  const stderr = damagedCheck((copy) => {
+    const file = path.join(copy, 'generator/ledger-grammar.js');
+    const source = fs.readFileSync(file, 'utf8');
+    const narrowed = source.replace('const first = 150 - 1 - 4 * p[0] - 4;', 'const first = 150 - 1 - 4 * p[0] - 5;');
+    assert.notEqual(narrowed, source, 'the message row moved');
+    fs.writeFileSync(file, narrowed);
+  });
+  assert.match(stderr, /AssertionError.*msg-live-125: APDU 1 isn't the grammar's \(sign\.message\)/);
+});
+
+test('check takes the Ledger vectors from the swarm reference, at its pinned commit', () => {
+  const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: SWARM_REFERENCE, encoding: 'utf8' }).stdout.trim();
+  for (const file of ['ledger.json', 'ledger-grammar.json']) {
+    const { meta } = JSON.parse(fs.readFileSync(path.join(SOURCE, file), 'utf8'));
+    assert.equal(meta.freedomBrowserCommit, commit);
+    assert.equal(meta.packages['@ledgerhq/hw-app-eth'], '7.11.1');
+    assert.equal(meta.packages['hw-transport-node-hid-noevents/@ledgerhq/hw-transport'], '6.35.5');
+    assert.equal(meta.packages['@x402/evm'], '2.29.0');
+  }
+});
+
+test('the Ledger vectors refuse any package version but design 0016\'s', () => {
+  const { loadPackages, PACKAGES } = require('./ledger');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-ledger-versions-'));
+  try {
+    const install = (at, name, version) => {
+      const dir = path.join(at, 'node_modules', ...name.split('/'));
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name, version, main: 'index.js' }));
+      fs.writeFileSync(path.join(dir, 'index.js'), 'module.exports = {};\n');
+    };
+    fs.writeFileSync(path.join(root, 'package.json'), '{"name":"versions"}');
+    const noevents = path.join(root, 'node_modules', '@ledgerhq', 'hw-transport-node-hid-noevents');
+    const all = (overrides = {}) => {
+      for (const [name, version] of Object.entries(PACKAGES)) {
+        if (name.includes('/@')) continue;
+        install(root, name, overrides[name] ?? version);
+      }
+      install(noevents, '@ledgerhq/hw-transport', overrides.nested ?? '6.35.5');
+    };
+    all({ '@ledgerhq/hw-app-eth': '7.10.0' });
+    assert.throws(() => loadPackages(root), /@ledgerhq\/hw-app-eth 7\.11\.1's; .* has 7\.10\.0/);
+    all({ nested: '6.36.0' });
+    assert.throws(() => loadPackages(root), /hw-transport-node-hid-noevents\/@ledgerhq\/hw-transport 6\.35\.5's; .* has 6\.36\.0/);
+    all({ '@x402/evm': '2.28.0' });
+    assert.throws(() => loadPackages(root), /@x402\/evm 2\.29\.0's; .* has 2\.28\.0/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
