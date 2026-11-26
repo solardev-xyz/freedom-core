@@ -63,7 +63,7 @@
 //!   whatever is due by then, so an answer past its APDU's time is late
 //!   however the calls interleave, and a fixed clock drives the tests.
 //!
-//! **The event loop holds the lane** (L3 and L4 wire it): main's answers to
+//! **The event loop holds the lane** (`serve.rs`, from L3): main's answers to
 //! [`Owner::Ledger`]'s requests go to [`Lane::answered`], a parent's cancel
 //! to [`Lane::cancel`]; it waits no longer than [`Lane::next_wakeup`], and
 //! calls [`Lane::tick`] then and whenever the lane's `wake` says an APDU or
