@@ -1,6 +1,6 @@
 //! Linux calls `fc-service`'s confinement needs (design 0010) that neither
-//! std nor rustix offers safely, and the test-only calls through the other
-//! syscall ABIs.
+//! std nor rustix offers safely, the test-only calls through the other
+//! syscall ABIs, and the memory cap's test-only read-only map.
 //!
 //! None of them closes a descriptor. A close can't prove that no Rust
 //! object owns what it closes; marking one close-on-exec invalidates no
@@ -95,6 +95,60 @@ pub fn getpid_i386() -> i64 {
         std::arch::asm!("int 0x80", inlateout("rax") result, options(nostack));
     }
     result
+}
+
+/// A file mapped read-only and private, unmapped on drop: the memory cap's
+/// test (design 0010, Tests), which shows that `RLIMIT_DATA`, counting only
+/// private writable mappings, lets a read-only map larger than the cap
+/// through, as libgit2's pack windows are. The limit is checked when a
+/// mapping is made, never when its pages are touched, so the map alone is
+/// the test. Nothing reads through it, so a file truncated under it can't
+/// fault this process.
+#[cfg(feature = "test-map")]
+#[derive(Debug)]
+pub struct ReadOnlyMap {
+    addr: std::ptr::NonNull<libc::c_void>,
+    len: usize,
+}
+
+#[cfg(feature = "test-map")]
+impl ReadOnlyMap {
+    /// Maps `len` bytes of `file` from its start
+    /// (`mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0)`). `ENOMEM` past a
+    /// limit that counts the map.
+    #[allow(unsafe_code)]
+    pub fn new(file: std::os::fd::BorrowedFd<'_>, len: usize) -> io::Result<Self> {
+        use std::os::fd::AsRawFd;
+        // SAFETY: with a NULL address the kernel picks a range no mapping of
+        // this process holds, so nothing of ours is replaced or aliased; the
+        // call reads no memory of ours, and `file` is open for its borrow
+        // (the map keeps its own reference to the file).
+        let addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if addr == libc::MAP_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+        let addr = std::ptr::NonNull::new(addr).ok_or_else(|| io::Error::other("mmap: NULL"))?;
+        Ok(Self { addr, len })
+    }
+}
+
+#[cfg(feature = "test-map")]
+impl Drop for ReadOnlyMap {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        // SAFETY: the range is this map's, made by `new` and unmapped once,
+        // here; no reference into it was ever handed out.
+        let _ = unsafe { libc::munmap(self.addr.as_ptr(), self.len) };
+    }
 }
 
 #[cfg(test)]
