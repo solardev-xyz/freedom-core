@@ -137,15 +137,16 @@ impl SafeTx {
         let fields = fields
             .as_object()
             .ok_or(Error::Malformed("the fields are not an object"))?;
-        if fields.len() != SAFE_TX_TYPE.len()
-            || SAFE_TX_TYPE
-                .iter()
-                .any(|(_, name)| !fields.contains_key(*name))
-        {
+        if fields.len() != SAFE_TX_TYPE.len() {
             return Err(Error::Malformed("not the ten SafeTx fields"));
         }
+        let field = |name: &'static str| {
+            fields
+                .get(name)
+                .ok_or(Error::Malformed("not the ten SafeTx fields"))
+        };
         let text = |name: &'static str| {
-            fields[name]
+            field(name)?
                 .as_str()
                 .ok_or(Error::Malformed("a field that isn't text"))
         };
@@ -153,7 +154,7 @@ impl SafeTx {
         let value = parse_unsigned(text("value")?).ok_or(Error::Malformed("value"))?;
         let data = parse_bytes(text("data")?, "data").map_err(|_| Error::Malformed("data"))?;
         for name in ["operation", "safeTxGas", "baseGas", "gasPrice"] {
-            if !quantity(&fields[name])?.is_zero() {
+            if !quantity(field(name)?)?.is_zero() {
                 return Err(Error::Field(name));
             }
         }
@@ -163,7 +164,7 @@ impl SafeTx {
                 return Err(Error::Field(name));
             }
         }
-        let nonce = Self::nonce_from(&quantity(&fields["nonce"])?)?;
+        let nonce = Self::nonce_from(&quantity(field("nonce")?)?)?;
         SafeTx::new(to, value, data, nonce)
     }
 
