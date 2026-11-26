@@ -51,7 +51,7 @@ pub use crate::machine::AskId;
 use crate::machine::SignKey;
 use crate::machine::keeper::{ChangeAnswer, ChangeError, Keeper, STORE_FULL_MESSAGE, Ticket};
 use crate::stores::history::{Row, Statement};
-use crate::stores::manifests::{Capability, Effect, ManifestStore, Save};
+use crate::stores::manifests::{Capability, Effect, ManifestStore, Projection, Save};
 use crate::stores::{StoreError, Thrown};
 use crate::value::Value;
 
@@ -141,8 +141,10 @@ pub trait Io {
     /// One write of `swarm-manifest-grants.json` (the `.bak` copy first
     /// where [`Save::backup`] says).
     fn save_manifests(&mut self, save: &Save) -> Result<(), JsString>;
-    /// `crypto.randomBytes(24)`, for a consent's token.
-    fn random(&mut self) -> [u8; 24];
+    /// `crypto.randomBytes(24)`, for a consent's token: `None` when the
+    /// system's randomness fails, which fails the check rather than make a
+    /// token anyone could guess.
+    fn random(&mut self) -> Option<[u8; 24]>;
     /// `publish-history.sqlite`'s rows for a query.
     fn query(&mut self, statement: &Statement) -> Result<Vec<Row>, JsString>;
     /// A statement run: the rows it changed.
@@ -378,6 +380,15 @@ impl Cx<'_> {
         *self.next_ask += 1;
         Ask { id, need }
     }
+}
+
+/// The user changed a projection a manifest manages, outside an op (a
+/// change the swarm thread makes for main through the keeper, or the user's
+/// change of the Swarm grants): the record lets go of it, as
+/// `detachManagedLater` does. A store that can't be read or written keeps
+/// its record, as the reference only logs that failure.
+pub fn detach(stores: &mut Stores<'_>, key: &JsString, projection: Projection) {
+    manifest::detach(stores, key, projection);
 }
 
 /// A feed-store change's refusal as its caller reads it: the reference's

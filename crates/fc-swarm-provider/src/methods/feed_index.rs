@@ -1,6 +1,7 @@
 //! The next index of a feed write (feed-service.js's `resolveNextIndex` and
 //! `probeFeedHead`), for `updateFeed`, `writeFeedEntry` and `swarm.feed`'s
-//! update, which the Feeds piece brings.
+//! update, which the Feeds piece brings; and a feed's latest index
+//! (`readFeedState`), for `swarm.feed`'s read ([`NextIndex::head`]).
 //!
 //! - **The lookup** is `feed_head`: `GET /feeds/<o>/<t>` with
 //!   `swarm-only-root-chunk: true`, whose headers alone the core reads,
@@ -14,6 +15,11 @@
 //!   first missing, at most 81 reads. Only a 404 says a chunk is missing;
 //!   any other error answer ends the lookup with its text. No feed has 0:
 //!   the next index is the head + 1, or 0.
+//! - **A read** (`readFeedState`) takes the same lookup and probe, but only
+//!   a 404 falls back to the probe (a 500 is the lookup's error, as
+//!   `readFeedState` throws it), and its answer is the latest index itself:
+//!   the lookup's `swarm-feed-index` (both headers read as bee-js reads
+//!   them), or the probe's head, or none ([`Next::Head`]).
 //!
 //! It is a sub-machine: each step gives the next node call, or the index,
 //! or why there is none; the method machine that runs it makes the calls.
@@ -38,6 +44,8 @@ pub struct NextIndex {
     topic: [u8; 32],
     state: State,
     reads: u32,
+    /// `readFeedState`'s lookup: the latest index, not the next.
+    head: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,9 +74,14 @@ pub enum Next {
     Call(NodeCall),
     /// The index to write at.
     Index(u64),
-    /// The lookup failed: a node's error answer or a header's text, as the
-    /// reference throws it.
+    /// A read's answer ([`NextIndex::head`]): the feed's latest index, or
+    /// `None` when no update was found.
+    Head(Option<u64>),
+    /// The lookup failed with a header's text, as the reference throws it.
     Error(JsString),
+    /// The lookup failed with a node's error answer (the lookup's, or a
+    /// probe's), bee-js's `BeeResponseError`, whose status its callers read.
+    Node(crate::errors::NodeError),
     /// The call failed before any reply.
     Failed(Failed),
 }
@@ -82,9 +95,27 @@ impl NextIndex {
                 topic,
                 state: State::Lookup,
                 reads: 0,
+                head: false,
             },
             NodeCall::feed_head(&owner, &topic),
         )
+    }
+
+    /// Starts `readFeedState`'s lookup of the feed's latest index: its
+    /// first call, `feed_head`.
+    pub fn head(owner: [u8; 20], topic: [u8; 32]) -> (NextIndex, NodeCall) {
+        let (next, call) = NextIndex::start(owner, topic);
+        (NextIndex { head: true, ..next }, call)
+    }
+
+    /// The probe's end: the latest index found (`None`: index 0 is
+    /// missing), as the write's next index or the read's head.
+    fn found(&mut self, latest: Option<u64>) -> Next {
+        self.end(if self.head {
+            Next::Head(latest)
+        } else {
+            Next::Index(latest.map_or(0, |latest| latest + 1))
+        })
     }
 
     /// The probe reads made so far.
@@ -125,10 +156,20 @@ impl NextIndex {
 
     fn lookup(&mut self, reply: &Reply) -> Next {
         if !reply.ok() {
+            // `isNotFoundError` for a write; `readFeedState` probes after a
+            // 404 alone.
+            let probes = |err: &crate::errors::NodeError| {
+                if self.head {
+                    err.name == crate::errors::NodeErrorName::BeeResponseError
+                        && err.status == Some(404)
+                } else {
+                    err.is_not_found()
+                }
+            };
             return match reply.error(Site::BeeJs) {
                 Err(failed) => self.end(Next::Failed(failed)),
-                Ok(err) if err.is_not_found() => self.probe(0, State::Zero),
-                Ok(err) => self.end(Next::Error(err.message)),
+                Ok(err) if probes(&err) => self.probe(0, State::Zero),
+                Ok(err) => self.end(Next::Node(err)),
             };
         }
         let text = |name: &str| {
@@ -147,10 +188,14 @@ impl NextIndex {
                 "Response did not contain expected swarm-feed-index-next!",
             )));
         };
-        if let Err(message) = bytes_from_hex::<8>(&index) {
-            return self.end(Next::Error(JsString::from(message)));
-        }
+        let index = match bytes_from_hex::<8>(&index) {
+            Ok(bytes) => u64::from_be_bytes(bytes),
+            Err(message) => return self.end(Next::Error(JsString::from(message))),
+        };
         match bytes_from_hex::<8>(&next) {
+            // A read's answer is `feedIndexToNumber(latest.feedIndex)`,
+            // which its caller takes as a double.
+            Ok(_) if self.head => self.end(Next::Head(Some(index))),
             // `feedIndexToNumber`: a double, which a write takes back as
             // `BigInt(index)`.
             Ok(bytes) => self.end(Next::Index(round_trip(u64::from_be_bytes(bytes)))),
@@ -160,7 +205,7 @@ impl NextIndex {
 
     fn step(&mut self, found: bool) -> Next {
         match (self.state, found) {
-            (State::Zero, false) => self.end(Next::Index(0)),
+            (State::Zero, false) => self.found(None),
             (State::Zero, true) => self.probe(1, State::Grow { lo: 0, hi: 1 }),
             (State::Grow { hi, .. }, true) => {
                 let lo = hi;
@@ -184,7 +229,7 @@ impl NextIndex {
             let mid = lo + (hi - lo) / 2;
             return self.probe(mid, State::Bisect { lo, hi, mid });
         }
-        self.end(Next::Index(lo + 1))
+        self.found(Some(lo))
     }
 }
 
@@ -197,20 +242,20 @@ fn exists(reply: &Reply) -> Result<bool, Ended> {
     match reply.error(Site::BeeJs) {
         Err(failed) => Err(Ended::Failed(failed)),
         Ok(_) if reply.status == 404 => Ok(false),
-        Ok(err) => Err(Ended::Error(err.message)),
+        Ok(err) => Err(Ended::Node(err)),
     }
 }
 
 /// Why a probe read ends the lookup.
 enum Ended {
-    Error(JsString),
+    Node(crate::errors::NodeError),
     Failed(Failed),
 }
 
 impl From<Ended> for Next {
     fn from(ended: Ended) -> Self {
         match ended {
-            Ended::Error(message) => Next::Error(message),
+            Ended::Node(err) => Next::Node(err),
             Ended::Failed(failed) => Next::Failed(failed),
         }
     }

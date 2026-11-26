@@ -494,12 +494,12 @@ impl Io for Disk {
         Ok(())
     }
 
-    fn random(&mut self) -> [u8; 24] {
+    fn random(&mut self) -> Option<[u8; 24]> {
         if let Some(token) = self.tokens.pop_front() {
-            return token;
+            return Some(token);
         }
         self.random += 1;
-        [self.random; 24]
+        Some([self.random; 24])
     }
 
     fn query(&mut self, statement: &Statement) -> Result<Vec<Row>, JsString> {

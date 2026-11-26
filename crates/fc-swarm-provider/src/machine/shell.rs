@@ -445,10 +445,16 @@ pub enum FeedOp {
         reference: Vec<u8>,
         min_index: u64,
     },
+    /// feed-service.js's `readFeedState(owner, topic)`, which the agent's
+    /// publication controller calls after `updateFeed`: whether the feed
+    /// has an update, and its latest index. The owner is the Bee wallet's,
+    /// as every caller's is.
+    Read,
 }
 
 /// `swarm.feed`'s params: `{ op, key: { kind: "bee_wallet" }, topic,
-/// reference?, min_index?, batch? }`.
+/// reference?, min_index?, batch? }`; a read takes only `op`, `key` and
+/// `topic`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeedCall {
     pub op: FeedOp,
@@ -776,10 +782,11 @@ fn parse_feed(params: &JsValue) -> Result<FeedCall, Invalid> {
         "params",
         &["op", "key", "topic", "reference", "min_index", "batch"],
     )?;
-    let update = match m.need("op")? {
-        JsValue::String(s) if *s == "create" => false,
-        JsValue::String(s) if *s == "update" => true,
-        _ => return Err(m.bad("op", "not create or update")),
+    let (update, read) = match m.need("op")? {
+        JsValue::String(s) if *s == "create" => (false, false),
+        JsValue::String(s) if *s == "update" => (true, false),
+        JsValue::String(s) if *s == "read" => (false, true),
+        _ => return Err(m.bad("op", "not create, update or read")),
     };
     // SW-1: main's own feeds take only the Bee wallet key.
     let key = Members::of(m.need("key")?, "params.key", &["kind"])?;
@@ -789,6 +796,9 @@ fn parse_feed(params: &JsValue) -> Result<FeedCall, Invalid> {
     }
     let topic = hex_bytes::<32>(m.need("topic")?).ok_or_else(|| m.bad("topic", "not 64 hex"))?;
     let batch = m.batch("batch")?;
+    if read && batch.is_some() {
+        return Err(m.bad("batch", "a read writes nothing"));
+    }
     let op = if update {
         let reference = match m.need("reference")? {
             v @ JsValue::String(s) if s.len() == 64 => hex_bytes::<32>(v).map(|b| b.to_vec()),
@@ -808,7 +818,7 @@ fn parse_feed(params: &JsValue) -> Result<FeedCall, Invalid> {
         if m.get("min_index").is_some() {
             return Err(m.bad("min_index", "only an update has one"));
         }
-        FeedOp::Create
+        if read { FeedOp::Read } else { FeedOp::Create }
     };
     Ok(FeedCall { op, topic, batch })
 }

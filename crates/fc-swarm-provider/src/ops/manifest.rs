@@ -283,7 +283,9 @@ impl Run {
         }) {
             return Step::Wait(Waiting::Hold);
         }
-        let random = stores.io.random();
+        let Some(random) = stores.io.random() else {
+            return done(Err(Thrown::error("Internal error")));
+        };
         let (store, mut world) = split(stores);
         let answer = store.check_fetched(
             fetch.clone(),

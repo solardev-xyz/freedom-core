@@ -340,6 +340,22 @@ pub const METHODS: &[Method] = &[
     // thread's `shell.swarm_api` calls whose body streams; the core answers
     // `{ bytes }` and the body, with idle bounds only. Protocol 2 only.
     row_v2("swarm.body", SHELL, false, IDLE),
+    // Design 0015 (SWM-4, D5): main's own Swarm methods on the swarm
+    // thread. `swarm.publish` streams its picked files' parts
+    // (`shell.swarm_part`), so it has no total deadline, only D13's idle
+    // bounds, and is protocol 2 only; `swarm.feed` (main's own feeds) and
+    // `swarm.stamps` and `swarm.upload_status` (the chrome's too) ask the
+    // node under the `swarm` deadline; the store methods answer at once:
+    // `swarm.identities` and `swarm.history` the chrome's and main's (an
+    // op only main makes is refused to the chrome), `swarm.manifest`
+    // main's.
+    row_v2("swarm.publish", SHELL, false, IDLE),
+    row("swarm.feed", SHELL, false, SWARM),
+    row("swarm.stamps", CS, false, SWARM),
+    row("swarm.upload_status", CS, false, SWARM),
+    row("swarm.identities", CS, false, NOW),
+    row("swarm.history", CS, false, NOW),
+    row("swarm.manifest", SHELL, false, NOW),
     row("chain.configure", CS, false, NOW),
     row("chain.availability", CS, false, NOW),
     row("chain.request", CS, false, SESSION),
@@ -518,6 +534,15 @@ mod tests {
             // `window.swarm` request is the page's alone (D5).
             ("swarm.sign_soc", true, false, true),
             ("swarm.request", true, false, false),
+            // Main's own Swarm methods (D5): no page reaches any.
+            ("swarm.publish", false, false, true),
+            ("swarm.feed", false, false, true),
+            ("swarm.stamps", false, true, true),
+            ("swarm.upload_status", false, true, true),
+            ("swarm.identities", false, true, true),
+            ("swarm.history", false, true, true),
+            ("swarm.manifest", false, false, true),
+            ("swarm.body", false, false, true),
         ] {
             for (caller, allowed) in [
                 (CallerKind::Page, page),

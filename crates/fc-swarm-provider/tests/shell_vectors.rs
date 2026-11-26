@@ -1970,6 +1970,129 @@ fn a_feed_update_writes_at_the_next_index() {
     }
 }
 
+/// `swarm.feed`'s read (feed-service.js's `readFeedState`): the lookup's
+/// `swarm-feed-index`, or after a 404 alone the head probe's head, or `{
+/// exists: false }` when index 0 is missing; a 500 or any other error
+/// answer is thrown with bee-js's text, with no probe. No batch, no topic's
+/// turn and no signature: the owner's ask, then the reads.
+#[test]
+fn a_feed_read_answers_the_latest_index() {
+    let v = Vectors::load();
+    let keys = keys_of(&v);
+    let owner = fc_evm::address_of(&keys.bee);
+    let topic = [0x77; 32];
+    let state = |index: Option<u64>| {
+        ShellOutcome::Result(match index {
+            Some(index) => Value::object([
+                ("exists", Value::Bool(true)),
+                ("index", Value::Number(index as f64)),
+            ]),
+            None => Value::object([("exists", Value::Bool(false))]),
+        })
+    };
+    // (feed_head's status, the updates that exist, the answer, the probes)
+    for (head, exist, want, probes_made) in [
+        (200, 0u64, state(Some(6)), 0usize),
+        (404, 0, state(None), 1),
+        (404, 1, state(Some(0)), 2),
+        (404, 5, state(Some(4)), 7),
+        (
+            500,
+            3,
+            ShellOutcome::Error(ShellError {
+                status: Some(500),
+                ..ShellError::new(r#"Internal Server Error: {"code":500,"message":"boom"}"#)
+            }),
+            0,
+        ),
+    ] {
+        let mut probes = Vec::new();
+        let node = {
+            let probes = &mut probes;
+            Box::new(move |call: &NodeCall, _: &[u8]| match call.form {
+                Form::FeedHead if head == 200 => json_reply(
+                    200,
+                    vec![
+                        ("swarm-feed-index", "0000000000000006".to_owned()),
+                        ("swarm-feed-index-next", "0000000000000007".to_owned()),
+                    ],
+                    "",
+                ),
+                Form::FeedHead => Event::Reply(Reply {
+                    status: head,
+                    status_text: reason_phrase(head).to_owned(),
+                    headers: Vec::new(),
+                    body: format!(
+                        r#"{{"code":{head},"message":"{}"}}"#,
+                        if head == 404 { "Not Found" } else { "boom" }
+                    )
+                    .into_bytes(),
+                }),
+                Form::Chunk => {
+                    let feed = call.feed.expect("a probe names its feed");
+                    assert_eq!(feed.owner, owner);
+                    let address = fc_swarm::verify::feed_update_address(&owner, &topic, feed.index);
+                    assert_eq!(call.path, format!("/chunks/{}", hex(&address)));
+                    probes.push(feed.index);
+                    if feed.index < exist {
+                        Event::Reply(Reply {
+                            status: 200,
+                            status_text: "OK".to_owned(),
+                            headers: Vec::new(),
+                            body: vec![0; 105],
+                        })
+                    } else {
+                        Event::Reply(ReplySpec::not_found().into_reply())
+                    }
+                }
+                other => panic!("a read makes no {other:?} call"),
+            }) as NodeFn<'_>
+        };
+        let mut main = Main::new(&keys, node);
+        let (outcome, played, _) = main.play(parse(ShellMethod::Feed, &feed_params("read", "")));
+        assert_eq!(outcome, want, "{head} {exist}");
+        assert!(played.signed.is_empty());
+        assert!(
+            played
+                .asks
+                .iter()
+                .all(|ask| matches!(ask.need, Need::Owner(SignKey::BeeWallet) | Need::Node(_))),
+            "{:?}",
+            played.asks
+        );
+        assert_eq!(played.calls[0].call.form, Form::FeedHead);
+        drop(main);
+        assert_eq!(probes.len(), probes_made, "{head} {exist}");
+    }
+    // A locked vault: resolveSwarmSigner's text, nothing asked of the node.
+    let mut main = Main::new(&keys, honest_node(a1_stamps()));
+    main.unlocked = false;
+    let (outcome, played, _) = main.play(parse(ShellMethod::Feed, &feed_params("read", "")));
+    assert_eq!(outcome, error("Vault is locked"));
+    assert!(played.calls.is_empty());
+    // A read writes nothing, so it takes no batch, reference or index.
+    for (extra, why) in [
+        (
+            format!(r#","batch":"{}""#, "c3".repeat(32)),
+            "params.batch: a read writes nothing",
+        ),
+        (
+            format!(r#","reference":"{}""#, "ab".repeat(32)),
+            "params.reference: only an update has one",
+        ),
+        (
+            r#","min_index":3"#.to_owned(),
+            "params.min_index: only an update has one",
+        ),
+    ] {
+        let params = fc_json::parse(&feed_params("read", &extra)).unwrap();
+        assert_eq!(
+            ShellCall::parse(ShellMethod::Feed, &params).unwrap_err().0,
+            why
+        );
+    }
+}
+
 #[test]
 fn feed_answers_and_errors_as_the_reference_gives_them() {
     let v = Vectors::load();
@@ -2007,7 +2130,12 @@ fn feed_answers_and_errors_as_the_reference_gives_them() {
         (
             Form::FeedHead,
             json_reply(503, Vec::new(), r#"{"message":"down"}"#),
-            error(r#"Service Unavailable: {"message":"down"}"#),
+            // bee-js's BeeResponseError, whose status updateFeed's callers
+            // read.
+            ShellOutcome::Error(ShellError {
+                status: Some(503),
+                ..ShellError::new(r#"Service Unavailable: {"message":"down"}"#)
+            }),
         ),
         (
             Form::FeedHead,
@@ -2607,24 +2735,7 @@ fn a_read_error_on_a_node_reply_is_a_protocol_error() {
 
 /// The `shell` cases of these four methods this test doesn't play, each
 /// with why. The test fails on any case it neither plays nor names here.
-const SHELL_LEFT_OUT: &[(&str, &str)] = &[
-    (
-        "feed-read-latest",
-        "`swarm.feed`'s `op: \"read\"` (readFeedState, SWM-8's) has no machine yet",
-    ),
-    (
-        "feed-read-empty",
-        "`swarm.feed`'s `op: \"read\"` (readFeedState, SWM-8's) has no machine yet",
-    ),
-    (
-        "feed-read-probe",
-        "`swarm.feed`'s `op: \"read\"` (readFeedState, SWM-8's) has no machine yet",
-    ),
-    (
-        "feed-read-node-500",
-        "`swarm.feed`'s `op: \"read\"` (readFeedState, SWM-8's) has no machine yet",
-    ),
-];
+const SHELL_LEFT_OUT: &[(&str, &str)] = &[];
 
 /// A call the reference made, as the core makes it, and main's reply.
 struct WantCall {
@@ -2668,12 +2779,29 @@ fn recorded_reply(reply: V<'_, '_>, keep: &[&str]) -> Reply {
 /// The calls the core makes for a step's recorded requests: the reference's
 /// own, but its second `/stamps` dropped (`stamps-one-read`) and its whole
 /// `GET /feeds` index lookup asked as `feed_head` (`index-probe`).
+/// `swarm.feed`'s read (readFeedState) learns the latest index by the same
+/// whole download (bee-js's `downloadPayload`, recorded as `feed_latest`,
+/// unmarked while the read has no grammar row): the core asks `feed_head`
+/// for it too, as for the update.
 fn want_calls(step: V<'_, '_>) -> Vec<WantCall> {
     let mut out = Vec::new();
     for r in get(step, "requests").children() {
         let reply = get(r, "reply");
-        match r.get("deviation").map(string).as_deref() {
+        let deviation = r.get("deviation").map(string);
+        let read_lookup =
+            deviation.is_none() && r.get("form").map(string).as_deref() == Some("feed_latest");
+        match deviation.as_deref() {
             Some("stamps-one-read") => continue,
+            _ if read_lookup => out.push(WantCall {
+                form: "feed_head".to_owned(),
+                method: "GET".to_owned(),
+                path: string(get(r, "path")),
+                query: Vec::new(),
+                headers: vec![("swarm-only-root-chunk".to_owned(), "true".to_owned())],
+                body: None,
+                feed: None,
+                reply: recorded_reply(reply, &["swarm-feed-index", "swarm-feed-index-next"]),
+            }),
             Some("index-probe") => out.push(WantCall {
                 form: "feed_head".to_owned(),
                 method: "GET".to_owned(),
@@ -2894,5 +3022,5 @@ fn every_shell_case_through_the_machines() {
         .collect();
     named.sort();
     assert_eq!(left_out, named, "every left-out case is in the vectors");
-    assert_eq!(played, 41, "cases played");
+    assert_eq!(played, 45, "cases played");
 }
