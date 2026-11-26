@@ -68,11 +68,21 @@ function loadPackages(checkout) {
     }
   }
   const ref = createRequire(path.join(checkout, 'package.json'));
-  const fromNoevents = createRequire(path.join(noevents, 'package.json'));
+  // The class TransportNodeHid extends is this Transport, so `send` is the
+  // one a device's exchanges go through. Read from the packages' sources:
+  // loading them would load node-hid's native addon, which an install with
+  // --ignore-scripts (CI's) doesn't build.
+  const hid = dirs['@ledgerhq/hw-transport-node-hid'];
+  const hidLib = path.join(hid, 'lib', 'TransportNodeHid.js');
+  const noeventsLib = path.join(noevents, 'lib', 'TransportNodeHid.js');
+  assert.match(fs.readFileSync(hidLib, 'utf8'), /class TransportNodeHid extends hw_transport_node_hid_noevents_1\.default \{/);
+  assert.equal(createRequire(hidLib).resolve('@ledgerhq/hw-transport-node-hid-noevents'), require.resolve(noevents));
+  const noeventsSource = fs.readFileSync(noeventsLib, 'utf8');
+  assert.match(noeventsSource, /const hw_transport_1 = __importDefault\(require\("@ledgerhq\/hw-transport"\)\);/);
+  assert.match(noeventsSource, /class TransportNodeHidNoEvents extends hw_transport_1\.default \{/);
+  const fromNoevents = createRequire(noeventsLib);
   const Transport = fromNoevents('@ledgerhq/hw-transport').default;
-  const noeventsClass = fromNoevents('./lib/TransportNodeHid.js').default;
-  // The class TransportNodeHid extends is this Transport, so `send` is the one a device's exchanges go through.
-  assert.equal(Object.getPrototypeOf(noeventsClass.prototype), Transport.prototype, 'the node-hid transport extends this Transport');
+  assert.equal(path.dirname(path.dirname(fromNoevents.resolve('@ledgerhq/hw-transport'))), dirs['hw-transport-node-hid-noevents/@ledgerhq/hw-transport']);
   return {
     versions,
     Transport,
