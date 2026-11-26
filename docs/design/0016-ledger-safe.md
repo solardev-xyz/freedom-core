@@ -1,6 +1,6 @@
 # 0016: Ledger and Safe in the core
 
-**Status:** proposed, its open questions decided. Roadmap items 2.5 (Ledger) and 2.6 (Safe). Builds on [0001](0001-freedom-cored.md) (the process, core-to-main requests, cancel), [0002](0002-signing.md) (signing, and the typed-data view of #88), [0005](0005-chain-data.md) (chain reads, the fee check, the one-nonce rule), [0011](0011-page-requests.md) (handles, the approvals document), [0012](0012-approvals.md) (tokens and grants: it enforces a Safe's vault owners' and executor's signatures from APR-4, through Safe approvals, and lists a Ledger's, a Safe's Ledger owner's included, as "advised until 0016") and [0013](0013-profiles.md) (`vault-meta.json` and `safe-pending.json` in the core). It amends 0002's non-goal on Ledger and Safe accounts ([Amendments](#amendments)). Nothing here is built yet. The user decided the four [open questions](#open-questions): Q23 and Q24 on 2026-11-24, questions 3 and 4 on 2026-11-25, all as proposed but Q23, where the hash-only fallback stays ([Amendments](#amendments)).
+**Status:** proposed, its first four open questions decided and the fifth open. Roadmap items 2.5 (Ledger) and 2.6 (Safe). Builds on [0001](0001-freedom-cored.md) (the process, core-to-main requests, cancel), [0002](0002-signing.md) (signing, and the typed-data view of #88), [0005](0005-chain-data.md) (chain reads, the fee check, the one-nonce rule), [0011](0011-page-requests.md) (handles, the approvals document), [0012](0012-approvals.md) (tokens and grants: it enforces a Safe's vault owners' and executor's signatures from APR-4, through Safe approvals, and lists a Ledger's, a Safe's Ledger owner's included, as "advised until 0016") and [0013](0013-profiles.md) (`vault-meta.json` and `safe-pending.json` in the core). It amends 0002's non-goal on Ledger and Safe accounts ([Amendments](#amendments)). Nothing here is built yet. The user decided the first four [open questions](#open-questions): Q23 and Q24 on 2026-11-24, questions 3 and 4 on 2026-11-25, all as proposed but Q23, where the hash-only fallback stays ([Amendments](#amendments)). Question 5, whether a wait in the device queue counts against the 5 minutes to confirm, is the user's to decide.
 
 **The references:**
 - **freedom-browser** at `32532528` (`integration/rust-core`), in `src/main/`:
@@ -163,9 +163,9 @@ Stage 1 trusts main (0001). The attackers are 0011's and 0012's: a compromised c
 
 ### The device lane
 
-- **One operation at a time,** browser-wide, as today's queue. At most 8 wait, in order; a ninth is refused `LEDGER_BUSY`. A wait counts against the operation's 5 minutes.
+- **One operation at a time,** browser-wide, as today's queue. At most 8 wait, in order; a ninth is refused `LEDGER_BUSY`. A wait counts against the operation's 5 minutes (open: [question 5](#open-questions)).
 - **Discovery doesn't wait:** while an operation runs, `ledger.accounts` answers `LEDGER_BUSY` at once (deviation `discovery-busy`). Today a poll waits behind a signature.
-- **An operation belongs to one core request,** its parent: a `sign.*` request with a Ledger key, `ledger.accounts`, `ledger.add`, or `safe.sign_owner` for a Ledger owner. Main opens the device at the operation's first APDU and closes it when the parent ends, so Ledger Live can use the device in between, as today.
+- **An operation belongs to one core request,** its parent: a `sign.*` request with a Ledger key, `ledger.accounts`, `ledger.add`, `x402.settle { reservation, typed_data }` for a Ledger account ([x402 from a Ledger account](#x402-from-a-ledger-account)), or `safe.sign_owner` for a Ledger owner. Main opens the device at the operation's first APDU and closes it when the parent ends, so Ledger Live can use the device in between, as today.
 - **The vault:** no vault key is used, so the core doesn't require it unlocked for a Ledger key. Main's gates before the prompt stay as they are.
 
 ### `shell.ledger_apdu`
@@ -174,10 +174,11 @@ A core-to-main request, like 0004's `shell.*`:
 
 | Params | Main does | Reply |
 |---|---|---|
-| `{ for, apdu }`: the parent's envelope ID, and one APDU, hex, 5 to 260 bytes (`CLA INS P1 P2 Lc data`, `Lc` ≤ 255) | checks the APDU against the [grammar](#the-apdu-grammar) for `for` at its step; opens the device on the operation's first APDU; one `exchange`, under the row's deadline | `{ answer }`: hex, 2 to 260 bytes, ending in the status word. For a `6D00` to the operation's first `E0 1A`, `{ answer, hash_only: "shown" }`, sent only once the hash-only warning is on screen ([Typed data on the device](#typed-data-on-the-device-q23)). Or `{ failed }`: `not_found`, `busy`, `disconnected`, `unresponsive` or `timeout` |
+| `{ for, apdu, deadline_ms }`: the parent's envelope ID; one APDU, hex, 5 to 260 bytes (`CLA INS P1 P2 Lc data`, `Lc` ≤ 255); and the exchange's deadline, `15000`, or `300000` for the APDU that waits for the user to confirm (the row's *Waits for the user*) | checks the APDU against the [grammar](#the-apdu-grammar) for `for` at its step; opens the device on the operation's first APDU; one `exchange`, under `deadline_ms` | `{ answer }`: hex, 2 to 260 bytes, ending in the status word. For a `6D00` to the operation's first `E0 1A`, `{ answer, hash_only: "shown" }`, sent only once the hash-only warning is on screen ([Typed data on the device](#typed-data-on-the-device-q23)). Or `{ failed }`: `not_found`, `busy`, `disconnected`, `unresponsive` or `timeout` |
 
 - **Read strictly both ways,** as 0015 reads `shell.swarm_api`: an unknown member, a wrong type or an answer outside its bounds is `invalid_argument` from main, and a protocol error in the core. So is `hash_only` on any other answer.
 - **Main closes the device** when the parent ends, on a cancel, on a `failed`, and on a refused APDU.
+- **`deadline_ms` is a contract change** (2026-11-26): main reads the params strictly, so its relay must accept the member before the core sends it. LDG-2's lane (L2) sends it on every `shell.ledger_apdu`, and LDG-3's relay, written from this design, reads it as one of its two values. The deadlines themselves are [below](#deadlines-cancel-and-unplugging).
 
 ### The APDU grammar
 
@@ -187,7 +188,7 @@ A core-to-main request, like 0004's `shell.*`:
 
 | Operation | APDUs, in order | Bytes, all from | Waits for the user |
 |---|---|---|---|
-| `ledger.accounts`, `c` from 1 to 20 | `E0 02 00 00` `P(path_k)`, `c` times | the scheme's paths for `start` … `start + c − 1` | no |
+| `ledger.accounts`, `c` from 1 to 20, then `r` from 0 to 20 | `E0 02 00 00` `P(path_k)`, `c` times; then `E0 02 00 00` `P(path_j)`, `r` times | the scheme's paths for `start` … `start + c − 1`; then the path of each Ledger record no device has matched, at most 20 ([Accounts](#accounts)) | no |
 | `ledger.add` | `E0 02 01 00` `P` (question 3) | the path asked | yes, with the display |
 | every signature, first | `E0 02 00 00` `P`, once | the record's path | no |
 | every signature, second | `B0 01 00 00`, no data, once | — | no |
@@ -197,6 +198,7 @@ A core-to-main request, like 0004's `shell.*`:
 | `sign.typed_data`: values | `E0 1C 00 00` `"EIP712Domain"`; each domain value; `E0 1C 00 00` the primary type's name; each message value, depth first. An array: `E0 1C 00 0F` with its length, then its entries. A value: its encoding (2-byte length ‖ value bytes) in pieces of 255, `E0 1C 01 FF` for each but the last, `E0 1C 00 FF` for the last | the core's parse of the bound values, encoded as hw-app-eth's `EIP712_TYPE_ENCODERS` encode them (`EIP712/utils.js:62–102`), and cut as F-2 says they should be (deviation `field-pieces`) | no |
 | `sign.typed_data`: sign | `E0 0C 00 01` `P`, once | the record's path | yes |
 | the hash-only form (Q23) | `E0 0C 00 00` `P ‖ domainSeparator ‖ hashStruct(message)`, once, only after `6D00` answered the operation's first `E0 1A` and main's answer said `hash_only: "shown"` | `fc-evm`'s hashes of the bound typed data, not ethers' in main | yes |
+| `x402.settle { typed_data }`, a Ledger account | as `sign.typed_data`, over the reserved authorization | main's own rebuild of it, which it sent as `typed_data` ([x402 from a Ledger account](#x402-from-a-ledger-account)) | yes |
 | `safe.sign_owner`, a Ledger owner | as `sign.typed_data`, over the core's SafeTx or SafeMessage | the approved SafeTx or SafeMessage ([Owner signatures](#owner-signatures)), which main derives from its own record ([below](#mains-typed-data-binding)) | yes |
 
 **No free field.** Every byte of every APDU is derived twice: by the core, from the request it authorized and the record's path; and by main, from the request it sent or the approval it recorded, and the same path ([Main's typed-data binding](#mains-typed-data-binding)). Main compares the two byte for byte. No byte comes from an earlier answer of the device. The one value main takes from the core is a Ledger x402 payment's nonce, which names no recipient, amount, spender or time; the payment's times are main's own clock reading, which main sends to the core ([below](#mains-typed-data-binding)).
@@ -209,7 +211,7 @@ A core-to-main request, like 0004's `shell.*`:
 - **The payload,** for every row: main builds the operation's whole expected stream itself, and each APDU must equal the next one of it, header and data, byte for byte. For a transaction or a message that is `P ‖ T` or `P ‖ len(m) ‖ m` in the row's pieces, built from the parent's params with ethers, as `signing-utils.js` does today. For typed data it is the definitions and values main encodes itself ([below](#mains-typed-data-binding)).
 - **The rare ones:** `E0 02 01 00` only under `ledger.add`; `E0 0C 00 00` only after a `6D00` answer to the operation's first `E0 1A`, which main sent as `{ answer, hash_only: "shown" }` once the hash-only warning was on screen (Q23).
 - **A refused APDU** is answered `invalid_argument` with `data: { rule }` (`parent`, `order`, `header`, `count`, `path`, `payload` or `ended`), before any byte reaches the device. Main logs the rule, never an APDU's bytes, refuses every later APDU of that parent and closes the device. The core ends the parent with `LEDGER_UNKNOWN`.
-- **One source:** the grammar is data, `vectors/ledger-grammar.json`: the rows, each row's honest APDUs, which must be admitted, and its nearest forbidden ones, which must be refused. The core's tests and main's relay suite both read it, as 0015's `swarm-grammar.json` is read.
+- **One source:** the grammar is data, `vectors/ledger-grammar.json`: the rows, each row's honest APDUs, which must be admitted, and its nearest forbidden ones, which must be refused. The core's tests and main's relay suite both read it, as 0015's `swarm-grammar.json` is read. Two rows above are newer than the file (2026-11-26): `ledger.accounts`'s check of the unmatched records, which the file and the generator's discovery cases gain in LDG-2's L3, and `x402.settle`'s, which they gain in L5.
 
 ### Main's typed-data binding
 
@@ -220,7 +222,7 @@ Main encodes the whole typed-data stream itself, from what it holds, and compare
   - **At a Ledger owner's turn,** main reads the pending entry's fields (`safe.pending`), computes their hash again, and requires its own record's. It encodes the stream from those fields.
   - **The records live in main's memory only,** never in a file ([Approval records](#approval-records)). With no record (after any restart of main, a crash, or an older build run in between), the approvals surface shows the SafeTx, rebuilt by main from the fields, and the user approves it again before the device is asked. That decision records it again.
 - **A SafeMessage, for a Ledger owner:** from the page's request main holds (0011's request record): the digest by ethers (`hashMessage` for `personal_sign`, `TypedDataEncoder.hash` for typed data), then `{ message: digest }` under the domain of the Safe's address on chain 100. Sessions live in memory, so nothing is written.
-- **An x402 payment from a Ledger account** goes as `sign.typed_data`, under [the x402 reconstruction](#x402-from-a-ledger-account) below: main rebuilds the whole authorization itself and sends its own copy.
+- **An x402 payment from a Ledger account** goes as `x402.settle { reservation, typed_data }`, its APDUs `sign.typed_data`'s, under [the x402 reconstruction](#x402-from-a-ledger-account) below: main rebuilds the whole authorization itself, sends its own copy, and encodes the stream from that copy.
 - **Two derivations:** main encodes from ethers' parse, the core from `fc-evm`'s. Both must reproduce `ledger.json`'s APDUs, which is their joint contract. Where they would differ for an input the core accepts, main refuses: the operation fails closed with nothing signed, and the case is a vector to raise, not to edit.
 - **The vault owners** of a Safe sign in the core, which holds their keys, so main's binding doesn't apply to them.
 - **What this stops:** during a live `sign.typed_data` or a Ledger `safe.sign_owner`, a faulty core can't send another schema, message, SafeTx or SafeMessage of the same shape. Any changed byte is a `payload` refusal, before the device.
@@ -236,7 +238,11 @@ A record is authority: it decides what a Ledger may sign without another approva
 
 ### x402 from a Ledger account
 
-For a Ledger account, `x402.authorize` (0012's X402-1) checks the cap or the `x402-payment` token and charges the cap as for any account. It takes one more input, `now_s`: main's wall-clock reading in seconds, taken once for this payment. The core refuses a `now_s` more than 30 s from its own clock. Then it returns the authorization as typed data, with the nonce it drew, instead of signing it. Main rebuilds the authorization itself, from the accept entry it holds, `now_s` and that nonce, and requires the core's typed data to equal its own in every type, field and value. It then sends its own copy through `sign.typed_data` with the Ledger key, where the core accepts only the authorization it returned. The device's stream is bound to that copy. A refusal or failure on the device gives the cap's charge back, as 0012's `withheld` does.
+For a Ledger account, `x402.authorize` (0012's X402-1) checks the cap or the `x402-payment` token and charges the cap as for any account. It takes one more input, `now_s`: main's wall-clock reading in seconds, taken once for this payment. The core refuses a `now_s` more than 30 s from its own clock. Then it returns the authorization as typed data, with the nonce it drew, instead of signing it, and keeps it on the reservation. Main rebuilds the authorization itself, from the accept entry it holds, `now_s` and that nonce, and requires the core's typed data to equal its own in every type, field and value. It then sends its own copy back:
+- **`x402.settle { reservation, typed_data }`** (new, decided 2026-11-26): the core requires `typed_data` to equal the reserved authorization, refuses anything else before the device, and signs it on the [device lane](#the-device-lane) with the account's record (a Ledger key's, so `vault_meta` moved), as `sign.typed_data`'s rows have it. The device's stream is bound to main's copy ([Main's typed-data binding](#mains-typed-data-binding)). The signature is checked as a `{ signature }` settle's is, and the reply is the same: `{ payload, charged, grant?, durable? }`. A refusal or failure on the device gives the cap's charge back and spends the reservation, as a refused `{ signature }` does.
+- **`x402.settle { reservation, signature }`** (#392) stays: for a phone, and for a Ledger under main before LDG-3, which sends no `now_s`, so its authorization is #392's, built on the core's clock.
+
+The binding is structural: the core signs only what it reserved, and only main's copy reaches the device. The two other ways, `sign.typed_data` with the Ledger key (this design as first written) and #392 as it is, are in [Options weighed](#options-weighed).
 
 The forms, exactly as `@x402/evm` 2.29.0 builds them (`exact/client/index.js`):
 
@@ -249,6 +255,7 @@ The forms, exactly as `@x402/evm` 2.29.0 builds them (`exact/client/index.js`):
 - **Only these three.** Any other transfer method, network or extension is refused for a Ledger account before the device, as for any account: Freedom's x402 signer has no `readContract`, so the package's EIP-2612 and ERC-20-approval extensions never run (`x402/client.js:40–42`).
 - **The times are main's:** `now_s` is main's reading, so every time byte of the authorization is one main derived. The nonce is the only value main takes from the core: 32 random bytes for EIP-3009, a random uint256 for Permit2. It names no recipient, amount, spender or time.
 - **Parity:** main's rebuild must reproduce 0012's `x402` vectors, which are `@x402/evm`'s payloads under a fixed nonce and clock, byte for byte.
+- **The version:** each side holds for its own vectors. `vectors/approvals.json`, which `fc-approval` builds the authorization against, was generated over the approvals reference's install, `@x402/evm` 2.28.0 (its `meta.packages`, and `fc-approval/src/x402.rs`'s note); `ledger.json`'s x402 cases over the lockfile's 2.29.0, which this design pins. LDG-2's L5 checks that the three forms are the same under both, and corrects whichever text is wrong.
 
 ### Typed data on the device (Q23)
 
@@ -285,7 +292,7 @@ The forms, exactly as `@x402/evm` 2.29.0 builds them (`exact/client/index.js`):
 ### Deadlines, cancel and unplugging
 
 - **An APDU the user doesn't confirm:** 15 s, hw-transport's own `unresponsiveTimeout`, which today only warns. Then `LEDGER_UNRESPONSIVE`: "The Ledger stopped answering. Reconnect it and try again."
-- **One the user confirms:** 5 minutes, as a phone job's (`remote/bridge.js:78`). Then `LEDGER_TIMEOUT`: "The Ledger wasn't confirmed in 5 minutes. If it still shows the request, reject it there." (deviation `device-deadlines`). Main enforces both on the exchange; the core's own timer is 1 s longer.
+- **One the user confirms:** 5 minutes, as a phone job's (`remote/bridge.js:78`). Then `LEDGER_TIMEOUT`: "The Ledger wasn't confirmed in 5 minutes. If it still shows the request, reject it there." (deviation `device-deadlines`). Main enforces both on the exchange, as each `shell.ledger_apdu`'s `deadline_ms` names them (`15000` or `300000`); the core's own timer is 1 s longer.
 - **Cancel:** the parent's cancel (0001), when the user cancels, the prompt's handle closes (0011) or its document goes. The core cancels its pending `shell.ledger_apdu`; main closes the node-hid handle, which ends the read in flight; the parent replies `cancelled`. Its token was burnt when it was presented, as every token is (0012). The browser gains a Cancel in the send screen's Ledger state, and keeps Reject enabled in the dApp approval while the device waits (deviation `cancel`).
 - **Unplugged:** a failed write or read is `{ failed: "disconnected" }`, `LEDGER_DISCONNECTED`. Nothing is signed, and a send releases its nonce, as today.
 - **A late answer:** after a timeout or a cancel the handle is closed, so the answer has no reader. The next operation opens a new handle, starts with the address check, and recovers its signature against its own digest. An answer meant for another operation is never taken as this one's.
@@ -301,9 +308,10 @@ The forms, exactly as `@x402/evm` 2.29.0 builds them (`exact/client/index.js`):
 
 ### Accounts
 
-- **`ledger.accounts { scheme, start, count }`** (chrome, shell) → `{ accounts: [{ path, address }] }`, as `ledger:get-accounts` today: display off, 1 to 20 paths, each address checked against its key.
+- **`ledger.accounts { scheme, start, count }`** (chrome, shell) → `{ accounts: [{ path, address }], mismatched: [{ index, name, address, path }] }`, as `ledger:get-accounts` today: display off, 1 to 20 paths, each address checked against its key.
+- **Discovery checks the unmatched records** (decided 2026-11-26), as `account-checks.js` does today: after its discovery APDUs, in the same operation, `ledger.accounts` reads `E0 02 00 00` `P` at the path of each Ledger record no device has matched (`unchecked` or `mismatched`), at most 20, in the wallet list's order, display off. The core records each result on its record itself, as `accounts.record_address_check` does, and the records the device doesn't hold come back in `mismatched`. A failed check, one the core can't record included, is logged and leaves `mismatched` empty; it doesn't fail discovery (`ipc.js:24–33`). So a record added before #1065 can own a Safe once a device that holds it is attached, without signing first (F-3; `identity-manager.js:1523–1529`). The reference checks every such record; the core at most 20 (deviation `check-bound`).
 - **`ledger.add { scheme, index, name? }`** (chrome, shell): the core reads the address at that path from the device itself, with the display (question 3), and the user confirms there. Then it writes the record through 0013's `accounts.*` once PRF-6(a) has made `vault-meta.json` the core's. Until then it returns `{ path, address }`, and main writes exactly those. The chrome no longer sends an address (deviation `address-from-device`, F-3).
-- **The key reference:** 0002's table gains `{ "kind": "ledger", "index": n }`, admitted in `sign.transaction`, `sign.message` and `sign.typed_data`. Until PRF-6(a) it also carries the record's `path` and `address`. From then on the core reads the record, and refuses a key whose `path` or `address` differs.
+- **The key reference:** 0002's table gains `{ "kind": "ledger", "index": n }`, admitted in `sign.transaction`, `sign.message` and `sign.typed_data`. The core reads the record (decided 2026-11-26): a Ledger key requires `vault_meta` in the hello's `store_moved` (0013's PRF-6(a)), and answers `not_moved` otherwise. A caller may also send the record's `path` and `address`; each one given must equal the record's, or the key is refused.
 
 ## Safe
 
