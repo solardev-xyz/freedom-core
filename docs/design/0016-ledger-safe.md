@@ -141,6 +141,7 @@ Stage 1 trusts main (0001). The attackers are 0011's and 0012's: a compromised c
 | Execute for a Safe whose owners or threshold were changed elsewhere | The record's owners and threshold count | Refused ([Q24](#open-questions)) |
 | Report the record's setup for a Safe that was changed (one lying endpoint) | The setup isn't read | No: every read the decision rests on must be verified, or nothing is signed ([Chain reads](#chain-reads)) |
 | Change the Safe's own setup through a site's transaction | Yes, like any call | No: refused, `safe_self_call` ([question 4](#open-questions)) |
+| Add a hidden owner or module through a delegatecall signed outside Freedom | Yes, and nothing reads it | Not detected: it takes the threshold of the user's own keys signing outside Freedom, and Freedom never builds a delegatecall ([what the setup check can't see](#what-the-setup-check-cant-see)) |
 | Sign with the executor's key for something other than a ready SafeTx (a main bug) | Yes, under `shell` | No: only the core's prepared send, or an `executor-send` token for a fee the check stopped |
 | Act as main | Everything | Everything: main holds the device and relays its answers |
 
@@ -313,7 +314,7 @@ The forms, exactly as `@x402/evm` 2.29.0 builds them (`exact/client/index.js`):
 - **Version 1.4.1,** with the three canonical contracts [above](#safe), as safe-deployments 1.37.66 lists them, and the factory's proxy code (F-4: 486 bytes, keccak256 `0x1856…af5f`). `fc-safe` pins all four, as the reference does since #1066. SAFE-1 checks them against safe-deployments' files, the reference's pins, the factory's recorded runtime code (whose keccak256 is the code hash safe-deployments lists, and which embeds the proxy code once) and the recorded `proxyCreationCode()` answer.
 - **On Gnosis** (chain 100) only.
 - **Two or three of the user's own accounts as owners,** 1 of 2 or 2 of 3, as the core's `accounts.addSafe` allows (fc-wallet-state's `add_safe`; `identity-manager.js:1523–1528`), set up with no setup call, no payment, no module, no guard and the canonical fallback handler.
-- **As Freedom made it, still:** before each owner's signature and before execution, the core reads the Safe's setup ([Owners, threshold and setup](#owners-threshold-and-setup)), and refuses to go on when it isn't the record's.
+- **As Freedom made it, still, as far as its setup can be read:** before each owner's signature and before execution, the core reads the Safe's setup ([Owners, threshold and setup](#owners-threshold-and-setup)), and refuses to go on when it isn't the record's. The reads see the Safe's linked owner and module lists, not every entry of its mappings ([what the check can't see](#what-the-setup-check-cant-see)).
 
 ### Built and hashed in the core
 
@@ -339,9 +340,17 @@ Before each owner's signature and before execution, the core reads the [setup](#
 - the threshold is the record's;
 - no guard, no module, and the canonical fallback handler.
 
-Anything else is `safe_changed`: "This Safe was changed outside Freedom, so Freedom can't sign for it." Nothing is signed. The board shows the state and offers only to discard (deviation `safe-setup`). Today Freedom counts the record's owners and threshold and never reads the Safe's.
+Anything else the reads show is `safe_changed`: "This Safe was changed outside Freedom, so Freedom can't sign for it." Nothing is signed. The board shows the state and offers only to discard (deviation `safe-setup`). Today Freedom counts the record's owners and threshold and never reads the Safe's.
 
 **As `fc-safe`'s `check_setup` does it:** the singleton is slot 0's whole word, `SafeL2`'s address with the high 12 bytes zero; the owners match as a set, in any order; no module is `getModulesPaginated(0x1, 1)` answering an empty page with the sentinel as `next`, since `enableModule` links a module at the head. It names every change it finds. Under another singleton the calls answer for that contract, so they aren't compared, and the change named is the singleton, with the guard and the handler if those changed too. A Safe with no code isn't deployed: it is reported so, not as changed, since its address commits to the record's setup, and the reference sends, executes and signs messages only for a Safe marked deployed. An answer that isn't Safe 1.4.1's encoding (a word that isn't 32 bytes, a list whose offset, count or length isn't Solidity's, an address word with its high bytes set) is a read error, never a change.
+
+#### What the setup check can't see
+
+Safe 1.4.1 accepts a signer when `owners[signer]` is nonzero and a module when `modules[module]` is, both mapping lookups, while `getOwners()` and `getModulesPaginated` walk the linked lists from the sentinel. A SafeTx executed outside Freedom with `operation` 1 can delegatecall code that writes a nonzero `owners[X]` or `modules[M]` without linking it, and without changing `ownerCount`. No read of this set can find such an entry, nor can any bounded set of reads, since its key is unknown. So `check_setup` answers `Unchanged`, and then X can sign for the Safe, or M can execute from it.
+
+- **Who could do it:** the owners are the user's own accounts (Q24), so it takes the Safe's threshold of the user's own keys signing a delegatecall outside Freedom, for example after exporting a key to another wallet.
+- **Freedom never writes one:** it builds every SafeTx as a CALL, and refuses a site's call to the Safe (question 4).
+- **What the check guarantees:** the Safe's readable setup is the record's, and no setup change was made through the Safe's own functions. It doesn't rule out a hidden owner or module that a delegatecall wrote outside Freedom. That stays a known limit. Enforcing it needs a different defense, such as a guard Freedom installs at creation, and that is a design change.
 
 **A site's transaction to the Safe itself** (`to` is the Safe: an owner, threshold, module, guard or handler change) is refused with `safe_self_call` ([question 4](#open-questions), decided 2026-11-25). `to` being the Safe catches every setup change: the Safe's setup functions accept only a call from the Safe itself, and Freedom builds every SafeTx as a CALL, never a delegatecall ([Built and hashed in the core](#built-and-hashed-in-the-core)). The wallet's own screens never build one.
 
@@ -512,7 +521,7 @@ Once decided:
 
 **2026-11-26, LDG-1 part 2** (`fc-ledger`): F-7 is filed upstream as LedgerHQ/ledger-live#25605 (hw-app-eth, still present on its default branch at 7.14.0); F-1 notes that what #1063 still takes is recorded in a comment on freedom-browser#1063. The coordinator's decisions on `fc-ledger`'s open points (2026-11-26): a missing device becomes the deviation `no-device` (its row; `open-no-device-*` marked through the generator); as-built details recorded where they belong: an answer the core can't read, an address that isn't its key's among them, ends `LEDGER_UNKNOWN` (*Answers the core checks*, which also says how the address text is read: `fc-evm`'s `parse_address`, EIP-55 when mixed case, as the Ethereum app writes it); a `B0 01` format other than 1 is `LEDGER_ETH_APP_NOT_OPEN` (*The app*); a value's bound counts its own bytes, not its 2-byte length, and the 2,048-APDU bound counts the address check and `B0 01` (*Bounds*). And a fifth new code, `LEDGER_TYPE_NOT_CANONICAL`: typed data whose array suffix isn't written as the device rebuilds it (`array-suffix-written-form`, `uint8[02]`) is refused before the first APDU (*Bounds*, *API*).
 
-**2026-11-26, SAFE-2 S0** (`fc-safe`'s setup reads): *Chain reads* gives the reads' order and how the slots are sent, and *Owners, threshold and setup* gives the check as built: the singleton's whole word, the owners as a set, the empty module page, every change named, another singleton's calls not compared, a Safe with no code reported as not deployed, and an answer that isn't its encoding a read error. `fc-approval` hashes a Safe approval's SafeTx and SafeMessage, and builds `execTransaction`'s calldata, through `fc-safe`'s chain-generic functions (the coordinator's D5); no encoding changes.
+**2026-11-26, SAFE-2 S0** (`fc-safe`'s setup reads; Codex round 1 on #519 added *What the setup check can't see*, narrowed Q24's "as Freedom made it, still" and `safe_changed` to what the reads show, and added its threat row): *Chain reads* gives the reads' order and how the slots are sent, and *Owners, threshold and setup* gives the check as built: the singleton's whole word, the owners as a set, the empty module page, every change named, another singleton's calls not compared, a Safe with no code reported as not deployed, and an answer that isn't its encoding a read error. `fc-approval` hashes a Safe approval's SafeTx and SafeMessage, and builds `execTransaction`'s calldata, through `fc-safe`'s chain-generic functions (the coordinator's D5); no encoding changes.
 
 ## Options weighed
 
