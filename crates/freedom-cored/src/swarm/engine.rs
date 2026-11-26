@@ -1077,6 +1077,13 @@ impl Engine {
         self.memory.used()
     }
 
+    /// The most the pool held at once since the last read, for the test
+    /// hooks (SWM-4's gates).
+    #[cfg(feature = "testhooks")]
+    pub fn memory_peak(&mut self) -> usize {
+        self.memory.most()
+    }
+
     /// Requests held (running, waiting, or ended with asks still open).
     #[cfg(any(test, feature = "testhooks"))]
     pub fn requests(&self) -> usize {

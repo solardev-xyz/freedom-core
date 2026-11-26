@@ -31,6 +31,10 @@ pub struct Pool<T> {
     capacity: usize,
     used: usize,
     queue: VecDeque<(T, usize)>,
+    /// The most reserved at once since the test hooks last read it
+    /// ([`Pool::most`]).
+    #[cfg(any(test, feature = "testhooks"))]
+    most: usize,
 }
 
 impl<T: Copy + PartialEq> Pool<T> {
@@ -39,6 +43,8 @@ impl<T: Copy + PartialEq> Pool<T> {
             capacity,
             used: 0,
             queue: VecDeque::new(),
+            #[cfg(any(test, feature = "testhooks"))]
+            most: 0,
         }
     }
 
@@ -48,6 +54,7 @@ impl<T: Copy + PartialEq> Pool<T> {
     pub fn reserve(&mut self, who: T, amount: usize) -> bool {
         if self.queue.is_empty() && self.fits(amount) {
             self.used += amount;
+            self.noted();
             return true;
         }
         self.queue.push_back((who, amount));
@@ -86,6 +93,7 @@ impl<T: Copy + PartialEq> Pool<T> {
                 break;
             }
             self.used += amount;
+            self.noted();
             self.queue.pop_front();
             granted.push(who);
         }
@@ -96,6 +104,23 @@ impl<T: Copy + PartialEq> Pool<T> {
     #[cfg(any(test, feature = "testhooks"))]
     pub fn used(&self) -> usize {
         self.used
+    }
+
+    /// The high-water mark grows with what is reserved.
+    #[cfg(any(test, feature = "testhooks"))]
+    fn noted(&mut self) {
+        self.most = self.most.max(self.used);
+    }
+
+    #[cfg(not(any(test, feature = "testhooks")))]
+    fn noted(&mut self) {}
+
+    /// The most reserved at once since the last call (the test hooks'
+    /// `test.swarm_world { peak }`, SWM-4's gates), which starts again
+    /// from what is reserved now.
+    #[cfg(any(test, feature = "testhooks"))]
+    pub fn most(&mut self) -> usize {
+        std::mem::replace(&mut self.most, self.used)
     }
 
     /// Whether `who` waits.
@@ -129,6 +154,13 @@ mod tests {
         assert_eq!((pool.used(), pool.waiting()), (7, 0));
         assert_eq!(pool.release(7), Vec::<u32>::new());
         assert_eq!(pool.used(), 0);
+        // The high-water mark: 6, then 7 once both were granted; read, it
+        // starts again from what is reserved.
+        assert_eq!(pool.most(), 7);
+        assert_eq!(pool.most(), 0);
+        assert!(pool.reserve(4, 3));
+        pool.release(3);
+        assert_eq!(pool.most(), 3);
     }
 
     #[test]
