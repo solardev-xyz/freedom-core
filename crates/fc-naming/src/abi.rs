@@ -394,11 +394,16 @@ fn decode_tallied(
     (fields, budget.made.get())
 }
 
-/// Head-and-tail encoding of dynamic `bytes`/`string` and static words, for
-/// the calls naming makes. Each item is a word or a dynamic byte string.
+/// Head-and-tail encoding of dynamic `bytes`/`string`, dynamic arrays of
+/// static words and static words, for the calls naming makes (and
+/// fc-safe's: `setup`'s `address[]`). Each item is a word, a dynamic byte
+/// string or a dynamic array of words.
 pub enum Token<'a> {
     Word([u8; 32]),
     Dynamic(&'a [u8]),
+    /// `T[]` of a static one-word `T` (`address[]`, `uint256[]`): its
+    /// length, then each word.
+    Words(&'a [[u8; 32]]),
 }
 
 pub fn encode(tokens: &[Token<'_>]) -> Vec<u8> {
@@ -412,6 +417,13 @@ pub fn encode(tokens: &[Token<'_>]) -> Vec<u8> {
                 tail.extend_from_slice(&word_from_usize(bytes.len()));
                 tail.extend_from_slice(bytes);
                 tail.resize(tail.len().div_ceil(WORD) * WORD, 0);
+            }
+            Token::Words(words) => {
+                head.extend_from_slice(&word_from_usize(tokens.len() * WORD + tail.len()));
+                tail.extend_from_slice(&word_from_usize(words.len()));
+                for word in *words {
+                    tail.extend_from_slice(word);
+                }
             }
         }
     }
@@ -543,6 +555,29 @@ mod tests {
             Token::Dynamic(bytes),
             Token::Word(word_from_address(&address)),
         ])
+    }
+
+    #[test]
+    fn an_array_of_words_is_its_length_then_its_words() {
+        // `f(address[] a, uint256 b, bytes c)` with a = [1, 2], b = 3,
+        // c = 0xff, as ethers' AbiCoder encodes it.
+        let words = [word_from_usize(1), word_from_usize(2)];
+        let data = encode(&[
+            Token::Words(&words),
+            Token::Word(word_from_usize(3)),
+            Token::Dynamic(&[0xff]),
+        ]);
+        let mut expected = Vec::new();
+        for n in [0x60, 3, 0xc0, 2, 1, 2, 1] {
+            expected.extend(word_from_usize(n));
+        }
+        expected.push(0xff);
+        expected.extend([0u8; 31]);
+        assert_eq!(data, expected);
+        assert_eq!(
+            encode(&[Token::Words(&[])]),
+            [word_from_usize(32), word_from_usize(0)].concat()
+        );
     }
 
     #[test]
