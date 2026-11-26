@@ -176,6 +176,18 @@ impl Run {
         }
     }
 
+    /// The site whose record the op reads or changes; `None` for
+    /// `release`, which reads none.
+    pub(crate) fn key(&self) -> Option<&JsString> {
+        match &self.op {
+            Op::Check { key, .. } | Op::Decide { key, .. } => Some(key),
+            Op::Get { origin } | Op::UseIndividual { origin, .. } | Op::Disconnect { origin } => {
+                Some(origin)
+            }
+            Op::Release { .. } => None,
+        }
+    }
+
     pub(crate) fn start(&mut self, cx: &mut Cx<'_>, stores: &mut Stores<'_>) -> Step {
         if !matches!(self.phase, Phase::Start) {
             return Step::Ended;
@@ -369,6 +381,19 @@ pub(crate) fn detach(stores: &mut Stores<'_>, key: &JsString, projection: Projec
     }
     let (store, mut world) = split(stores);
     let _ = store.detach_managed(key, projection, &mut world);
+}
+
+/// Whether SW-1's hold would defer a feed-store change [`detach`] makes
+/// (a disconnect's revoke of a held site's feed grant, or a journal it
+/// replays): tried on a copy, nothing made. A store that can't be read
+/// defers nothing (the detach then changes nothing either).
+pub(crate) fn detach_held(stores: &mut Stores<'_>, key: &JsString, projection: Projection) -> bool {
+    if ensure_loaded(stores).is_err() {
+        return false;
+    }
+    held(stores, |store, probe| {
+        let _ = store.detach_managed(key, projection, probe);
+    })
 }
 
 /// What a manifest change's world fails with.
