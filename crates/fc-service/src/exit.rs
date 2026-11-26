@@ -175,14 +175,32 @@ pub(crate) fn exit_reporting(exit: Exit, bound: Duration, report: impl FnOnce())
     std::process::exit(code)
 }
 
-/// Ends the process now with `exit`, from any thread, as the panic hook's
-/// fatal exit does: the exit is claimed first ([`claim`]), then `report`
-/// and the log queue get at most 150 ms. For a fail-stop that no request
-/// may answer and no teardown should run before: a native library's
-/// out-of-memory error under the memory cap ([`Exit::OutOfMemory`]; design
-/// 0010, "The memory cap"), which ends the process as a crash does.
-pub fn fail_stop(exit: Exit, report: impl FnOnce()) -> ! {
-    exit_reporting(exit, REPORT_BOUND, report)
+/// Ends the process at once with `exit`, from any thread, after one write
+/// of `line`, a fixed one, to stderr: a fail-stop that no request answers
+/// and no teardown precedes, for a native library's out-of-memory error
+/// under the memory cap ([`Exit::OutOfMemory`]; design 0010, "The memory
+/// cap"), which ends the process as a crash does.
+///
+/// It must work with the heap exhausted, as libradicle's hooks do, so it
+/// allocates nothing, takes no lock, starts no thread and runs no `atexit`
+/// handler or destructor: `_exit` on Unix, `TerminateProcess` on Windows,
+/// both through `fc-sys`. So it doesn't [`claim`] the exit, and the log
+/// queue isn't drained: lines queued before it may be lost, and `line`
+/// goes to stderr directly.
+pub fn fail_stop(exit: Exit, line: &'static [u8]) -> ! {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        fc_sys::unix::fail_stop(i32::from(exit.code()), line)
+    }
+    #[cfg(windows)]
+    {
+        fc_sys::windows::fail_stop(u32::from(exit.code()), line)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = line;
+        std::process::exit(i32::from(exit.code()))
+    }
 }
 
 impl From<&GateError> for Exit {
@@ -256,11 +274,7 @@ mod tests {
             // A fail-stop on another thread, while the main thread waits:
             // its line, then 71.
             "fail_stop" => {
-                std::thread::spawn(|| {
-                    fail_stop(Exit::OutOfMemory, || {
-                        crate::log::line(b"{\"fail_stop\":true}\n".to_vec());
-                    })
-                });
+                std::thread::spawn(|| fail_stop(Exit::OutOfMemory, b"{\"fail_stop\":true}\n"));
                 loop {
                     std::thread::park();
                 }

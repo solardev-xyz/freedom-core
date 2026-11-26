@@ -42,8 +42,9 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_SHARE_WRITE, FileAttributeTagInfo, FileDispositionInfo, FileDispositionInfoEx,
     FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, FileIdInfo, GetDriveTypeW,
     GetFileInformationByHandle, GetFileInformationByHandleEx, SYNCHRONIZE,
-    SetFileInformationByHandle,
+    SetFileInformationByHandle, WriteFile,
 };
+use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
 use windows_sys::Win32::System::Diagnostics::Debug::{
     SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX, SetErrorMode,
 };
@@ -62,9 +63,9 @@ use windows_sys::Win32::System::SystemServices::{
     PROCESS_MITIGATION_IMAGE_LOAD_POLICY,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetProcessMitigationPolicy, OpenProcessToken, PROCESS_MITIGATION_POLICY,
-    ProcessDynamicCodePolicy, ProcessExtensionPointDisablePolicy, ProcessImageLoadPolicy,
-    SetProcessMitigationPolicy,
+    ExitProcess, GetCurrentProcess, GetProcessMitigationPolicy, OpenProcessToken,
+    PROCESS_MITIGATION_POLICY, ProcessDynamicCodePolicy, ProcessExtensionPointDisablePolicy,
+    ProcessImageLoadPolicy, SetProcessMitigationPolicy, TerminateProcess,
 };
 
 /// `GetDriveTypeW`'s `DRIVE_UNKNOWN`.
@@ -73,6 +74,59 @@ pub const DRIVE_UNKNOWN: u32 = 0;
 pub const DRIVE_NO_ROOT_DIR: u32 = 1;
 /// `GetDriveTypeW`'s `DRIVE_REMOTE`: a mapped network drive.
 pub const DRIVE_REMOTE: u32 = 4;
+
+/// Ends the process at once with `code`, after one write of `line` to
+/// standard error: a fail-stop that allocates nothing, takes no lock,
+/// starts no thread and runs no `atexit` handler, destructor or DLL detach
+/// routine (`TerminateProcess` on this process), so that it works with the
+/// heap exhausted (design 0010, "The memory cap": a service's
+/// out-of-memory backstop, as libradicle's hooks end the process). A short
+/// or failed write is ignored: the exit code is what the parent reads.
+pub fn fail_stop(code: u32, line: &'static [u8]) -> ! {
+    write_stderr(line);
+    terminate(code);
+    // Not reached: terminating this process ends the calling thread too.
+    // Were it to return, `ExitProcess` ends the process all the same.
+    exit_process(code)
+}
+
+/// One `WriteFile` of `line` to the standard error handle.
+#[allow(unsafe_code)]
+fn write_stderr(line: &'static [u8]) {
+    // SAFETY: GetStdHandle takes a constant and reads no memory of ours; the
+    // handle it returns is the process's own and is never closed here.
+    let stderr = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+    let len = u32::try_from(line.len()).unwrap_or(u32::MAX);
+    let mut written = 0u32;
+    // SAFETY: WriteFile reads at most `len` bytes from `line`, a live static
+    // buffer at least that long, and writes the count into `written`, a
+    // local `u32`; no OVERLAPPED is passed. An invalid or null handle fails
+    // harmlessly.
+    let _ = unsafe {
+        WriteFile(
+            stderr,
+            line.as_ptr(),
+            len,
+            &raw mut written,
+            std::ptr::null_mut(),
+        )
+    };
+}
+
+/// `TerminateProcess` on this process, with `code`.
+#[allow(unsafe_code)]
+fn terminate(code: u32) {
+    // SAFETY: the pseudo-handle of this process needs no closing, and
+    // TerminateProcess reads no memory of ours.
+    let _ = unsafe { TerminateProcess(current_process(), code) };
+}
+
+/// `ExitProcess(code)`, which never returns.
+#[allow(unsafe_code)]
+fn exit_process(code: u32) -> ! {
+    // SAFETY: ExitProcess takes an integer and never returns.
+    unsafe { ExitProcess(code) }
+}
 
 /// This process's working set in bytes (`K32GetProcessMemoryInfo`'s
 /// `WorkingSetSize`, kernel32's copy, so no psapi.dll): the Colibri
