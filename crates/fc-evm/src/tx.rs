@@ -214,37 +214,41 @@ impl Transaction {
         rlp::list(out, &[]); // access list
     }
 
-    /// All the public work of signing: the fields and the digest to sign.
-    /// The key is needed only between this and [`PreparedTransaction::finish`].
+    /// All the public work of signing: the unsigned serialization and the
+    /// digest to sign. The key is needed only between this and
+    /// [`PreparedTransaction::finish`].
     pub fn prepare(&self) -> Result<PreparedTransaction, Error> {
         let mut fields = Vec::new();
-        let unsigned = match &self.fees {
+        let (unsigned, start) = match &self.fees {
             Fees::Legacy { gas_price } => {
                 rlp::uint(&mut fields, &U256::from_u64(self.nonce));
                 rlp::uint(&mut fields, gas_price);
                 self.common(&mut fields);
                 // EIP-155: the chain id, then two empty fields, are signed.
-                let mut unsigned = fields.clone();
-                rlp::uint(&mut unsigned, &self.chain_id);
-                rlp::uint(&mut unsigned, &U256::ZERO);
-                rlp::uint(&mut unsigned, &U256::ZERO);
-                let mut payload = Vec::new();
-                rlp::list(&mut payload, &unsigned);
-                payload
+                let mut payload = fields.clone();
+                rlp::uint(&mut payload, &self.chain_id);
+                rlp::uint(&mut payload, &U256::ZERO);
+                rlp::uint(&mut payload, &U256::ZERO);
+                let mut unsigned = Vec::with_capacity(payload.len() + 9);
+                rlp::list(&mut unsigned, &payload);
+                let start = unsigned.len() - payload.len();
+                (unsigned, start)
             }
             Fees::Eip1559 {
                 max_fee_per_gas,
                 max_priority_fee_per_gas,
             } => {
                 self.eip1559_fields(&mut fields, max_fee_per_gas, max_priority_fee_per_gas);
-                let mut unsigned = vec![0x02];
+                let mut unsigned = Vec::with_capacity(fields.len() + 10);
+                unsigned.push(0x02);
                 rlp::list(&mut unsigned, &fields);
-                unsigned
+                let start = unsigned.len() - fields.len();
+                (unsigned, start)
             }
         };
         Ok(PreparedTransaction {
             legacy_chain_id: matches!(self.fees, Fees::Legacy { .. }).then_some(self.chain_id),
-            fields,
+            fields: start..start + fields.len(),
             digest: keccak256(&unsigned),
             unsigned,
         })
@@ -258,13 +262,17 @@ impl Transaction {
     }
 }
 
-/// A transaction ready to sign: its fields (without the signature) and the
-/// digest. Nothing in it is secret.
+/// A transaction ready to sign: its unsigned serialization and the digest.
+/// The signed serialization reuses the unsigned one's fields, so only one
+/// copy of the transaction is kept. Nothing in it is secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedTransaction {
     /// Set for legacy (EIP-155) transactions, whose v encodes the chain id.
     legacy_chain_id: Option<U256>,
-    fields: Vec<u8>,
+    /// The fields every signed serialization carries before its signature,
+    /// within `unsigned`: all of its list for EIP-1559, all but the chain
+    /// id and the two empty fields for legacy.
+    fields: std::ops::Range<usize>,
     digest: [u8; 32],
     unsigned: Vec<u8>,
 }
@@ -286,12 +294,16 @@ impl PreparedTransaction {
 
     /// The signed serialization, from a 65-byte `r ‖ s ‖ v` signature of
     /// [`Self::digest`] (`v ∈ {27, 28}`).
-    pub fn finish(mut self, signature: &[u8; 65]) -> Result<SignedTransaction, Error> {
+    pub fn finish(self, signature: &[u8; 65]) -> Result<SignedTransaction, Error> {
         let parity = match signature[64] {
             27 => 0u64,
             28 => 1u64,
             _ => return Err(Error::Signing),
         };
+        // The unsigned serialization's fields, in its own buffer.
+        let mut fields = self.unsigned;
+        fields.truncate(self.fields.end);
+        fields.drain(..self.fields.start.min(fields.len()));
         let raw = match self.legacy_chain_id {
             Some(chain_id) => {
                 // v = chain_id * 2 + 35 + parity
@@ -299,17 +311,17 @@ impl PreparedTransaction {
                     .checked_add(&chain_id)
                     .and_then(|double| double.checked_add(&U256::from_u64(35 + parity)))
                     .ok_or_else(|| err("chain_id: too large"))?;
-                rlp::uint(&mut self.fields, &v);
-                push_rs(&mut self.fields, signature);
+                rlp::uint(&mut fields, &v);
+                push_rs(&mut fields, signature);
                 let mut raw = Vec::new();
-                rlp::list(&mut raw, &self.fields);
+                rlp::list(&mut raw, &fields);
                 raw
             }
             None => {
-                rlp::uint(&mut self.fields, &U256::from_u64(parity));
-                push_rs(&mut self.fields, signature);
+                rlp::uint(&mut fields, &U256::from_u64(parity));
+                push_rs(&mut fields, signature);
                 let mut raw = vec![0x02];
-                rlp::list(&mut raw, &self.fields);
+                rlp::list(&mut raw, &fields);
                 raw
             }
         };
