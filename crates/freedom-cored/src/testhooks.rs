@@ -44,7 +44,8 @@
 //!   a new publish history), its `Date.now()`, the Swarm grants in memory,
 //!   tags' owners, `swarm-feeds.json`'s text, or the stores read again from
 //!   their files (and, asked `peak`, answers the most its memory pool
-//!   held at once since it was last asked: SWM-4's gates); and
+//!   held at once since it was last asked, and asked `parked`, the vault
+//!   answers the hold below holds back: SWM-4's gates); and
 //!   `test.swarm_feed_change` makes a feed store change through SW-1's
 //!   keeper, as `swarm.identities` will (SWM-4 PR 9), so a test makes
 //!   "another site takes the index", which no method does.

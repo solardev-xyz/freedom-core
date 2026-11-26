@@ -704,7 +704,9 @@ impl Thread {
     /// `mining: true`, also `mining: { waiting, running, off, lane, batches
     /// }`, the lane's; with `peak: true`, also `peak`, the most the pool
     /// held at once since the last `peak` (SWM-4's gates), which then
-    /// starts again from what it holds now.
+    /// starts again from what it holds now; with `parked: true`, also
+    /// `parked`, the vault answers `FREEDOM_CORED_TEST_SWARM_HOLD` holds
+    /// back now (a test waits for them to go before it parks again).
     #[cfg(feature = "testhooks")]
     fn world(&mut self, id: u64, params: Option<&str>) -> Result<(), Fault> {
         use fc_swarm_provider::budgets::ReadBudgets;
@@ -726,6 +728,8 @@ impl Thread {
             mining: bool,
             #[serde(default)]
             peak: bool,
+            #[serde(default)]
+            parked: bool,
         }
         let parsed = params.and_then(|p| serde_json::from_str::<WorldParams>(p).ok());
         let Some(world) = parsed else {
@@ -800,6 +804,9 @@ impl Thread {
         }
         if world.peak {
             held["peak"] = self.engine.memory_peak().into();
+        }
+        if world.parked {
+            held["parked"] = self.parked.len().into();
         }
         self.wire.answer(id, Answer::Result(held.to_string()));
         Ok(())
