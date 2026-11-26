@@ -320,6 +320,7 @@ fn policy(p: &Paths, network: Network, descriptors: Vec<i32>) -> Policy {
         times: false,
         symlinks: false,
         modes: false,
+        memory_cap: Some(confine::MEMORY_CAP),
     }
 }
 
@@ -942,6 +943,14 @@ fn parent() {
             &mut failures,
             report["network"] == network,
             format!("{case}: network {report}"),
+        );
+        // No memory cap on macOS (design 0010, "The memory cap"): null,
+        // and why.
+        expect(
+            &mut failures,
+            report.get("memory_cap") == Some(&serde_json::Value::Null)
+                && report["reasons"]["memory_cap"] == confine::MEMORY_CAP_UNSUPPORTED,
+            format!("{case}: memory_cap {report}"),
         );
         failures.extend(passed(case, &output));
     }

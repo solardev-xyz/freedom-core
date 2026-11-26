@@ -55,6 +55,7 @@ pub fn policy(mut read_write: Vec<PathBuf>, descriptors: Vec<i32>) -> Policy {
         times: false,
         symlinks: false,
         modes: true,
+        memory_cap: None,
     }
 }
 
@@ -127,6 +128,7 @@ mod tests {
                 times: false,
                 symlinks: false,
                 modes: true,
+                memory_cap: None,
             }
         );
     }

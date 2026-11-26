@@ -3,10 +3,11 @@
 //! - **a job object** that allows one active process and no breakaway,
 //!   nested in any job the process is in already (libuv puts each child of
 //!   main in a job of its own, which allows breakaway: an inner job that
-//!   doesn't keeps its children in). No UI restrictions, which a nested job
-//!   may not have. Once it reads back, the process's one handle to it is
-//!   closed, so nothing in the process can change its limits; the job lives
-//!   on while the process is in it;
+//!   doesn't keeps its children in), with the memory cap as its memory limit
+//!   where the policy has one (design 0010, "The memory cap"). No UI
+//!   restrictions, which a nested job may not have. Once it reads back, the
+//!   process's one handle to it is closed, so nothing in the process can
+//!   change its limits; the job lives on while the process is in it;
 //! - **the process mitigation policies:** no dynamic code; no image from a
 //!   remote device or with a low mandatory label, and System32 first; no
 //!   legacy extension points. Each is set, then read back, alone: one the OS
@@ -45,28 +46,48 @@ const MITIGATIONS: [(&str, Mitigation, u32); 3] = [
     ),
 ];
 
-/// The job's limits: one active process, the service itself.
-const ONE_PROCESS: Limits = Limits {
-    flags: limit::ACTIVE_PROCESS,
-    active_processes: 1,
-};
-
 pub(super) fn confine(policy: &Policy, options: &Options) -> Result<Report, Invalid> {
-    let job = limit_to_one_process(options)?;
+    let job = limit_to_one_process(limits(policy.memory_cap)?, options)?;
     let mitigations: Vec<(&'static str, MitigationOutcome)> = MITIGATIONS
         .into_iter()
         .map(|(name, mitigation, flags)| {
             (name, mitigate(mitigation, flags, options.mitigation_error))
         })
         .collect();
-    Ok(job::report(policy.network, &job, &mitigations))
+    Ok(job::report(
+        policy.network,
+        policy.memory_cap,
+        &job,
+        &mitigations,
+    ))
 }
 
-/// Puts the process in a new job of [`ONE_PROCESS`], nested in its own,
-/// and reads it back. Something outside refusing the job is
-/// [`JobOutcome::Blocked`] (D2: the service runs). The job refusing its own
-/// limit, or a job assigned that doesn't read back, is [`Invalid`].
-fn limit_to_one_process(options: &Options) -> Result<JobOutcome, Invalid> {
+/// The job's limits: one active process, the service itself, and with
+/// `memory_cap` that many bytes committed (`JOB_OBJECT_LIMIT_JOB_MEMORY`).
+/// A cap the process's address size can't hold is [`Invalid`].
+fn limits(memory_cap: Option<u64>) -> Result<Limits, Invalid> {
+    let one_process = Limits {
+        flags: limit::ACTIVE_PROCESS,
+        active_processes: 1,
+        job_memory: 0,
+    };
+    let Some(cap) = memory_cap else {
+        return Ok(one_process);
+    };
+    let job_memory = usize::try_from(cap)
+        .map_err(|_| Invalid::Rules(format!("the memory cap {cap} doesn't fit a SIZE_T")))?;
+    Ok(Limits {
+        flags: one_process.flags | limit::JOB_MEMORY,
+        job_memory,
+        ..one_process
+    })
+}
+
+/// Puts the process in a new job of `limits`, nested in its own, and reads
+/// it back. Something outside refusing the job is [`JobOutcome::Blocked`]
+/// (D2: the service runs). The job refusing its own limits, or a job
+/// assigned that doesn't read back with them, is [`Invalid`].
+fn limit_to_one_process(limits: Limits, options: &Options) -> Result<JobOutcome, Invalid> {
     if let Some(code) = options.job_error {
         return Ok(JobOutcome::Blocked(format!(
             "the job: {}",
@@ -77,8 +98,8 @@ fn limit_to_one_process(options: &Options) -> Result<JobOutcome, Invalid> {
         Ok(job) => job,
         Err(error) => return Ok(JobOutcome::Blocked(format!("CreateJobObject: {error}"))),
     };
-    job.set_limits(ONE_PROCESS)
-        .map_err(|error| Invalid::Rules(format!("the job refused its limit: {error}")))?;
+    job.set_limits(limits)
+        .map_err(|error| Invalid::Rules(format!("the job refused its limits: {error}")))?;
     if let Err(error) = job.assign_current_process() {
         // Before it, the process is in no new job: nothing is half-done.
         return Ok(JobOutcome::Blocked(format!(
@@ -91,14 +112,20 @@ fn limit_to_one_process(options: &Options) -> Result<JobOutcome, Invalid> {
     let held = job.holds_current_process();
     let own = fc_sys::windows::own_job_limits();
     let breakaway = limit::BREAKAWAY_OK | limit::SILENT_BREAKAWAY_OK;
+    let capped = limits.flags & limit::JOB_MEMORY != 0;
     match (&held, &own) {
         (Ok(true), Ok(own))
             if own.flags & limit::ACTIVE_PROCESS != 0
                 && own.active_processes == 1
-                && own.flags & breakaway == 0 =>
+                && own.flags & breakaway == 0
+                && (!capped
+                    || (own.flags & limit::JOB_MEMORY != 0
+                        && own.job_memory == limits.job_memory)) =>
         {
             // `job` drops here: the process's one handle to its job closes.
-            Ok(JobOutcome::Limited)
+            Ok(JobOutcome::Limited {
+                job_memory: capped.then_some(own.job_memory as u64),
+            })
         }
         _ => Err(Invalid::Rules(format!(
             "the job was assigned, but doesn't read back: in it {}, its limits {}",
@@ -107,7 +134,10 @@ fn limit_to_one_process(options: &Options) -> Result<JobOutcome, Invalid> {
                 Err(error) => error.to_string(),
             },
             match &own {
-                Ok(own) => format!("{:#x} with {} processes", own.flags, own.active_processes),
+                Ok(own) => format!(
+                    "{:#x} with {} processes and {} bytes",
+                    own.flags, own.active_processes, own.job_memory
+                ),
                 Err(error) => error.to_string(),
             },
         ))),

@@ -36,6 +36,7 @@ const LIBUV_JOB: Limits = Limits {
         | limit::DIE_ON_UNHANDLED_EXCEPTION
         | limit::KILL_ON_JOB_CLOSE,
     active_processes: 0,
+    job_memory: 0,
 };
 
 /// The mitigations the service sets, by report name, with their flags.
@@ -117,6 +118,7 @@ fn child(case: &str) {
         times: false,
         symlinks: false,
         modes: false,
+        memory_cap: Some(confine::MEMORY_CAP),
     };
     match case {
         "control" => {
@@ -168,11 +170,27 @@ fn child(case: &str) {
             println!("JOB {own:?}");
             check(
                 "the immediate job allows one process and no breakaway",
-                own.is_ok_and(|own| {
+                own.as_ref().is_ok_and(|own| {
                     own.flags & limit::ACTIVE_PROCESS != 0
                         && own.active_processes == 1
                         && own.flags & (limit::BREAKAWAY_OK | limit::SILENT_BREAKAWAY_OK) == 0
                 }),
+            );
+            // The memory cap (design 0010, "The memory cap"): the job's
+            // memory limit, read back beside the active-process limit, and
+            // reported as read back.
+            check(
+                "the immediate job commits at most the memory cap",
+                own.as_ref().is_ok_and(|own| {
+                    own.flags & limit::JOB_MEMORY != 0
+                        && u64::try_from(own.job_memory) == Ok(confine::MEMORY_CAP)
+                }),
+            );
+            check(
+                "memory_cap is reported as the job's limit",
+                report.memory_cap == Some(Some(confine::MEMORY_CAP))
+                    && report.to_json()["memory_cap"] == 2_147_483_648_u64
+                    && !report.reasons.contains_key("memory_cap"),
             );
             let spawned = run_cmd(0);
             println!("SPAWN {}", outcome(&spawned));
@@ -250,6 +268,12 @@ fn child(case: &str) {
                         && report.reasons.contains_key(name),
                 );
             }
+            check(
+                "memory_cap is null, with the job's reason",
+                report.memory_cap == Some(None)
+                    && report.to_json()["memory_cap"].is_null()
+                    && report.reasons.get("memory_cap") == report.reasons.get("exec"),
+            );
             // Nothing was applied: honestly reported, cmd.exe still runs.
             let spawned = run_cmd(0);
             println!("SPAWN {}", outcome(&spawned));
