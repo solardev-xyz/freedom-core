@@ -465,4 +465,4 @@ async function buildSigning(reference, mnemonicFor, meta) {
   };
 }
 
-module.exports = { buildSigning };
+module.exports = { buildSigning, TYPED_DATA };
