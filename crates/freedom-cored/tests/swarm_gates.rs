@@ -2324,10 +2324,14 @@ fn vault_under_load(window: Duration, delay_ms: u64, paced: bool) -> VaultRun {
     rig.until(Duration::from_secs(30), "the bodies", |rig| {
         rig.bodies.len() == 2 && rig.bodies.values().all(|b| b.len > 0)
     });
+    // Mining runs until the search is answered (a gsoc_mining_timeout
+    // asks no approval.recheck) or the found address is rechecked.
     let searching = |rig: &Rig| {
-        !rig.asked
-            .iter()
-            .any(|(a, _)| a.method == "approval.recheck" && a.parent() == Some(search))
+        !rig.answered(search)
+            && !rig
+                .asked
+                .iter()
+                .any(|(a, _)| a.method == "approval.recheck" && a.parent() == Some(search))
     };
     let lane = |rig: &mut Rig| rig.world(json!({ "mining": true }))["mining"].clone();
     let before = lane(&mut rig);
