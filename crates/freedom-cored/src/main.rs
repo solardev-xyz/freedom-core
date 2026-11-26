@@ -43,6 +43,7 @@ mod hardening;
 mod intents;
 mod journal;
 mod keystore;
+mod ledger;
 mod log;
 mod naming;
 mod nodes;
