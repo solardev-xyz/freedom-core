@@ -175,6 +175,16 @@ pub(crate) fn exit_reporting(exit: Exit, bound: Duration, report: impl FnOnce())
     std::process::exit(code)
 }
 
+/// Ends the process now with `exit`, from any thread, as the panic hook's
+/// fatal exit does: the exit is claimed first ([`claim`]), then `report`
+/// and the log queue get at most 150 ms. For a fail-stop that no request
+/// may answer and no teardown should run before: a native library's
+/// out-of-memory error under the memory cap ([`Exit::OutOfMemory`]; design
+/// 0010, "The memory cap"), which ends the process as a crash does.
+pub fn fail_stop(exit: Exit, report: impl FnOnce()) -> ! {
+    exit_reporting(exit, REPORT_BOUND, report)
+}
+
 impl From<&GateError> for Exit {
     fn from(error: &GateError) -> Self {
         match error {
@@ -242,6 +252,18 @@ mod tests {
                 exit_reporting(Exit::Internal, Duration::from_millis(300), || {
                     std::thread::sleep(Duration::from_secs(60));
                 })
+            }
+            // A fail-stop on another thread, while the main thread waits:
+            // its line, then 71.
+            "fail_stop" => {
+                std::thread::spawn(|| {
+                    fail_stop(Exit::OutOfMemory, || {
+                        crate::log::line(b"{\"fail_stop\":true}\n".to_vec());
+                    })
+                });
+                loop {
+                    std::thread::park();
+                }
             }
             // A thread-local destructor that comes back while its thread
             // exits the process.
@@ -353,6 +375,15 @@ mod tests {
             let (code, stderr) = run_child(mode, Duration::from_secs(30));
             assert!(aborted(code), "{mode}: {code:?} {stderr}");
         }
+    }
+
+    /// A fail-stop ends the process from its own thread, with its code,
+    /// once its line is written.
+    #[test]
+    fn a_fail_stop_ends_the_process_with_its_code() {
+        let (code, stderr) = run_child("fail_stop", Duration::from_secs(30));
+        assert_eq!(code, Some(71), "{stderr}");
+        assert!(stderr.contains("{\"fail_stop\":true}"), "{stderr}");
     }
 
     #[test]
