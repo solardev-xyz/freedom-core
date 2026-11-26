@@ -1105,12 +1105,11 @@ fn configured(home: &Path) -> Vec<ConnectAddress> {
 fn repository_gate(home: &Path) -> Result<RepoGate, ErrorBody> {
     let path = home.join("node").join(quarantine::QUARANTINE_DB_FILE);
     let failed = |e: quarantine::Error| {
-        let failed = start_failed(format!(
+        crate::oom::check_heartwood(&e);
+        start_failed(format!(
             "the quarantine record: {}",
             crate::reconcile::record_error(&e)
-        ));
-        crate::oom::check_heartwood(e);
-        failed
+        ))
     };
     let record = Quarantine::open(&path).map_err(failed)?;
     let repositories = RepoGate::new();

@@ -133,18 +133,16 @@ impl Online {
                 .join(radicle::cob::cache::COBS_DB_FILE),
         )
         .map_err(|e| {
-            let why = format!("the reconcile state: {}", crate::reconcile::state_error(&e));
-            crate::oom::check_heartwood(e);
-            why
+            crate::oom::check_heartwood(&e);
+            format!("the reconcile state: {}", crate::reconcile::state_error(&e))
         })?;
         let record = Quarantine::open(self.home.join("node").join(quarantine::QUARANTINE_DB_FILE))
             .map_err(|e| {
-                let why = format!(
+                crate::oom::check_heartwood(&e);
+                format!(
                     "the quarantine record: {}",
                     crate::reconcile::record_error(&e)
-                );
-                crate::oom::check_heartwood(e);
-                why
+                )
             })?;
         let repair = handle.node().online_repair(rid);
         Ok(Active {
@@ -243,6 +241,12 @@ impl Repairer for Online {
             &*self.watch,
         );
         drop(node);
+        // Out of memory ends the process, before anything is copied or
+        // logged: the repository stays closed, and the marker stays, for the
+        // next start ([`crate::oom`]).
+        if let Err(e) = &stepped {
+            crate::oom::check(e);
+        }
         let did = entry.repair.did().clone();
         match stepped {
             Ok(Progress::More) => return Turn::More,
@@ -288,10 +292,6 @@ impl Repairer for Online {
                 return Turn::Abandoned;
             }
             Err(e) => {
-                // Out of memory ends the process: the repository stays
-                // closed, and the marker stays, for the next start
-                // ([`crate::oom`]).
-                crate::oom::check(&e);
                 active.remove(&rid);
                 failed(rid, &described(&e));
                 return Turn::Abandoned;

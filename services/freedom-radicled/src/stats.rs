@@ -235,7 +235,7 @@ impl Quarantined {
         match record.count() {
             Ok(count) => self.set(Some(count)),
             Err(e) => {
-                crate::oom::check_heartwood(e);
+                crate::oom::check_heartwood(&e);
                 self.set(None);
             }
         }

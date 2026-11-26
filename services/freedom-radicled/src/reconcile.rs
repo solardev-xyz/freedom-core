@@ -156,9 +156,8 @@ pub fn run(
     // Out of memory in any of these ends the process, never
     // `recovery_failed` ([`crate::oom`]).
     let storage = Storage::open(&paths.storage, info).map_err(|e| {
-        let failure = failed("the storage", kind_of(&e));
-        crate::oom::check_heartwood(e);
-        failure
+        crate::oom::check_heartwood(&e);
+        failed("the storage", kind_of(&e))
     })?;
     // The COB cache's own tables, migrated as a node start migrates them: a
     // home whose node never started has none, and a repair rebuilds a
@@ -167,18 +166,16 @@ pub fn run(
     radicle::cob::cache::StoreWriter::open(&paths.progress)
         .and_then(|db| db.with_migrations(radicle::cob::cache::migrate::ignore))
         .map_err(|e| {
-            crate::oom::check_heartwood(e);
+            crate::oom::check_heartwood(&e);
             failed("the reconcile state", "its database doesn't open or answer")
         })?;
     let mut state = State::open(&paths.progress).map_err(|e| {
-        let failure = failed("the reconcile state", state_error(&e));
-        crate::oom::check_heartwood(e);
-        failure
+        crate::oom::check_heartwood(&e);
+        failed("the reconcile state", state_error(&e))
     })?;
     let mut quarantine = Quarantine::open(&paths.record).map_err(|e| {
-        let failure = failed("the quarantine record", record_error(&e));
-        crate::oom::check_heartwood(e);
-        failure
+        crate::oom::check_heartwood(&e);
+        failed("the quarantine record", record_error(&e))
     })?;
     let stop = Stop {
         cancel: run.cancel.clone(),
@@ -194,9 +191,8 @@ pub fn run(
         watch,
     };
     let report = driver::run(&mut cx, dirty.as_ref()).map_err(|e| {
-        let failure = failure(&e);
-        crate::oom::check_heartwood(e);
-        failure
+        crate::oom::check_heartwood(&e);
+        failure(&e)
     })?;
     match report.ending {
         Ending::Done => {

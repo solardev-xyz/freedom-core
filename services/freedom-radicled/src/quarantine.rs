@@ -122,12 +122,11 @@ fn record_path(home: &Path) -> PathBuf {
 /// The record's error, as a method answers it: out of memory ends the
 /// process first ([`crate::oom`]).
 fn record_failed(e: quarantine::Error) -> ErrorBody {
-    let failed = ErrorBody::new(
+    crate::oom::check_heartwood(&e);
+    ErrorBody::new(
         ErrorCode::Failed,
         format!("the quarantine record: {}", record_error(&e)),
-    );
-    crate::oom::check_heartwood(e);
-    failed
+    )
 }
 
 fn answer(conn: &Connection, id: u64, answer: Result<Value, ErrorBody>) {
@@ -343,7 +342,7 @@ pub fn refusal(home: &Path, rid: RepoId, kind: gate::Quarantine) -> ErrorBody {
         Ok(held) => held,
         // Out of memory ends the process first ([`crate::oom`]).
         Err(e) => {
-            crate::oom::check_heartwood(e);
+            crate::oom::check_heartwood(&e);
             None
         }
     };

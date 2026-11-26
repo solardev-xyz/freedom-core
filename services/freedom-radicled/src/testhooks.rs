@@ -159,7 +159,13 @@
 //! - `FREEDOM_RADICLED_TEST_ALLOCATE=<bytes>` makes `rad.identity`'s
 //!   handler allocate that many bytes through Rust's allocator before
 //!   anything else ([`crate::steps`]): past the memory cap, Rust's
-//!   allocator aborts the process, and nothing is answered.
+//!   allocator aborts the process, and nothing is answered. With
+//!   `exhaust`, the handler instead makes libgit2's `GIT_ERROR_NOMEMORY`
+//!   as libradicle's `Error::Git`, then takes every block the allocator
+//!   will still give, with fallible reservations, down to a byte (at most
+//!   4 GiB, should no cap be in place), and asks the backstop about the
+//!   error ([`crate::oom::check`]) with the heap exhausted: it must end the
+//!   process with 71 and its fixed line, allocating nothing.
 //! - `FREEDOM_RADICLED_TEST_READ_ERROR=<class>` makes every `rad.read`'s
 //!   build return libgit2's error of that class, as libradicle's
 //!   `Error::Git`, before it reads anything ([`crate::reads`]): `nomemory`
@@ -353,8 +359,24 @@ pub fn memory_cap(default: u64) -> u64 {
 }
 
 /// At `rad.identity`'s handler: allocates the bytes asked, through Rust's
-/// allocator, and holds them until it returns.
+/// allocator, and holds them until it returns; or exhausts the heap and
+/// asks the backstop, if asked.
 pub fn allocate() {
+    #[cfg(feature = "testhooks")]
+    if std::env::var("FREEDOM_RADICLED_TEST_ALLOCATE").is_ok_and(|asked| asked == "exhaust") {
+        use radicle::git::raw::{Error, ErrorClass, ErrorCode};
+        // Made while the heap has room: libgit2's error holds its message.
+        let error = libradicle::Error::Git(Error::new(
+            ErrorCode::GenericError,
+            ErrorClass::NoMemory,
+            "test hook: out of memory",
+        ));
+        fc_service::log::info("test hook: the heap is exhausted", serde_json::json!({}));
+        exhaust();
+        crate::oom::check(&error);
+        // Not reached: the backstop has ended the process.
+        return;
+    }
     #[cfg(feature = "testhooks")]
     if let Some(bytes) =
         millis("FREEDOM_RADICLED_TEST_ALLOCATE").and_then(|bytes| usize::try_from(bytes).ok())
@@ -369,6 +391,26 @@ pub fn allocate() {
             "test hook: the allocation was made",
             serde_json::json!({ "bytes": held.capacity() }),
         );
+    }
+}
+
+/// Takes every block the allocator still gives, each size from 1 GiB
+/// halved down to a byte, with fallible reservations, which return an
+/// error rather than abort, and keeps them: at most 4 GiB in all.
+#[cfg(feature = "testhooks")]
+fn exhaust() {
+    const MOST: usize = 4 << 30;
+    let mut size = 1 << 30;
+    let mut taken = 0usize;
+    while size > 0 && taken < MOST {
+        let mut block: Vec<u8> = Vec::new();
+        if block.try_reserve_exact(size).is_ok() {
+            taken += size;
+            // Held for the process's life: the heap stays exhausted.
+            std::mem::forget(block);
+        } else {
+            size /= 2;
+        }
     }
 }
 

@@ -17,6 +17,10 @@
 //!   anyway (libgit2's `GIT_ERROR_NOMEMORY`, as zlib's comes back from a
 //!   stream) ends it with 71, unanswered, while `GIT_ERROR_ZLIB`, as a
 //!   corrupt object's inflate comes back, is the read's `failed` (every OS).
+//! - **The backstop with the heap exhausted:** under the lowered cap, with
+//!   every block the allocator would still give taken, the backstop still
+//!   ends the process with 71 and its fixed line: it allocates nothing
+//!   (Linux and Windows).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -47,6 +51,11 @@ const LIBGIT2_OUT_OF_MEMORY: &str = "libradicle: libgit2 is out of memory: exit 
 
 /// The service's line as its backstop ends the process ([`crate::oom`]).
 const BACKSTOP: &str = "out of memory: the process ends";
+
+/// That line, whole, as the backstop writes it, fixed.
+#[cfg(any(target_os = "linux", windows))]
+const BACKSTOP_LINE: &str =
+    r#"{"level":"error","msg":"out of memory: the process ends","reason":"out_of_memory"}"#;
 
 /// A working copy in a directory of its own, outside every grant, with one
 /// commit on `master`.
@@ -356,5 +365,36 @@ fn an_out_of_memory_error_ends_the_service_and_zlibs_is_answered() {
         .unwrap_or_else(|| panic!("no backstop line: {log}"));
     let line: Value = serde_json::from_str(line).unwrap();
     assert_eq!(line["reason"], "out_of_memory", "{line}");
+    assert!(!radicled.any_within(id, Duration::from_millis(200)));
+}
+
+/// The backstop with the heap exhausted: `rad.identity`'s handler, by a
+/// test hook, takes every block the allocator will still give under the
+/// lowered cap, then asks the backstop about libgit2's
+/// `GIT_ERROR_NOMEMORY`. The process ends with 71 and the backstop's fixed
+/// line, and `rad.identity` isn't answered: nothing on the way allocated,
+/// or Rust's allocator would have aborted the process first.
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn the_backstop_ends_the_process_with_the_heap_exhausted() {
+    let dirs = Dirs::new();
+    let cap = CAP.to_string();
+    let mut radicled = Radicled::serve(
+        &dirs,
+        &[
+            ("FREEDOM_RADICLED_TEST_MEMORY_CAP", cap.as_str()),
+            ("FREEDOM_RADICLED_TEST_ALLOCATE", "exhaust"),
+        ],
+    );
+    let hello = radicled.hello();
+    assert_capped(&hello);
+    let id = radicled.request("rad.identity", json!({ "ephemeral": true }));
+    let (status, log) = ended(&mut radicled);
+    assert_eq!(status.code(), Some(71), "{status:?}\n{log}");
+    assert!(
+        log.lines().any(|line| line == BACKSTOP_LINE),
+        "no fixed line: {log}"
+    );
+    assert!(!log.contains("memory allocation of"), "{log}");
     assert!(!radicled.any_within(id, Duration::from_millis(200)));
 }
