@@ -162,6 +162,20 @@ impl InProcess {
         self.gate.signal.notify_all();
     }
 
+    /// Waits, for at most `wait`, until `taken` requests have been taken
+    /// since the start. The count only grows, so a request taken and
+    /// already answered between two looks is still seen.
+    fn until_taken(&self, taken: u64, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline {
+            if self.shared.taken() >= taken {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        self.shared.taken() >= taken
+    }
+
     /// Waits, for at most `wait`, until `open` requests are open. A
     /// request is done only after its reply is queued, so with the writer
     /// held, a request that goes back to none open has stopped without
@@ -312,12 +326,13 @@ fn a_marker_still_queued_is_taken_back_and_the_request_is_busy() {
         main.until_held(Duration::from_secs(30)),
         "colibri.stats' reply never written"
     );
+    let taken = main.shared.taken();
     let id = main.request("colibri.request", block_number());
     // Released only once the request has stopped: its marker queued
     // behind the held writer and its second passed.
     assert!(
-        main.until_open(1, Duration::from_secs(30)),
-        "the request never opened"
+        main.until_taken(taken + 1, Duration::from_secs(30)),
+        "the request was never taken"
     );
     assert!(
         main.until_open(0, Duration::from_secs(30)),
