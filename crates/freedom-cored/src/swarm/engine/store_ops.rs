@@ -36,10 +36,23 @@
 //! - **Cancel:** main's cancel ends the op `cancelled`; a fetch out is
 //!   cancelled at main and keeps its charge until main's answer; a change
 //!   already handed to the keeper is still made, its answer dropped.
+//! - **A user's Swarm grant change** (D17), which the event loop writes
+//!   and then tells the thread ([`Engine::grant_changed`]), detaches the
+//!   projection from the site's manifest record as the reference's
+//!   `detachManagedLater` does (`ops::detach`): nothing is answered, and
+//!   only a disconnect that narrowed a grant sends `approval.changed`.
+//!   It keeps its place among the site's `swarm.manifest` ops, as the
+//!   reference's per-site lock and its store's one queue of changes order
+//!   them: it waits for the site's ops that came before it (a check whose
+//!   fetch is out holds the record it read, and its decision would put the
+//!   projection back), and the site's ops that come after it wait for it
+//!   ([`OpPhase::Blocked`]). While SW-1's hold would defer a feed-store
+//!   change it makes (a disconnect's revoke of a held site's feed grant),
+//!   it waits for the hold's end, as a manifest op does.
 
 use super::*;
 use fc_swarm_provider::ops::{Caller, Fetch, Op, Refused, Step, Waiting};
-use fc_swarm_provider::stores::manifests::Effect as Projected;
+use fc_swarm_provider::stores::manifests::{Effect as Projected, Projection};
 
 /// `shell.swarm_manifest`'s body at most: the manifest's 8 KiB and a byte,
 /// so the check sees one past its bound (`permission-manifests.js:20`).
@@ -87,8 +100,20 @@ enum OpPhase {
     /// Placed, waiting for its base.
     Base,
     Running,
+    /// Placed and given its base, waiting for a user's grant change of its
+    /// site that came before it to detach (D17).
+    Blocked,
     /// Answered.
     Ended,
+}
+
+/// A user's change of a site's Swarm grant, waiting to detach (D17).
+#[derive(Debug, Clone)]
+pub(super) struct Detach {
+    /// Its place among the store ops (their tickets' order).
+    seq: u64,
+    key: JsString,
+    projection: Projection,
 }
 
 struct OpAsk {
@@ -217,13 +242,25 @@ impl Engine {
         }
     }
 
-    /// Runs the op as far as it goes.
+    /// Runs the op as far as it goes, once no user's grant change of its
+    /// site that came before it waits to detach (D17).
     pub(super) fn op_start(&mut self, io: &mut impl Io, now: Ms, id: u64) -> Result<(), Fault> {
+        let blocked = self
+            .ops
+            .get(&id)
+            .is_some_and(|op| self.detach_before(op.op.manifest_key(), op.op.ticket().0));
         let Engine { ops, shared, .. } = self;
         let Some(op) = ops.get_mut(&id) else {
             return Ok(());
         };
-        if !matches!(op.phase, OpPhase::Waiting | OpPhase::Base) {
+        if !matches!(
+            op.phase,
+            OpPhase::Waiting | OpPhase::Base | OpPhase::Blocked
+        ) {
+            return Ok(());
+        }
+        if blocked {
+            op.phase = OpPhase::Blocked;
             return Ok(());
         }
         op.phase = OpPhase::Running;
@@ -529,6 +566,8 @@ impl Engine {
         }
         op.answered = true;
         op.phase = OpPhase::Ended;
+        // A detach may have waited for it (D17).
+        self.detach_due |= !self.detaches.is_empty();
         io.answer(id, answer);
         for key in std::mem::take(&mut op.changed) {
             io.changed(key.as_str());
@@ -652,6 +691,106 @@ impl Engine {
                 fetches.into_iter().chain(waits).min()
             })
             .min()
+    }
+}
+
+impl Engine {
+    /// D17: the event loop wrote a user's change of site `key`'s Swarm
+    /// grant (a revoke, a rule, the messaging grant), and the manifest
+    /// store detaches `projection` from the site's record once the site's
+    /// `swarm.manifest` ops that came before it have answered and SW-1's
+    /// hold defers nothing it makes ([module docs](self)). Nothing is
+    /// answered. Before the stores move, main holds the manifest store.
+    pub fn grant_changed(
+        &mut self,
+        io: &mut impl Io,
+        now: Ms,
+        key: &str,
+        projection: Projection,
+    ) -> Result<(), Fault> {
+        self.deadlines(io, now)?;
+        if self.shared.stores_moved {
+            self.next_ticket += 1;
+            self.detaches.push_back(Detach {
+                seq: self.next_ticket,
+                key: JsString::from(key),
+                projection,
+            });
+            self.detach_due = true;
+        }
+        self.drive(io, now)
+    }
+
+    /// Whether a `swarm.manifest` op of site `key` that came before `seq`
+    /// hasn't answered.
+    fn manifest_op_before(&self, key: &JsString, seq: u64) -> bool {
+        self.ops
+            .values()
+            .any(|op| !op.answered && op.op.ticket().0 < seq && op.op.manifest_key() == Some(key))
+    }
+
+    /// Whether a user's grant change of site `key` that came before
+    /// `ticket` waits to detach.
+    fn detach_before(&self, key: Option<&JsString>, ticket: u64) -> bool {
+        key.is_some_and(|key| {
+            self.detaches
+                .iter()
+                .any(|detach| detach.seq < ticket && detach.key == *key)
+        })
+    }
+
+    /// Each waiting detach that can go now, in order (each site's in its
+    /// own order); then the ops that waited for one start, in theirs.
+    /// Whether anything moved.
+    pub(super) fn pump_detaches(&mut self, io: &mut impl Io, now: Ms) -> Result<bool, Fault> {
+        let mut moved = false;
+        let mut waiting: Vec<JsString> = Vec::new();
+        let mut at = 0;
+        while let Some(detach) = self.detaches.get(at).cloned() {
+            if waiting.contains(&detach.key) || self.manifest_op_before(&detach.key, detach.seq) {
+                waiting.push(detach.key);
+                at += 1;
+                continue;
+            }
+            let Engine { shared, .. } = self;
+            let mut changed = Vec::new();
+            let done = with_stores(shared, io, &mut changed, |stores| {
+                ops::detach(stores, &detach.key, detach.projection)
+            });
+            if !done {
+                // SW-1's hold defers its feed-store change: tried again at
+                // the hold's end.
+                waiting.push(detach.key);
+                at += 1;
+                continue;
+            }
+            self.detaches.remove(at);
+            moved = true;
+            // A disconnect that narrowed a grant (one given again since the
+            // user's revoke) tells main, as a projection does.
+            for key in changed {
+                io.changed(key.as_str());
+            }
+        }
+        let mut blocked: Vec<(u64, u64)> = self
+            .ops
+            .iter()
+            .filter(|(_, op)| op.phase == OpPhase::Blocked)
+            .map(|(id, op)| (op.op.ticket().0, *id))
+            .collect();
+        blocked.sort_unstable();
+        for (ticket, id) in blocked {
+            let key = self
+                .ops
+                .get(&id)
+                .and_then(|op| op.op.manifest_key().cloned());
+            if self.detach_before(key.as_ref(), ticket) {
+                continue;
+            }
+            moved = true;
+            self.op_start(io, now, id)?;
+        }
+        Ok(moved)
     }
 }
 

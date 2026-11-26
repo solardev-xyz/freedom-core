@@ -15,7 +15,12 @@
 //!   gate, each with its reply's bound (D4).
 //! - **Its events:** `approval.changed { store: "swarm", key }` after the
 //!   answer of a store op whose manifest projection widened or narrowed a
-//!   site's Swarm grant (D2), which it writes itself ([`GrantsFile`]).
+//!   site's Swarm grant (D2), which it writes itself ([`GrantsFile`]), and
+//!   after a detach's disconnect that narrowed one.
+//! - **The user's Swarm grant changes** (D17): the event loop, which
+//!   writes them, tells the thread each one after its reply
+//!   ([`In::GrantChanged`]); the manifest store detaches it
+//!   ([`Engine::grant_changed`]).
 //! - **Its streams are one [`Duplex`]** ([`Duplex::swarm`]), as the dweb
 //!   thread's are: the `swarm.body` answers it sends main, under main's
 //!   request IDs, ending only with an upload's codes; and the parts and
@@ -196,6 +201,13 @@ pub enum In {
     Mined {
         lane: u64,
         ran: Box<Ran>,
+    },
+    /// The event loop wrote a user's change of site `key`'s Swarm grant
+    /// (design 0015, D17): the manifest store detaches `projection`, in
+    /// order with its other changes.
+    GrantChanged {
+        key: String,
+        projection: fc_swarm_provider::stores::manifests::Projection,
     },
     /// `test.swarm_world` (D11).
     #[cfg(feature = "testhooks")]
@@ -571,6 +583,10 @@ impl Thread {
             In::Written(id) => self.engine.written(&mut self.wire, now, id),
             In::Drained => self.engine.room(&mut self.wire, now),
             In::Mined { lane, ran } => self.engine.mined(&mut self.wire, now, lane, *ran),
+            In::GrantChanged { key, projection } => {
+                self.engine
+                    .grant_changed(&mut self.wire, now, &key, projection)
+            }
             #[cfg(feature = "testhooks")]
             In::World { id, params } => self.world(id, params.as_deref().map(RawValue::get)),
             #[cfg(feature = "testhooks")]

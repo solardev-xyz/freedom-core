@@ -2298,6 +2298,24 @@ impl Core {
                         Flow::Exit(Exit::Internal)
                     }
                 }
+                // A user's Swarm grant change (design 0015, D17), after the
+                // reply and the events that made it: the swarm thread, which
+                // holds the manifest store, detaches it. With no thread
+                // (protocol 1) the core holds no manifest store.
+                Out::SwarmChange(change) => match self.swarm.as_ref() {
+                    Some(thread)
+                        if !thread.send(
+                            swarm::In::GrantChanged {
+                                key: change.key,
+                                projection: change.projection,
+                            },
+                            None,
+                        ) =>
+                    {
+                        Flow::Exit(Exit::Internal)
+                    }
+                    _ => Flow::Continue,
+                },
                 Out::ChainRead(read) => {
                     if self.chain.send(
                         chain::In::Internal {

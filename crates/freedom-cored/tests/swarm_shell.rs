@@ -24,6 +24,10 @@
 //!   (`forbidden`), an op only main makes refused to the chrome,
 //!   admission's `busy` for main, `shell.swarm_manifest`'s answers and its
 //!   bound, and `approval.changed` after a projection's write.
+//! - **D17:** a user's Swarm grant change, which the event loop writes,
+//!   detaches what a manifest managed of it in the swarm thread's manifest
+//!   store, after a check in flight and before main's next op of the site;
+//!   a manifest's own projections detach nothing.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -1596,6 +1600,260 @@ fn a_projection_sends_approval_changed_after_its_answer() {
     assert_eq!(grants[SITE]["autoApprove"]["publish"], true);
     let read = grants_read(&mut main);
     assert_eq!(read[SITE]["autoApprove"]["publish"], true);
+}
+
+// --- D17: a user's Swarm grant change detaches ----------------------------------
+
+/// `SITE`'s record: a manifest that manages the connection and the publish
+/// rule, the publish capability acknowledged.
+const MANAGED: &str = r#"{"managed":{"connection":["publish"],"autoApprove.publish":["publish"]},"acknowledged":{"publish":{"decision":"managed","source":"sheet","decidedAt":1}},"revision":1}"#;
+const OTHER: &str = "https://other.example";
+const OTHER_RECORD: &str = r#"{"managed":{"connection":["feeds"],"autoApprove.publish":["feeds"]},"acknowledged":{"feeds":{"decision":"managed","source":"sheet","decidedAt":1}},"revision":5}"#;
+/// A connected site with no record.
+const LEGACY: &str = "https://legacy.example";
+
+/// The Swarm grants (the file's form): each site connected with its
+/// publish rule.
+fn connected(sites: &[&str]) -> JsValue {
+    let mut grants = JsValue::Object(Vec::new());
+    for site in sites {
+        let grant = format!(
+            r#"{{"origin":"{site}","connectedAt":1,"lastUsed":1,"autoApprove":{{"publish":true,"feeds":false,"signing":false,"messaging":false}}}}"#
+        );
+        grants.set(*site, fc_json::parse(&grant).unwrap());
+    }
+    grants
+}
+
+/// `SITE` on the Bee wallet, with its feed grant.
+fn site_feeds() -> String {
+    format!(
+        r#"{{"version":2,"nextPublisherKeyIndex":0,"origins":{{"{SITE}":{{"activeIdentityId":"bee-wallet","identities":{{"bee-wallet":{{"id":"bee-wallet","mode":"bee-wallet","publisherKeyIndex":null,"walletIndex":null,"label":"Bee","createdAt":1,"lastUsedAt":null}}}},"feedGranted":true,"grantedAt":1,"feeds":{{}}}}}}}}"#
+    )
+}
+
+/// `swarm.manifest get` of `site`: its record, or null.
+fn record_of(main: &mut Main, site: &str) -> JsValue {
+    let mut own = OwnMain::new(|call, _| panic!("{call:?}"));
+    let params = op_params("get", &[("origin", JsValue::string(site))]);
+    value_of(got(&main.play_own(
+        &mut own,
+        "swarm.manifest",
+        &params,
+        "shell",
+    )))
+}
+
+/// An approval method from `context`'s caller: its result.
+fn approval(main: &mut Main, method: &str, params: Value, context: Value) -> Value {
+    let id = main.id();
+    main.core.send(&json!({
+        "type": "request", "id": id, "method": method, "params": params, "context": context,
+    }));
+    let reply = main.core.response(id);
+    assert!(reply["result"].is_object(), "{method}: {reply}");
+    reply["result"].clone()
+}
+
+fn chrome() -> Value {
+    json!({ "caller": "chrome" })
+}
+
+/// `approval.changed` for `site`, once: the event loop's own for its write,
+/// and nothing from the swarm thread's detach.
+fn told_once(main: &mut Main, site: &str) {
+    let events = main.core.events();
+    assert_eq!(
+        events,
+        [
+            json!({ "type": "event", "event": "approval.changed", "data": { "store": "swarm", "key": site } })
+        ]
+    );
+}
+
+/// D17 through the pipe: the chrome's narrowing and a page's own rule,
+/// which the event loop writes, detach that projection from the site's
+/// record in the swarm thread's manifest store, saved before the next op
+/// of main's reads it; the record's other projections stay managed, another
+/// site's record and a site with none change nothing, and main hears only
+/// the loop's own `approval.changed`. A connection the user revoked
+/// disconnects: the record goes, and the site's feed grant with it.
+#[test]
+fn a_users_grant_change_detaches_through_the_pipe() {
+    let mut main = swarm_world::main();
+    let root = main.core.grant_root.clone();
+    let mut dir = Dir::new();
+    dir.insert(
+        manifests::FILE_NAME.to_owned(),
+        format!(r#"{{"version":1,"records":{{"{SITE}":{MANAGED},"{OTHER}":{OTHER_RECORD}}}}}"#),
+    );
+    dir.insert(feeds::FILE_NAME.to_owned(), site_feeds());
+    set_up(&mut main, &dir, &connected(&[SITE, OTHER, LEGACY]), T0);
+    let swarm = |key: &str, what: Value| json!({ "store": "swarm", "key": key, "what": what });
+    main.core.events.clear();
+    // The chrome turns the publish rule off.
+    let revoked = approval(
+        &mut main,
+        "approval.revoke",
+        swarm(SITE, json!({ "flag": "publish" })),
+        chrome(),
+    );
+    assert_eq!(revoked, json!({ "revoked": true }));
+    assert_eq!(
+        record_of(&mut main, SITE).stringify(),
+        r#"{"managed":{"connection":["publish"]},"acknowledged":{"publish":{"decision":"managed","source":"sheet","decidedAt":1}},"revision":2,"detached":{"autoApprove.publish":true}}"#
+    );
+    told_once(&mut main, SITE);
+    let file = std::fs::read_to_string(root.join(manifests::FILE_NAME)).unwrap();
+    assert!(file.contains(r#""autoApprove.publish": true"#), "{file}");
+    // The page's own "always allow" for feeds, which the manifest doesn't
+    // manage: marked detached all the same, as the reference does.
+    let page = json!({ "caller": "page", "page": swarm_world::page(SITE) });
+    let grant = json!({ "store": "swarm", "change": { "op": "flag", "flag": "feeds" } });
+    approval(&mut main, "approval.grant", grant, page);
+    let record = record_of(&mut main, SITE);
+    assert_eq!(
+        field(&record, "detached").stringify(),
+        r#"{"autoApprove.publish":true,"autoApprove.feeds":true}"#
+    );
+    assert_eq!(field(&record, "revision"), &JsValue::Number(3.0));
+    assert_eq!(
+        field(&record, "managed").stringify(),
+        r#"{"connection":["publish"]}"#
+    );
+    told_once(&mut main, SITE);
+    // A site with no record: the file stays as it was.
+    let before = files_in(&root, |n| n.starts_with("swarm-manifest-grants"));
+    approval(
+        &mut main,
+        "approval.revoke",
+        swarm(LEGACY, json!({ "flag": "publish" })),
+        chrome(),
+    );
+    assert_eq!(record_of(&mut main, LEGACY), JsValue::Null);
+    assert_eq!(
+        files_in(&root, |n| n.starts_with("swarm-manifest-grants")),
+        before
+    );
+    told_once(&mut main, LEGACY);
+    // The connection: the record goes, and the feed grant with it.
+    approval(
+        &mut main,
+        "approval.revoke",
+        swarm(SITE, json!("grant")),
+        chrome(),
+    );
+    assert_eq!(record_of(&mut main, SITE), JsValue::Null);
+    assert!(!feeds_on_disk(&root).has_feed_grant(&JsString::from(SITE)));
+    assert!(!grants_read(&mut main).contains_key(SITE));
+    told_once(&mut main, SITE);
+    // Another site's record, untouched throughout.
+    assert_eq!(record_of(&mut main, OTHER).stringify(), OTHER_RECORD);
+    main.settled();
+}
+
+/// D17: a manifest's own projections detach nothing: a decision's
+/// connection and rule, which the swarm thread writes, and main's own
+/// grant writes (`shell`, a manifest's projection under the old path).
+#[test]
+fn a_manifest_s_own_projections_detach_nothing() {
+    let mut main = swarm_world::main();
+    main.world(json!({ "reset": true, "clock": T0 }));
+    no_manifests(&mut main);
+    let mut own = OwnMain::new(|call, _| panic!("{call:?}"));
+    own.manifest = Box::new(|_| Some(fetched(200, MANIFEST.as_bytes())));
+    let answer = value_of(got(&main.play_own(
+        &mut own,
+        "swarm.manifest",
+        &check(),
+        "shell",
+    )));
+    let decide = op_params(
+        "decide",
+        &[
+            ("key", JsValue::string(SITE)),
+            ("token", field(&answer, "token").clone()),
+            ("outcome", JsValue::string("allow")),
+            ("live", JsValue::Bool(true)),
+        ],
+    );
+    let mut own = OwnMain::new(|call, _| panic!("{call:?}"));
+    main.play_own(&mut own, "swarm.manifest", &decide, "shell");
+    let decided = record_of(&mut main, SITE);
+    assert_eq!(
+        field(&decided, "managed").stringify(),
+        r#"{"connection":["publish"],"autoApprove.publish":["publish"]}"#
+    );
+    assert!(decided.get("detached").is_none(), "{}", decided.stringify());
+    let shell = json!({ "caller": "shell" });
+    let grant =
+        json!({ "store": "swarm", "change": { "op": "flag", "flag": "publish", "key": SITE } });
+    approval(&mut main, "approval.grant", grant, shell.clone());
+    let revoke = json!({ "store": "swarm", "key": SITE, "what": { "flag": "signing" } });
+    approval(&mut main, "approval.revoke", revoke, shell);
+    assert_eq!(record_of(&mut main, SITE).stringify(), decided.stringify());
+    main.settled();
+}
+
+/// D17's order through the pipe: the chrome turns a rule off while main
+/// holds a check's fetch; the detach waits for the check, which keeps the
+/// record it read, and main's next op of the site waits for the detach.
+#[test]
+fn a_detach_waits_for_a_check_in_flight() {
+    let mut main = swarm_world::main();
+    let mut dir = Dir::new();
+    dir.insert(
+        manifests::FILE_NAME.to_owned(),
+        format!(r#"{{"version":1,"records":{{"{SITE}":{MANAGED}}}}}"#),
+    );
+    set_up(&mut main, &dir, &connected(&[SITE]), T0);
+    let check_id = main.own_request("swarm.manifest", &check(), "shell");
+    let fetch = loop {
+        let message = main.recv();
+        if message["method"] == "shell.swarm_manifest" {
+            break message["id"].as_u64().unwrap();
+        }
+        panic!("before the fetch: {message}");
+    };
+    let revoke = json!({ "store": "swarm", "key": SITE, "what": { "flag": "publish" } });
+    approval(&mut main, "approval.revoke", revoke, chrome());
+    let get = main.own_request(
+        "swarm.manifest",
+        &op_params("get", &[("origin", JsValue::string(SITE))]),
+        "shell",
+    );
+    // Neither answers while the fetch is out.
+    let quiet = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    while let Some(wire) = main
+        .core
+        .recv_wire_within(quiet.saturating_duration_since(std::time::Instant::now()))
+    {
+        match wire {
+            common::Wire::Message(message) if message["type"] == "event" => {
+                main.core.events.push(message);
+            }
+            other => panic!("while the fetch is out: {other:?}"),
+        }
+    }
+    main.answer(fetch, fetched(200, MANIFEST.as_bytes()));
+    let first = main.recv();
+    assert_eq!(first["id"], check_id, "{first}");
+    assert_eq!(text_at(&value_of(got(&first)), "kind"), "ready");
+    let second = main.recv();
+    assert_eq!(second["id"], get, "{second}");
+    let record = value_of(got(&second));
+    assert!(record.get("observed").is_some(), "{}", record.stringify());
+    assert_eq!(
+        field(&record, "detached").stringify(),
+        r#"{"autoApprove.publish":true}"#
+    );
+    assert_eq!(
+        field(&record, "managed").stringify(),
+        r#"{"connection":["publish"]}"#
+    );
+    assert_eq!(field(&record, "revision"), &JsValue::Number(2.0));
+    told_once(&mut main, SITE);
+    main.settled();
 }
 
 // --- D12's recorded cases: the `shell` section ---------------------------------------

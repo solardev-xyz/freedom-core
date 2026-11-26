@@ -103,6 +103,7 @@ use fc_approval::{Handle, Kind, Limits, Minter, Page, Presented, Refusal, Reques
 use fc_evm::{Transaction, TypedDataView, U256};
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::message::{self, CallerKind, Context, PageContext};
+use fc_swarm_provider::stores::manifests::{Capability, Projection};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use zeroize::Zeroizing;
@@ -163,6 +164,9 @@ pub struct Approvals {
     /// phone payment's waiting rule for one goes (design 0012, "A phone
     /// payment's rule").
     narrowed: Vec<Narrowed>,
+    /// The user's changes of a site's Swarm grant since the loop last
+    /// asked, for the swarm thread's manifest store (design 0015, D17).
+    swarm_changes: Vec<SwarmChange>,
     /// x402's cap generations and reservations (X402-1).
     x402: x402::X402State,
     /// The loop's snapshot of `vault-meta.json`'s records once `vault_meta`
@@ -713,6 +717,32 @@ pub enum Narrowed {
     Account(u32),
 }
 
+/// A user's change of site `key`'s Swarm grant (design 0015, D17): the
+/// projection a permission manifest may manage, which the swarm thread,
+/// the manifest store's owner, detaches from the site's record. It is
+/// `swarm-permissions.js`'s `notifyManifestMutation` for a change whose
+/// `source` is the user's (a page's own, the chrome's narrowing): a
+/// revoke (`connection`), a rule turned on or off (`autoApprove.<rule>`),
+/// the messaging grant given or revoked (`messagingGrant`), each for a
+/// site that had its entry (the messaging revoke: its grant) and once the
+/// change stands. A connect reports nothing, and neither does main's own
+/// write (`shell`: a manifest's projection).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwarmChange {
+    pub key: String,
+    pub projection: Projection,
+}
+
+/// A Swarm rule's projection (`autoApprove.<rule>`).
+fn rule_projection(flag: SwarmFlag) -> Projection {
+    Projection::AutoApprove(match flag {
+        SwarmFlag::Publish => Capability::Publish,
+        SwarmFlag::Feeds => Capability::Feeds,
+        SwarmFlag::Signing => Capability::Signing,
+        SwarmFlag::Messaging => Capability::Messaging,
+    })
+}
+
 impl Approvals {
     pub fn new() -> Self {
         Approvals {
@@ -724,6 +754,7 @@ impl Approvals {
             standing: Standing::new(),
             events: Vec::new(),
             narrowed: Vec::new(),
+            swarm_changes: Vec::new(),
             x402: x402::X402State::default(),
             records: None,
         }
@@ -1932,6 +1963,11 @@ impl Approvals {
         std::mem::take(&mut self.narrowed)
     }
 
+    /// The user's Swarm grant changes since the last call (D17), in order.
+    pub fn take_swarm_changes(&mut self) -> Vec<SwarmChange> {
+        std::mem::take(&mut self.swarm_changes)
+    }
+
     /// Which dApp rules answer: today's until the file moves.
     fn rules(&self) -> Rules {
         if self.grants.moved(StoreKind::Dapp) {
@@ -2001,6 +2037,39 @@ impl Approvals {
                 Err(write_error(S::KIND, failure))
             }
         }
+    }
+
+    /// A Swarm grant write whose change answers whether it found what it
+    /// changes (the site's entry; the messaging revoke, its grant). With
+    /// `report`, a user's change (D17): once it stands, written or a
+    /// narrowing whose write failed, a change that found its entry is
+    /// reported to the swarm thread as `projection`, as
+    /// `swarm-permissions.js` notifies after the grant store's write
+    /// resolved. A widening whose write failed reports nothing: the
+    /// reference's write rejected.
+    fn write_swarm(
+        &mut self,
+        key: &str,
+        report: Option<Projection>,
+        change: impl FnOnce(&mut SwarmStore) -> Applied<bool>,
+    ) -> Result<Written<bool>, ErrorBody> {
+        let found = std::cell::Cell::new(false);
+        self.write_then::<SwarmStore, _>(
+            key,
+            |store| {
+                let applied = change(store);
+                found.set(applied.value);
+                applied
+            },
+            |this| {
+                if let Some(projection) = report.filter(|_| found.get()) {
+                    this.swarm_changes.push(SwarmChange {
+                        key: key.to_owned(),
+                        projection,
+                    });
+                }
+            },
+        )
     }
 
     /// `approval.check { request, chain_id?, paused? }`: whether a site's
@@ -2280,6 +2349,9 @@ impl Approvals {
             names
         };
         let now = clocks.wall_ms;
+        // A page's change is the user's (`source: 'user'`); main's, under
+        // `shell`, a manifest's projection.
+        let user = context.caller == CallerKind::Page;
         let (wrote, durable) = match (kind, op) {
             (StoreKind::Dapp, "connect") => {
                 object(&fields["change"], &with(&["account", "chain_id"]), keyed)?;
@@ -2314,18 +2386,22 @@ impl Approvals {
                 })?;
                 (written.value, written.durable)
             }
+            // A page's is the user's own decision (D17: it detaches what a
+            // manifest managed of it); main's is a manifest's projection.
             (StoreKind::Swarm, "flag") => {
                 object(&fields["change"], &with(&["flag"]), keyed)?;
                 let flag = SwarmFlag::from_name(string(change, "flag")?)
                     .ok_or_else(|| invalid("flag: unknown"))?;
+                let report = user.then(|| rule_projection(flag));
                 let written =
-                    self.write::<SwarmStore, _>(&key, |store| store.set_flag(&key, flag, true))?;
+                    self.write_swarm(&key, report, |store| store.set_flag(&key, flag, true))?;
                 (written.value, written.durable)
             }
             (StoreKind::Swarm, "messaging") => {
                 object(&fields["change"], &with(&[]), keyed)?;
+                let report = user.then_some(Projection::MessagingGrant);
                 let written =
-                    self.write::<SwarmStore, _>(&key, |store| store.grant_messaging(&key, now))?;
+                    self.write_swarm(&key, report, |store| store.grant_messaging(&key, now))?;
                 (written.value, written.durable)
             }
             (StoreKind::Radicle, "connect") => {
@@ -2411,6 +2487,7 @@ impl Approvals {
         }
         let what = &fields["what"];
         let flag = what.get("flag").and_then(Value::as_str);
+        let user = context.caller != CallerKind::Shell;
         // A device send's receipts for the key go with any dApp revoke that
         // stands, saved or not (#373): a narrowing after the spend wins over
         // the decision before it.
@@ -2445,17 +2522,22 @@ impl Approvals {
                     forget,
                 )?
             }
+            // The chrome's and a page's are the user's (D17); main's, under
+            // `shell`, a manifest's projection.
             (StoreKind::Swarm, Some("grant")) => {
-                self.write::<SwarmStore, _>(&key, |store| store.revoke(&key))?
+                let report = user.then_some(Projection::Connection);
+                self.write_swarm(&key, report, |store| store.revoke(&key))?
             }
             (StoreKind::Swarm, Some("messaging")) => {
-                self.write::<SwarmStore, _>(&key, |store| store.revoke_messaging(&key))?
+                let report = user.then_some(Projection::MessagingGrant);
+                self.write_swarm(&key, report, |store| store.revoke_messaging(&key))?
             }
             (StoreKind::Swarm, None) if flag.is_some() => {
                 object(what, &["flag"], &[])?;
                 let flag = SwarmFlag::from_name(flag.unwrap_or(""))
                     .ok_or_else(|| invalid("flag: unknown"))?;
-                self.write::<SwarmStore, _>(&key, |store| store.set_flag(&key, flag, false))?
+                let report = user.then(|| rule_projection(flag));
+                self.write_swarm(&key, report, |store| store.set_flag(&key, flag, false))?
             }
             (StoreKind::Radicle, Some("grant")) => self.write_then::<RadicleStore, _>(
                 &key,
@@ -3102,5 +3184,135 @@ mod tests {
                 )
                 .is_ok()
         );
+    }
+
+    /// D17: the Swarm grant writes that report a user's change to the swarm
+    /// thread, as `swarm-permissions.js` notifies `onManifestMutation`: a
+    /// page's rule and messaging grant, the chrome's (or a page's) revoke,
+    /// rule off and messaging revoke, each for a site that had its entry
+    /// (the messaging revoke, its grant). A connect, main's own writes
+    /// (`shell`: a manifest's projection) and a change that found nothing
+    /// report nothing.
+    #[test]
+    fn a_users_swarm_grant_change_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut approvals = Approvals::new();
+        approvals.configure_grants(
+            dir.path().to_path_buf(),
+            vec![StoreKind::Swarm],
+            CLOCKS.wall_ms,
+        );
+        let site = "https://app.example";
+        let page = Context {
+            caller: CallerKind::Page,
+            page: Some(PageContext {
+                origin: site.into(),
+                top_origin: site.into(),
+                frame: 1,
+                navigation: 1,
+                agent: Some(false),
+                transport_key: None,
+            }),
+        };
+        let mut run = |method: &str, params: Value, context: &Context| {
+            approvals
+                .request(1, method, &params, context, CLOCKS)
+                .unwrap();
+            approvals.take_swarm_changes()
+        };
+        let change = |projection| {
+            vec![SwarmChange {
+                key: site.to_owned(),
+                projection,
+            }]
+        };
+        let grant = |change: Value| json!({ "store": "swarm", "change": change });
+        let revoke = |what: Value| json!({ "store": "swarm", "key": site, "what": what });
+        let publish = Projection::AutoApprove(Capability::Publish);
+        // Nothing to change yet: a revoke and a page's rule find no entry.
+        assert!(
+            run(
+                "approval.revoke",
+                revoke(json!("grant")),
+                &Context::chrome()
+            )
+            .is_empty()
+        );
+        assert!(
+            run(
+                "approval.grant",
+                grant(json!({ "op": "flag", "flag": "publish" })),
+                &page
+            )
+            .is_empty()
+        );
+        // A page's connect reports nothing; its rule and messaging grant do.
+        assert!(run("approval.grant", grant(json!({ "op": "connect" })), &page).is_empty());
+        assert_eq!(
+            run(
+                "approval.grant",
+                grant(json!({ "op": "flag", "flag": "publish" })),
+                &page
+            ),
+            change(publish)
+        );
+        assert_eq!(
+            run("approval.grant", grant(json!({ "op": "messaging" })), &page),
+            change(Projection::MessagingGrant)
+        );
+        // Main's own writes are a manifest's projections.
+        let keyed = |mut change: Value| {
+            change["key"] = json!(site);
+            grant(change)
+        };
+        assert!(
+            run(
+                "approval.grant",
+                keyed(json!({ "op": "flag", "flag": "signing" })),
+                &shell()
+            )
+            .is_empty()
+        );
+        assert!(
+            run(
+                "approval.revoke",
+                revoke(json!({ "flag": "signing" })),
+                &shell()
+            )
+            .is_empty()
+        );
+        // The chrome's narrowings.
+        assert_eq!(
+            run(
+                "approval.revoke",
+                revoke(json!({ "flag": "publish" })),
+                &Context::chrome()
+            ),
+            change(publish)
+        );
+        assert_eq!(
+            run(
+                "approval.revoke",
+                revoke(json!("messaging")),
+                &Context::chrome()
+            ),
+            change(Projection::MessagingGrant)
+        );
+        // The messaging grant gone, its revoke finds nothing.
+        assert!(
+            run(
+                "approval.revoke",
+                revoke(json!("messaging")),
+                &Context::chrome()
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            run("approval.revoke", revoke(json!("grant")), &page),
+            change(Projection::Connection)
+        );
+        // Main's revoke of a connection is a manifest's projection.
+        run("approval.grant", grant(json!({ "op": "connect" })), &page);
+        assert!(run("approval.revoke", revoke(json!("grant")), &shell()).is_empty());
     }
 }
