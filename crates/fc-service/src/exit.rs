@@ -17,6 +17,10 @@ pub enum Exit {
     /// A bug, a panic outside request work, or a teardown that couldn't
     /// prove quiescence: a crash, restarted.
     Internal,
+    /// A native library's out-of-memory error under the memory cap (design
+    /// 0010, "The memory cap"; `out_of_memory` in 0007 and 0008), never
+    /// answered as a request's error: a crash, restarted.
+    OutOfMemory,
     /// Storage failure or refused filesystem: don't restart.
     Storage,
     /// The lock is held by another process: don't restart.
@@ -35,6 +39,7 @@ impl Exit {
             Exit::Ok => 0,
             Exit::Usage => 64,
             Exit::Internal => 70,
+            Exit::OutOfMemory => 71,
             Exit::Storage => 74,
             Exit::LockHeld => 75,
             Exit::Protocol => 76,
@@ -50,6 +55,7 @@ impl Exit {
             Exit::Ok,
             Exit::Usage,
             Exit::Internal,
+            Exit::OutOfMemory,
             Exit::Storage,
             Exit::LockHeld,
             Exit::Protocol,
@@ -366,5 +372,16 @@ mod tests {
             assert_eq!(Exit::from_code(code).map(Exit::code), Some(code));
         }
         assert_eq!(Exit::from_code(1), None);
+    }
+
+    /// The services' own (designs 0007, 0008 and 0010): 71 for
+    /// `out_of_memory`, a crash, and 77 for `confinement`.
+    #[test]
+    fn codes_are_the_services() {
+        assert_eq!(Exit::OutOfMemory.code(), 71);
+        assert_eq!(Exit::Confinement.code(), 77);
+        for code in [71, 77] {
+            assert_eq!(Exit::from_code(code).map(Exit::code), Some(code));
+        }
     }
 }

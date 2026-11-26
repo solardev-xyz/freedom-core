@@ -32,11 +32,12 @@
 //!   move", PRF-9c);
 //! - [`windows::Job`], [`windows::own_job_limits`] and
 //!   [`windows::Mitigation`]: its confinement on Windows (design 0010), a job
-//!   object of one process and the process mitigation policies, each read
-//!   back;
+//!   object of one process, with the services' memory limit, and the process
+//!   mitigation policies, each read back;
 //! - [`linux::landlock_abi`], [`linux::cloexec_from`] and
 //!   [`unix::set_cloexec`]: `fc-service`'s confinement on Linux (design
-//!   0010);
+//!   0010), and behind the `test-map` feature `linux::ReadOnlyMap`, its
+//!   memory cap's test;
 //! - [`macos::executable_path`], [`macos::thread_count`],
 //!   [`macos::apply_profile`], [`macos::sandboxed`], [`macos::check`] and [`macos::exec_allowed`]:
 //!   its confinement on macOS, through Seatbelt's private calls;

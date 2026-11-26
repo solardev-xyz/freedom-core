@@ -98,6 +98,7 @@ mod tests {
             reasons: Default::default(),
             resolution: None,
             mitigations: Default::default(),
+            memory_cap: None,
         }
     }
 

@@ -3,7 +3,8 @@
 //! its grant, from the main thread or the verifier thread, and a private or
 //! checkpoint process is granted no file at all. Each is checked where
 //! `hello` reports the property enforced (Linux with Landlock and seccomp,
-//! macOS); elsewhere the report itself is checked.
+//! macOS); elsewhere the report itself is checked. Each process's `hello`
+//! reports 0010's memory cap.
 
 // Test code: a failed setup ends the test.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -82,6 +83,31 @@ fn check(hello: &Value, probes: &[(String, String, bool)], write_allowed: bool) 
     // Landlock (the CI runners' have): then the file probes above ran.
     if files_enforceable() {
         assert_eq!(confinement["files"], "enforced", "{confinement}");
+    }
+    // 0010's memory cap, each process's (0014, "Budgets"): 2 GiB as read
+    // back on Linux and Windows, and null on macOS, which has none, with why.
+    if cfg!(any(target_os = "linux", windows)) {
+        assert_eq!(
+            confinement["memory_cap"], 2_147_483_648_u64,
+            "{confinement}"
+        );
+        assert!(
+            confinement["reasons"].get("memory_cap").is_none(),
+            "{confinement}"
+        );
+    }
+    if cfg!(target_os = "macos") {
+        assert_eq!(
+            confinement.get("memory_cap"),
+            Some(&Value::Null),
+            "{confinement}"
+        );
+        assert!(
+            confinement["reasons"]["memory_cap"]
+                .as_str()
+                .is_some_and(|why| why.starts_with("unsupported")),
+            "{confinement}"
+        );
     }
 }
 

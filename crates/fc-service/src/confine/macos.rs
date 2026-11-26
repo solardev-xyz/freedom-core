@@ -359,6 +359,7 @@ fn blocked(why: &str) -> Report {
         reasons,
         resolution: None,
         mitigations: BTreeMap::new(),
+        memory_cap: None,
     }
 }
 
@@ -471,6 +472,7 @@ fn derive(policy: &Policy, grants: &Grants) -> Report {
         reasons,
         resolution: None,
         mitigations: BTreeMap::new(),
+        memory_cap: None,
     }
 }
 
@@ -518,6 +520,7 @@ mod tests {
             times: false,
             symlinks: false,
             modes: false,
+            memory_cap: None,
         };
         let grants = grants(&policy).unwrap();
         // The read-write grant is the link's canonical target; macOS's
@@ -566,6 +569,7 @@ mod tests {
             times: false,
             symlinks: false,
             modes: false,
+            memory_cap: None,
         };
         let grants = grants(&policy).unwrap();
         for file in ["/etc/resolv.conf", "/etc/hosts"] {

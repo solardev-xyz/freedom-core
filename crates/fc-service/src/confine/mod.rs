@@ -26,6 +26,12 @@
 //! - **Elsewhere:** nothing is applied, and every property is
 //!   `unavailable`.
 //!
+//! **The memory cap** ([`Policy::memory_cap`], design 0010, "The memory
+//! cap"), set in the same step: `RLIMIT_DATA`, soft and hard, on Linux; the
+//! job's memory limit on Windows; none on macOS, which reports it
+//! `unsupported`. Each is read back, and one that reads back otherwise is
+//! [`Invalid`].
+//!
 //! **The order** (0010, "The recommendation", step 1):
 //! 1. at entry, the panic hook, then [`clean_entry`]: if anything is open
 //!    above stderr, one re-exec of the running image, with every
@@ -139,7 +145,30 @@ pub struct Policy {
     /// renames it back in a rollback. No other special file is allowed
     /// either way. Seatbelt's grants already let a rename through.
     pub symlinks: bool,
+    /// The memory cap in bytes (design 0010, "The memory cap"): the
+    /// services pass [`MEMORY_CAP`].
+    /// - **Linux:** `RLIMIT_DATA`, its soft and its hard limit both at the
+    ///   cap, or at an inherited soft limit already lower, which is kept.
+    ///   It counts the process's private writable memory (the heap,
+    ///   anonymous maps, thread stacks), not read-only or shared maps. On
+    ///   kernels before 4.7 it counts only the heap (`brk`), not `mmap`.
+    /// - **Windows:** the job's memory limit (`JOB_OBJECT_LIMIT_JOB_MEMORY`),
+    ///   set with its active-process limit.
+    /// - **macOS:** none; the report says `unsupported`.
+    ///
+    /// `None` sets nothing, and the report leaves the field out:
+    /// `freedom-cored` and its subcommands (design 0017).
+    pub memory_cap: Option<u64>,
 }
+
+/// The services' memory cap: 2 GiB, 2^31 bytes (design 0010, "The memory
+/// cap"; 0007's question 9 and 0008's question 10).
+pub const MEMORY_CAP: u64 = 1 << 31;
+
+/// Why the report's `memory_cap` is null on macOS (design 0010, "The memory
+/// cap").
+pub const MEMORY_CAP_UNSUPPORTED: &str =
+    "unsupported: macOS has no reliable per-process memory cap";
 
 /// The mode bits a [`Policy::modes`] change may not set: group and other
 /// permissions, setuid, setgid and sticky (design 0017, C4). A mode without
@@ -259,6 +288,14 @@ pub struct Report {
     /// service once it has read its configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution: Option<Resolution>,
+    /// The memory cap in bytes, as read back ([`Policy::memory_cap`]):
+    /// `Some(Some(bytes))`. `Some(None)`, null in the JSON, with the reason
+    /// under `memory_cap` in [`Report::reasons`], where none is in place: on
+    /// macOS ([`MEMORY_CAP_UNSUPPORTED`]), or where something outside
+    /// refused it (Linux's `setrlimit`, Windows's job). `None`, left out of
+    /// the JSON, when the policy asks for none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_cap: Option<Option<u64>>,
 }
 
 impl Report {
@@ -330,6 +367,9 @@ pub struct Options {
     /// Set no mitigation, as if each had failed with this Win32 error; each
     /// is still read back.
     pub mitigation_error: Option<i32>,
+    /// Pretend setting `RLIMIT_DATA` failed with this errno: something
+    /// outside refused the memory cap (Linux).
+    pub rlimit_errno: Option<i32>,
 }
 
 /// The environment variable the entry's re-exec sets ([`clean_entry`]), to
@@ -456,6 +496,7 @@ pub fn confine_with(policy: &Policy, options: &Options) -> Result<Report, Invali
     #[cfg(target_os = "macos")]
     {
         macos::confine(policy, options)
+            .map(|report| without_memory_cap(report, policy, MEMORY_CAP_UNSUPPORTED))
     }
     #[cfg(windows)]
     {
@@ -463,9 +504,24 @@ pub fn confine_with(policy: &Policy, options: &Options) -> Result<Report, Invali
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
-        let _ = (policy, options);
-        Ok(unconfined("not confined on this OS"))
+        let _ = options;
+        Ok(without_memory_cap(
+            unconfined("not confined on this OS"),
+            policy,
+            "unsupported: not confined on this OS",
+        ))
     }
+}
+
+/// `report` with no memory cap in place, for `why`, if `policy` asks for
+/// one: null, with the reason.
+#[cfg(not(any(target_os = "linux", windows)))]
+fn without_memory_cap(mut report: Report, policy: &Policy, why: &str) -> Report {
+    if policy.memory_cap.is_some() {
+        report.memory_cap = Some(None);
+        report.reasons.insert("memory_cap", why.to_owned());
+    }
+    report
 }
 
 /// A report with every property `unavailable` for `why`.
@@ -488,6 +544,7 @@ fn unconfined(why: &str) -> Report {
         reasons,
         resolution: None,
         mitigations: BTreeMap::new(),
+        memory_cap: None,
     }
 }
 

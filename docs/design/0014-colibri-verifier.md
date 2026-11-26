@@ -224,7 +224,7 @@ The registry takes user chains and prover coverage with no bound on their number
   - **If none is idle,** the request fails at once with `Colibri service busy`, built as `Colibri service unavailable` is. It is neither a fault nor a capacity failure, nothing counts it toward restarts or the backoff, and the read falls to its next source. The request holds its slot until that answer, as physical completion requires.
   - **A recycle** ([Crashes](#crashes-overruns-and-restarts)) counts toward the limit until the old process exits. Main spawns the successor at once if the limit has room, by retiring an idle process if it must; otherwise when the old one exits. Until then, that chain's new requests get `Colibri service busy`.
 - **Checkpoint processes:** at most 2 at once (one per Myotis chain today). A third check fails at once with `CHECKPOINT_UNAVAILABLE`, main's class for a check that couldn't run.
-- **Resident memory:** at most 3 × 256 + 2 × 128 = 1,024 MiB of budget browser-wide. Each process holds to its own budget as [Budgets](#budgets) says: it reads its memory after each step. An OS-enforced hard limit is [0007's open question 9](0007-ipfs-service.md#open-questions) ("An OS memory limit"), which this service shares.
+- **Resident memory:** at most 3 × 256 + 2 × 128 = 1,024 MiB of budget browser-wide. Each process holds to its own budget as [Budgets](#budgets) says: it reads its memory after each step. The hard limit the OS enforces is [0010's memory cap](0010-service-confinement.md#the-memory-cap), the same 2 GiB per process as the other services' (0007's question 9, decided 2026-11-25): a backstop far above these budgets ([Budgets](#budgets)).
 - **Directories:** at most 6 chain directories under `<userData>/colibri/`, so 384 MiB of store at most. Private and checkpoint processes have none.
   - Main sets each directory's modification time when it spawns that chain's process.
   - Before a spawn would make a seventh directory, main deletes the oldest directory whose process isn't live. It is a cache, and that chain bootstraps again.
@@ -243,7 +243,8 @@ The registry takes user chains and prover coverage with no bound on their number
 - `read_write`: the chain's directory alone, and nothing for the checkpoint and private processes;
 - `read_only`: nothing beyond the system's own (`/proc/self`, the cgroup files, the random devices);
 - `resolver: Resolver::None`, `refer: false`, `min_abi: 1`, `interface_index: false`;
-- `descriptors`: the lock and the directory, and none for the checkpoint and private processes.
+- `descriptors`: the lock and the directory, and none for the checkpoint and private processes;
+- `memory_cap`: 0010's cap, 2 GiB (`MEMORY_CAP`), for every process ([Budgets](#budgets)).
 
 Every part exists in `fc-service` today. fc-service's own confinement tests and a freedom-ipfsd test (`tests/store_confined.rs`) already confine with `Offline`. No Radicle process does yet: no one-shot import process exists, and freedom-radicled confines with its configured direct or SOCKS policy (`services/freedom-radicled/src/confine.rs`).
 
@@ -788,7 +789,11 @@ A private process has the persistent process's budgets. Its store is in memory, 
 | chain directories | 6, so 384 MiB of store | the oldest one without a live process is deleted |
 | main's Colibri fetch pool | 128 MiB, each fetch reserving its variant's maximum before it is sent | `Colibri fetch pool full`, a failed fetch |
 
-- **Resident memory** is read by the service after each step (`/proc/self/statm`, `task_info` on macOS). It can't bound the C core's allocations as they happen. A hard limit by the OS (`RLIMIT_AS`, or a Windows job memory limit) is [0007's open question 9](0007-ipfs-service.md#open-questions), "An OS memory limit", and its answer applies to this service too.
+- **Resident memory** is read by the service after each step (`/proc/self/statm`, `task_info` on macOS). It can't bound the C core's allocations as they happen.
+- **The hard limit** is [0010's memory cap](0010-service-confinement.md#the-memory-cap), 0007's question 9 as the user answered it on 2026-11-25: the same 2 GiB of private memory per process as the other services, persistent, private and checkpoint alike, `RLIMIT_DATA` on Linux and the job's memory limit on Windows, none on macOS. `colibri.hello` reports it as `confinement.memory_cap`. It is a backstop far above the 256 MiB and 128 MiB budgets, which stay as they are.
+  - **An allocation that fails under it ends the process like a crash, but for one path.** Rust's allocator aborts. The C core allocates through `safe_malloc`, `safe_calloc`, `safe_realloc` and `safe_aligned_alloc` (`src/util/bytes.c` at the pinned commit), which on a NULL write `Error: Memory allocation failed (…). Exiting.` to stderr and call `exit(EXIT_FAILURE)`, so the process exits 1; `verify_local.c`'s direct `bytes(malloc(8), 8)` faults on the NULL.
+  - **The one path that doesn't end the process** is `c4_verify_create_ctx`'s direct `calloc`. A NULL there fails that call, so the checkpoint process answers its check with `stage: "verify"`'s error and then ends normally, with no restart.
+  - Main restarts a crashed process as any crash ([Crashes](#crashes-overruns-and-restarts)), and a death inside a step names that step's request. No exit-71 hook is added for the C core yet, so the path above stays a request's error until one is.
 - **A reply over 0001's message cap** is `too_large`, as 0005 says.
 
 ### Measured (COL-2)

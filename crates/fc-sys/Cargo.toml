@@ -37,6 +37,9 @@ test-abis = []
 # Test-only Mach calls on macOS (design 0010, Tests): a service lookup, and
 # the task's port names.
 test-macos = []
+# A test-only read-only file map on Linux (design 0010, Tests: the memory
+# cap), which `RLIMIT_DATA` doesn't count.
+test-map = []
 # Test-only job calls on Windows (design 0010, Tests): assigning another
 # process to a job, as libuv assigns each child, and asking whether it is in
 # one.

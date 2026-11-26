@@ -117,6 +117,7 @@ fn hello_reports_the_policy_and_the_confinement_the_kernel_offers() {
         }
         _ => assert!(confinement.is_object(), "{confinement}"),
     }
+    memory_capped(confinement);
     ipfsd.shutdown();
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
 
@@ -144,8 +145,38 @@ fn hello_reports_the_policy_and_the_confinement_the_kernel_offers() {
     }
     // Its names go to the proxy: no DNS configuration is read.
     assert!(result["confinement"].get("resolution").is_none(), "{hello}");
+    memory_capped(&result["confinement"]);
     ipfsd.shutdown();
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
+}
+
+/// The memory cap (design 0010, "The memory cap"), each process's: 2 GiB as
+/// read back on Linux and Windows, and null on macOS, which has none, with
+/// why.
+fn memory_capped(confinement: &Value) {
+    if cfg!(any(target_os = "linux", windows)) {
+        assert_eq!(
+            confinement["memory_cap"], 2_147_483_648_u64,
+            "{confinement}"
+        );
+        assert!(
+            confinement["reasons"].get("memory_cap").is_none(),
+            "{confinement}"
+        );
+    }
+    if cfg!(target_os = "macos") {
+        assert_eq!(
+            confinement.get("memory_cap"),
+            Some(&Value::Null),
+            "{confinement}"
+        );
+        assert!(
+            confinement["reasons"]["memory_cap"]
+                .as_str()
+                .is_some_and(|why| why.starts_with("unsupported")),
+            "{confinement}"
+        );
+    }
 }
 
 /// At the confinement point the process has one thread, and holds stdio

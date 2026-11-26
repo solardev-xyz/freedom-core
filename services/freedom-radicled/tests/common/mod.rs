@@ -50,6 +50,35 @@ pub const EXIT_TIMEOUT: Duration = Duration::from_secs(15);
 /// bound ended the process is the watchdog's line's to say ([`overrun`]).
 pub const OVERRUN_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// The memory cap in `hello`'s `confinement` (design 0010, "The memory
+/// cap"), the service's and the import process's alike: 2 GiB as read back
+/// on Linux and Windows, and null on macOS, which has none, with why.
+pub fn assert_memory_capped(confinement: &Value) {
+    if cfg!(any(target_os = "linux", windows)) {
+        assert_eq!(
+            confinement["memory_cap"], 2_147_483_648_u64,
+            "{confinement}"
+        );
+        assert!(
+            confinement["reasons"].get("memory_cap").is_none(),
+            "{confinement}"
+        );
+    }
+    if cfg!(target_os = "macos") {
+        assert_eq!(
+            confinement.get("memory_cap"),
+            Some(&Value::Null),
+            "{confinement}"
+        );
+        assert!(
+            confinement["reasons"]["memory_cap"]
+                .as_str()
+                .is_some_and(|why| why.starts_with("unsupported")),
+            "{confinement}"
+        );
+    }
+}
+
 /// The unit watchdog's line in `log`, once it has ended the process: its
 /// reason `unit_overrun`, the bound that ran out (`bound_ms`), and how long
 /// before that bound was armed (`elapsed_ms`), never less than the bound.

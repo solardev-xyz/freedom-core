@@ -235,6 +235,7 @@ fn an_import_after_reconcile_is_signed_and_seeded_and_the_process_exits() {
         assert_eq!(confinement["network"], "enforced", "{confinement}");
         assert_eq!(confinement["exec"], "enforced", "{confinement}");
     }
+    assert_memory_capped(&hello["result"]["confinement"]);
     let identity = radicled.call("rad.identity", sealed_to(&hello, &SEED));
     assert!(identity["result"].is_object(), "{identity}");
     // Before `rad.reconcile`: `stopped`, nothing changes, the process goes

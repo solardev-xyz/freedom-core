@@ -148,6 +148,7 @@ mod linux {
                 options.landlock_errno = Some(libc_eperm());
                 options.seccomp_errno = Some(libc_eperm());
             }
+            "memory-cap-blocked" => options.rlimit_errno = Some(libc_eperm()),
             _ => {}
         }
         if let Some(kind) = case.strip_prefix("inject-") {
@@ -297,6 +298,15 @@ mod linux {
         let mut policy = policy(&p, network, min_abi, registered);
         // Design 0017, C4: an owner-only `fchmod` alone.
         policy.modes = case == "modes";
+        if case == "memory-cap" {
+            // As a service runs: without the privilege that raises a hard
+            // limit, which this test's process may hold (run as root).
+            unprivileged();
+            // A sparse file larger than the cap, closed before `confine`.
+            std::fs::File::create(p.data.join("larger-than-the-cap"))
+                .and_then(|file| file.set_len(confine::MEMORY_CAP + (1 << 30)))
+                .unwrap();
+        }
         let report = confine::confine_with(&policy, &options).unwrap();
         println!("REPORT {}", report.to_json());
         match case {
@@ -310,6 +320,9 @@ mod linux {
             "threads" => threads(&p),
             "resolver" => resolver(),
             "stdio-socket" => stdio_socket(),
+            "memory-cap" => memory_cap(&p, &report),
+            "memory-cap-blocked" => memory_cap_blocked(&report),
+            "memory-cap-inherited" | "memory-cap-inherited-soft" => memory_cap_inherited(&report),
             #[cfg(target_arch = "x86_64")]
             "x32" => {
                 println!("CALLING");
@@ -429,6 +442,106 @@ mod linux {
         ruleset.restrict_self().unwrap();
     }
 
+    /// Drops `CAP_SYS_RESOURCE`, if this process holds it: a service holds
+    /// none, and with it a hard limit could be raised again.
+    fn unprivileged() {
+        use rustix::thread::{CapabilitySet, capabilities, set_capabilities};
+        let mut sets = capabilities(None).unwrap();
+        if (sets.effective | sets.permitted).contains(CapabilitySet::SYS_RESOURCE) {
+            sets.effective.remove(CapabilitySet::SYS_RESOURCE);
+            sets.permitted.remove(CapabilitySet::SYS_RESOURCE);
+            set_capabilities(None, sets).unwrap();
+        }
+    }
+
+    /// The memory cap (design 0010, "The memory cap"; Tests, its second and
+    /// fourth bullets): `RLIMIT_DATA`'s soft and hard limit are the cap
+    /// reported; the same limit can be set again, so the call isn't
+    /// filtered, but the hard limit can't be raised; and a file larger than
+    /// the cap maps read-only, while an allocation of its size fails.
+    fn memory_cap(p: &Paths, report: &Report) {
+        use std::os::fd::AsFd;
+
+        use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+        let before = getrlimit(Resource::Data);
+        println!("RLIMIT_DATA {before:?}");
+        let Some(Some(cap)) = report.memory_cap else {
+            check("the memory cap is reported", false);
+            return;
+        };
+        check(
+            "the soft and hard limits are the cap reported",
+            before.current == Some(cap) && before.maximum == Some(cap),
+        );
+        check(
+            "the same limit is set again",
+            setrlimit(Resource::Data, before).is_ok(),
+        );
+        for (what, maximum) in [("unlimited", None), ("by a page", Some(cap + 4096))] {
+            let raised = setrlimit(
+                Resource::Data,
+                Rlimit {
+                    current: Some(cap),
+                    maximum,
+                },
+            );
+            println!("RAISE {what} {raised:?}");
+            check(
+                &format!("the hard limit isn't raised {what}"),
+                raised.is_err(),
+            );
+        }
+        check(
+            "the limit is unchanged",
+            getrlimit(Resource::Data) == before,
+        );
+        // A read-only map isn't private writable memory, which is all the
+        // limit counts: so libgit2's pack windows (0008) stay mappable.
+        let larger = std::fs::File::open(p.data.join("larger-than-the-cap")).unwrap();
+        let len = larger.metadata().unwrap().len();
+        check("the file is larger than the cap", len > cap);
+        let len = usize::try_from(len).unwrap();
+        check(
+            "an allocation of its size fails",
+            Vec::<u8>::new().try_reserve_exact(len).is_err(),
+        );
+        let map = fc_sys::linux::ReadOnlyMap::new(larger.as_fd(), len);
+        println!("MAP {:?}", map.as_ref().map(|_| len));
+        check("it maps read-only", map.is_ok());
+        drop(map);
+    }
+
+    /// Something outside refused `setrlimit`: no cap, null with the reason,
+    /// and the service runs (D2).
+    fn memory_cap_blocked(report: &Report) {
+        println!("REASON {:?}", report.reasons.get("memory_cap"));
+        check(
+            "the memory cap is null",
+            report.memory_cap == Some(None) && report.to_json()["memory_cap"].is_null(),
+        );
+        check(
+            "with its reason",
+            report
+                .reasons
+                .get("memory_cap")
+                .is_some_and(|why| why.contains("refused")),
+        );
+    }
+
+    /// An inherited limit already lower than the cap is kept, as the soft
+    /// and the hard limit, and reported.
+    fn memory_cap_inherited(report: &Report) {
+        use rustix::process::{Resource, getrlimit};
+        let read = getrlimit(Resource::Data);
+        println!("RLIMIT_DATA {read:?}");
+        check(
+            "the lower limit is kept, soft and hard, and reported",
+            report.memory_cap.flatten().is_some_and(|cap| {
+                cap < confine::MEMORY_CAP && read.current == Some(cap) && read.maximum == Some(cap)
+            }),
+        );
+    }
+
     /// stdin is a socket pair's end, as main's connection may be: it
     /// crosses, and still carries both ways once confined.
     fn stdio_socket() {
@@ -460,6 +573,7 @@ mod linux {
             times: false,
             symlinks: false,
             modes: false,
+            memory_cap: Some(confine::MEMORY_CAP),
         }
     }
 
@@ -813,6 +927,17 @@ mod linux {
         configure(shell, world, case)
     }
 
+    /// `case` through a shell that sets the `RLIMIT_DATA` it inherits
+    /// (`ulimit`'s arguments, `limit`) and then execs it.
+    fn with_ulimit(world: &World, case: &str, limit: &str) -> Command {
+        let mut shell = Command::new("/bin/sh");
+        shell
+            .arg("-c")
+            .arg(format!("ulimit {limit} && exec \"$0\""))
+            .arg(std::env::current_exe().unwrap());
+        configure(shell, world, case)
+    }
+
     /// The `stdio-socket` case, its stdin a socket pair's end: what it
     /// wrote back.
     fn run_on_socket(world: &World) -> (Output, String) {
@@ -915,6 +1040,7 @@ mod linux {
             reasons: Default::default(),
             resolution: None,
             mitigations: Default::default(),
+            memory_cap: value.get("memory_cap").map(serde_json::Value::as_u64),
         }
     }
 
@@ -988,6 +1114,47 @@ mod linux {
         let abi = kernel_abi();
         let mut failures: Vec<String> = Vec::new();
         println!("confine: Landlock ABI {abi:?}");
+
+        // The memory cap (design 0010, "The memory cap"), whatever Landlock
+        // offers: 2 GiB, or an inherited soft limit already lower, as read
+        // back; with a lower one inherited (as both limits, or the soft
+        // alone), that one; and null, with its reason, where something
+        // outside refuses it.
+        let inherited = rustix::process::getrlimit(rustix::process::Resource::Data).current;
+        let cap = inherited.map_or(confine::MEMORY_CAP, |soft| soft.min(confine::MEMORY_CAP));
+        let capped = run(&world, "memory-cap");
+        let r = report(&capped);
+        expect(
+            &mut failures,
+            r.memory_cap == Some(Some(cap)),
+            format!("memory-cap: {r:?}"),
+        );
+        failures.extend(passed("memory-cap", &capped));
+        let refused = run(&world, "memory-cap-blocked");
+        let r = report(&refused);
+        expect(
+            &mut failures,
+            r.memory_cap == Some(None),
+            format!("memory-cap-blocked: {r:?}"),
+        );
+        failures.extend(passed("memory-cap-blocked", &refused));
+        // In whole KiB, `ulimit`'s unit.
+        let lower = (cap.min(1 << 30) >> 10) << 10;
+        for (case, limit) in [
+            ("memory-cap-inherited", "-d"),
+            ("memory-cap-inherited-soft", "-S -d"),
+        ] {
+            let output = with_ulimit(&world, case, &format!("{limit} {}", lower >> 10))
+                .output()
+                .unwrap();
+            let r = report(&output);
+            expect(
+                &mut failures,
+                r.memory_cap == Some(Some(lower)),
+                format!("{case}: {r:?}"),
+            );
+            failures.extend(passed(case, &output));
+        }
 
         let Some(abi) = abi else {
             // A runner without Landlock can't show the rules; the reports
