@@ -920,105 +920,63 @@ fn discovery_reads_each_records_path_after_its_own() {
     }
 }
 
+/// What goes wrong at one APDU of discovery with its check.
+#[derive(Debug, Clone, Copy)]
+enum CheckFault {
+    Status,
+    Failed,
+    Refused,
+    Unplugged,
+    Short,
+    KeyNotAddress,
+}
+
+/// Discovery with its check ([`checking`]), `fault` at APDU `at`.
+fn with_fault(fault: CheckFault, at: usize) -> Run {
+    let (mut op, _) = checking();
+    let mut device = Device::default();
+    device.fault = match fault {
+        CheckFault::Status => Some((at, Fault::Status(0x6985))),
+        CheckFault::Unplugged => Some((at, Fault::Disconnect)),
+        CheckFault::Short => Some((at, Fault::Short)),
+        CheckFault::KeyNotAddress => Some((at, Fault::KeyNotAddress)),
+        CheckFault::Failed | CheckFault::Refused => None,
+    };
+    run(&mut op, |index, apdu| {
+        let answer = device.answer(apdu);
+        match fault {
+            CheckFault::Failed if index == at => Owned::Failed(Failed::Unresponsive),
+            CheckFault::Refused if index == at => Owned::Refused,
+            _ => relay(index, apdu, answer),
+        }
+    })
+}
+
 /// A status, main's failure or refusal, an unplug or an answer out of form
 /// at a check's APDU ends the check, never discovery (`ipc.js:24–33`); at
 /// a discovery APDU it ends the operation, as before.
 #[test]
 fn a_failed_check_leaves_discovery_answered() {
-    let ends = |at: usize, reply: &dyn Fn(usize, &[u8], &mut Device) -> Owned| {
-        let (mut op, _) = checking();
-        let mut device = Device::default();
-        let run = run(&mut op, |index, apdu| reply(index, apdu, &mut device));
-        assert_eq!(run.apdus.len(), at + 1, "nothing after APDU {at}");
-        run.done
-    };
-    let faults: Vec<(
-        &str,
-        Box<dyn Fn(usize) -> Box<dyn Fn(usize, &[u8], &mut Device) -> Owned>>,
-    )> = vec![
-        (
-            "status",
-            Box::new(|at| {
-                Box::new(move |index, apdu, device: &mut Device| {
-                    if index == at {
-                        device.fault = Some((at, Fault::Status(0x6985)));
-                    }
-                    relay(index, apdu, device.answer(apdu))
-                })
-            }),
-        ),
-        (
-            "failed",
-            Box::new(|at| {
-                Box::new(move |index, apdu, device: &mut Device| {
-                    let answer = device.answer(apdu);
-                    if index == at {
-                        Owned::Failed(Failed::Unresponsive)
-                    } else {
-                        relay(index, apdu, answer)
-                    }
-                })
-            }),
-        ),
-        (
-            "refused",
-            Box::new(|at| {
-                Box::new(move |index, apdu, device: &mut Device| {
-                    let answer = device.answer(apdu);
-                    if index == at {
-                        Owned::Refused
-                    } else {
-                        relay(index, apdu, answer)
-                    }
-                })
-            }),
-        ),
-        (
-            "unplugged",
-            Box::new(|at| {
-                Box::new(move |index, apdu, device: &mut Device| {
-                    if index == at {
-                        device.fault = Some((at, Fault::Disconnect));
-                    }
-                    relay(index, apdu, device.answer(apdu))
-                })
-            }),
-        ),
-        (
-            "a byte short",
-            Box::new(|at| {
-                Box::new(move |index, apdu, device: &mut Device| {
-                    if index == at {
-                        device.fault = Some((at, Fault::Short));
-                    }
-                    relay(index, apdu, device.answer(apdu))
-                })
-            }),
-        ),
-        (
-            "an address beside another key",
-            Box::new(|at| {
-                Box::new(move |index, apdu, device: &mut Device| {
-                    if index == at {
-                        device.fault = Some((at, Fault::KeyNotAddress));
-                    }
-                    relay(index, apdu, device.answer(apdu))
-                })
-            }),
-        ),
-    ];
-    for (name, fault) in &faults {
+    for fault in [
+        CheckFault::Status,
+        CheckFault::Failed,
+        CheckFault::Refused,
+        CheckFault::Unplugged,
+        CheckFault::Short,
+        CheckFault::KeyNotAddress,
+    ] {
         for at in 0..4 {
-            let done = ends(at, &*fault(at));
+            let run = with_fault(fault, at);
+            assert_eq!(run.apdus.len(), at + 1, "{fault:?} at {at}: nothing after");
             if at < 2 {
-                assert!(done.is_err(), "{name} at {at}: discovery fails");
+                assert!(run.done.is_err(), "{fault:?} at {at}: discovery fails");
                 continue;
             }
-            let Ok(Signed::Accounts(found)) = done else {
-                panic!("{name} at {at}: {done:?}")
+            let Ok(Signed::Accounts(found)) = run.done else {
+                panic!("{fault:?} at {at}: {:?}", run.done)
             };
-            assert_eq!(found.accounts.len(), 2, "{name} at {at}");
-            assert!(found.checks.is_err(), "{name} at {at}");
+            assert_eq!(found.accounts.len(), 2, "{fault:?} at {at}");
+            assert!(found.checks.is_err(), "{fault:?} at {at}");
         }
     }
     // Another key with its own address isn't a failure: the device holds
