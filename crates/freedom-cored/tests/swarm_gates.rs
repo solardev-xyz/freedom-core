@@ -894,20 +894,20 @@ fn uploads(parts: Option<Vec<Vec<u8>>>) -> Handler {
     })
 }
 
+/// What a measured publish gave.
+struct Published {
+    answer: Value,
+    /// The tar the node took: its SHA-256 and length.
+    sha: String,
+    len: usize,
+    took: Duration,
+    /// Resident memory before, what it grew by (KiB), and how it was read.
+    grew: Option<(u64, u64, &'static str)>,
+}
+
 /// Publishes `request` (its parts `parts`) from `SITE` with the core's
-/// peak memory started again just before: the answer, the tar's SHA-256
-/// and length, how long it took, and what it grew by.
-fn publish_measured(
-    rig: &mut Rig,
-    request: &str,
-    parts: Vec<Vec<u8>>,
-) -> (
-    Value,
-    String,
-    usize,
-    Duration,
-    Option<(u64, u64, &'static str)>,
-) {
+/// peak memory started again just before.
+fn publish_measured(rig: &mut Rig, request: &str, parts: Vec<Vec<u8>>) -> Published {
     rig.handler = uploads(Some(parts));
     let base = baseline(rig);
     let start = Instant::now();
@@ -920,9 +920,13 @@ fn publish_measured(
     let (call, body) = rig.done_bodies.pop_last().unwrap();
     assert!(rig.open.is_empty() && call > 0);
     assert_eq!(body.terminal.as_deref(), Some("end"));
-    let answer = rig.answer(id).clone();
-    let sha = hex(&body.sha.clone().finalize());
-    (answer, sha, body.len, took, grew)
+    Published {
+        answer: rig.answer(id).clone(),
+        sha: hex(&body.sha.clone().finalize()),
+        len: body.len,
+        took,
+        grew,
+    }
 }
 
 /// A core with `env`'s hooks, the Swarm grants and stores moved, `SITE`
@@ -945,7 +949,13 @@ fn a_50_mib_publish_of_100_files_streams_with_resident_memory_up_under_4_mib() {
     let total: usize = parts.iter().map(Vec::len).sum();
     let mut rig = rig_with(&[], &[SITE]);
     for what in ["first publish", "second publish"] {
-        let (answer, sha, len, took, grew) = publish_measured(&mut rig, &request, parts.clone());
+        let Published {
+            answer,
+            sha,
+            len,
+            took,
+            grew,
+        } = publish_measured(&mut rig, &request, parts.clone());
         let result = answer["result"]["result_typed"].to_string();
         assert!(result.contains(&reference), "{answer}");
         assert_eq!(sha, reference, "the tar the node took is the reference's");
