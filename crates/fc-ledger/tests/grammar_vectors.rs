@@ -175,8 +175,11 @@ fn admit(
     }
 }
 
+/// APDUs or answers, in order.
+type Stream = Vec<Vec<u8>>;
+
 /// Every complete stream the core sends for a case, its answers beside.
-fn clean(case: &Value) -> Option<(Vec<Vec<u8>>, Vec<Vec<u8>>)> {
+fn clean(case: &Value) -> Option<(Stream, Stream)> {
     let mut op = operation(case).ok()?;
     let mut device = device_for(case);
     let mut answers = Vec::new();
