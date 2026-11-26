@@ -699,6 +699,9 @@
         "stores/feeds-refused-label-keeps-index"
       ]
     },
+    "store-error-text": {
+      "note": "no case: it needs a store file that can't be written or read, which the world never scripts; freedom-cored's a_failure_at_each_write_step (tests/swarm_writes.rs) and a_history_that_wont_open_fails_each_statement_and_retries fail the files"
+    },
     "own-keys": {
       "cases": [
         "methods/create-feed-own-key-to-string",
@@ -732,10 +735,16 @@
         "shell/identities-detach-on-revoke"
       ]
     },
+    "grant-check-order": {
+      "note": "no case: it needs a user's grant change while a check's manifest fetch is out, and the world answers a fetch at once; freedom-cored's a_detach_waits_for_a_check_in_flight (tests/swarm_shell.rs) holds the fetch and turns a rule off"
+    },
     "picked-read-text": {
       "cases": [
         "shell/publish-file-history-unreadable"
       ]
+    },
+    "vault-soc-recheck": {
+      "note": "no case: it needs the site disconnected between the guard and the signature, where no world change lands; freedom-cored's the_vault_decides_a_page_soc_again (tests/swarm_writes.rs) holds the vault's owner and revokes the connection"
     },
     "tag-owners-bound": {
       "note": "no case: it takes 4,097 uploads whose page never polls the tag; fc-swarm-provider's tests make them"

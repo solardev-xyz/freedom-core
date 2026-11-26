@@ -321,12 +321,18 @@ const NO_CASE = {
     + 'fc-swarm-provider\'s publish tests fail the write',
   'identity-references-bound': 'no case: the bound is 1 MiB held, past any store Freedom writes; fc-swarm-provider\'s ops tests build stores that reach it',
   'tag-owners-bound': 'no case: it takes 4,097 uploads whose page never polls the tag; fc-swarm-provider\'s tests make them',
+  'store-error-text': 'no case: it needs a store file that can\'t be written or read, which the world never scripts; freedom-cored\'s '
+    + 'a_failure_at_each_write_step (tests/swarm_writes.rs) and a_history_that_wont_open_fails_each_statement_and_retries fail the files',
+  'grant-check-order': 'no case: it needs a user\'s grant change while a check\'s manifest fetch is out, and the world answers a fetch at once; '
+    + 'freedom-cored\'s a_detach_waits_for_a_check_in_flight (tests/swarm_shell.rs) holds the fetch and turns a rule off',
+  'vault-soc-recheck': 'no case: it needs the site disconnected between the guard and the signature, where no world change lands; '
+    + 'freedom-cored\'s the_vault_decides_a_page_soc_again (tests/swarm_writes.rs) holds the vault\'s owner and revokes the connection',
 };
 const DEVIATION_IDS = ['feed-entry-bound', 'tar-paths', 'feed-wrap-root', 'reference-check', 'read-data-verified', 'read-pieces',
   'index-probe', 'index-allocation', 'stamps-one-read', 'deadlines', 'busy', 'reply-bounds', 'reply-syntax', 'batch-depth', 'error-body-bound', 'session-transport',
-  'transport-error-text', 'subscribe-proxy', 'history-bound', 'history-blobs', 'store-shapes', 'store-refusal', 'own-keys', 'history-retry',
-  'legacy-dates', 'identity-references-bound', 'collation', 'owner-read-order', 'detach-timing', 'picked-read-text', 'tag-owners-bound',
-  'store-writes'];
+  'transport-error-text', 'subscribe-proxy', 'history-bound', 'history-blobs', 'store-shapes', 'store-refusal', 'store-error-text', 'own-keys',
+  'history-retry', 'legacy-dates', 'identity-references-bound', 'collation', 'owner-read-order', 'detach-timing', 'grant-check-order',
+  'picked-read-text', 'vault-soc-recheck', 'tag-owners-bound', 'store-writes'];
 
 function deviationsOf(swarm) {
   const where = Object.fromEntries(DEVIATION_IDS.map((id) => [id, []]));
