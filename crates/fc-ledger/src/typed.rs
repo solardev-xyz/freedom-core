@@ -13,6 +13,7 @@
 //! cursor, not the APDUs.
 
 use fc_evm::{ParsedTypedData, TypedBase, TypedField, TypedStruct, TypedValue, U256};
+use serde_json::Value;
 
 use crate::Refusal;
 use crate::apdu::{Apdu, MAX_DATA, header};
@@ -156,6 +157,49 @@ impl TypedStream {
             }
         }
     }
+}
+
+/// Every field's array suffix, as the request writes it, must be the one
+/// the device rebuilds from the field's descriptor: `[]` or `[n]` with `n`
+/// in decimal, no leading zero (`array-suffix-written-form`). The hash's
+/// `encodeType` keeps the written suffix (ethers' `uint8[02]`), the
+/// device's has its own (`uint8[2]`), so their digests would differ.
+/// `types` is the request fc-evm parsed into `parsed`.
+pub(crate) fn check_written_forms(types: &Value, parsed: &ParsedTypedData) -> Result<(), Refusal> {
+    let object = types.as_object().ok_or(Refusal::Inconsistent)?;
+    for (name, list) in object {
+        let ty = parsed
+            .types
+            .iter()
+            .find(|ty| ty.name == *name)
+            .ok_or(Refusal::Inconsistent)?;
+        let list = list.as_array().ok_or(Refusal::Inconsistent)?;
+        if list.len() != ty.fields.len() {
+            return Err(Refusal::Inconsistent);
+        }
+        for (written, field) in list.iter().zip(&ty.fields) {
+            let text = written.get("type").and_then(Value::as_str);
+            let text = text.ok_or(Refusal::Inconsistent)?;
+            let suffix = text
+                .find('[')
+                .and_then(|at| text.get(at..))
+                .unwrap_or_default();
+            if suffix != rebuilt(&field.dims) {
+                return Err(Refusal::NotCanonical);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The array suffix the device rebuilds from a descriptor's dimensions.
+fn rebuilt(dims: &[Option<u64>]) -> String {
+    dims.iter()
+        .map(|dim| match dim {
+            None => "[]".to_owned(),
+            Some(n) => format!("[{n}]"),
+        })
+        .collect()
 }
 
 /// `count + n`, refused past `budget`.

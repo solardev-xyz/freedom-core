@@ -19,7 +19,7 @@
 //!   after `6D00` answered the operation's first `E0 1A` and main said its
 //!   warning is shown (Q23, deviation `blind-typed-data`).
 //! - **The status mapping** ([`LedgerCode`]): `errors.js`'s table, main's
-//!   failures (deviation `no-device`), and the four new codes.
+//!   failures (deviation `no-device`), and the five new codes.
 //! - **The checks:** every signature recovered against the account and the
 //!   digest the user confirmed, `s` low (deviation `signature-check`); a
 //!   legacy transaction's `v` read from the bound chain ID, any width
@@ -27,7 +27,9 @@
 //! - **The bounds** ([`bounds`]): what a Ledger can't carry is refused
 //!   before the first APDU (deviations `device-bounds`, `empty-message`);
 //!   a name is ASCII, refused otherwise by 0002's identifier rule
-//!   (deviation `name-ascii`).
+//!   (deviation `name-ascii`); an array suffix written in a form the device
+//!   wouldn't rebuild from its descriptor (`uint8[02]`) is refused
+//!   `LEDGER_TYPE_NOT_CANONICAL`.
 //!
 //! The crate does no I/O and holds no key: deadlines, cancel and the
 //! device belong to the caller.

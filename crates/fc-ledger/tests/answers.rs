@@ -715,3 +715,81 @@ fn discovery_reads_one_to_twenty_paths_in_the_schemes() {
         Refusal::Path(_)
     ));
 }
+
+#[test]
+fn a_written_form_the_device_wouldnt_rebuild_is_refused_before_any_apdu() {
+    // M(uint8[02] v): the hash's encodeType keeps "[02]", the device
+    // rebuilds "[2]" from the descriptor. Refused at the operation's
+    // construction, so no APDU exists to send.
+    for (ty, value) in [
+        ("uint8[02]", json!([1, 2])),
+        ("uint8[2][02]", json!([[1, 2], [3, 4]])),
+        ("uint8[02][]", json!([[1, 2]])),
+        ("uint8[00]", json!([])),
+        ("uint[02]", json!([1, 2])),
+    ] {
+        let refused = typed(
+            json!({ "M": [{ "name": "v", "type": ty }] }),
+            json!({ "v": value }),
+        );
+        let refusal = refusal_of(refused);
+        assert_eq!(refusal, Refusal::NotCanonical, "{ty}");
+        assert_eq!(refusal.code(), Some(LedgerCode::TypeNotCanonical), "{ty}");
+        assert_eq!(
+            LedgerCode::TypeNotCanonical.as_str(),
+            "LEDGER_TYPE_NOT_CANONICAL"
+        );
+    }
+    // The canonical forms go through, the device's suffix in the descriptor.
+    for (ty, value, dims) in [
+        ("uint8[2]", json!([1, 2]), vec![1u8, 1, 2]),
+        ("uint8[]", json!([1, 2, 3]), vec![1, 0]),
+        ("uint8[0]", json!([]), vec![1, 1, 0]),
+        ("uint8[2][]", json!([[1, 2]]), vec![2, 1, 2, 0]),
+    ] {
+        let run = typed(
+            json!({ "M": [{ "name": "v", "type": ty }] }),
+            json!({ "v": value }),
+        )
+        .unwrap();
+        let mut descriptor = vec![0xc2, 0x01];
+        descriptor.extend_from_slice(&dims);
+        descriptor.extend_from_slice(&[1, b'v']);
+        assert!(
+            run.apdus
+                .iter()
+                .any(|a| a[..4] == [0xe0, 0x1a, 0x00, 0xff] && a[5..] == descriptor[..]),
+            "{ty}"
+        );
+    }
+}
+
+#[test]
+fn the_excluded_written_form_class_is_refused() {
+    // ledger.json's typed_data_excluded names the one 0002 case no Ledger
+    // case carries; every instance of it in signing.json, which the vault
+    // signs as ethers does, is refused for a Ledger.
+    let excluded = ledger()["typed_data_excluded"].as_array().unwrap();
+    assert_eq!(excluded.len(), 1);
+    assert_eq!(excluded[0]["id"], "array-suffix-written-form");
+    let signing = load("signing.json");
+    let mut refused = 0;
+    for case in signing["typedData"].as_array().unwrap() {
+        let id = case["id"].as_str().unwrap();
+        if !id.starts_with("array-suffix-written-form/") {
+            continue;
+        }
+        assert_eq!(
+            case["result"]["status"], "success",
+            "{id}: the vault signs it"
+        );
+        let typed = &case["typed_data"];
+        let hash: [u8; 32] = unhex(case["result"]["hash"].as_str().unwrap())
+            .try_into()
+            .unwrap();
+        let refusal = refusal_of(typed_operation(account_at("44'/60'/0'/0/0"), typed, &hash));
+        assert_eq!(refusal.code(), Some(LedgerCode::TypeNotCanonical), "{id}");
+        refused += 1;
+    }
+    assert_eq!(refused, 3);
+}

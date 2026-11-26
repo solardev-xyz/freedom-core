@@ -1,5 +1,5 @@
 //! The `LEDGER_*` codes an operation ends with (design 0016, API, "Errors"):
-//! today's twelve (`errors.js`), and the four new ones. Main shows
+//! today's twelve (`errors.js`), and the five new ones. Main shows
 //! `errors.js`'s text for a code; the core names only the code.
 
 /// A device's failure, `device_failed`'s `data.ledger`.
@@ -26,6 +26,9 @@ pub enum LedgerCode {
     TooLarge,
     /// An empty `personal_sign` (new, deviation `empty-message`).
     EmptyMessage,
+    /// Typed data that writes an array suffix the device wouldn't rebuild
+    /// from its descriptors, `uint8[02]` (new, `array-suffix-written-form`).
+    TypeNotCanonical,
 }
 
 impl LedgerCode {
@@ -47,6 +50,7 @@ impl LedgerCode {
             LedgerCode::Timeout => "LEDGER_TIMEOUT",
             LedgerCode::TooLarge => "LEDGER_TOO_LARGE",
             LedgerCode::EmptyMessage => "LEDGER_EMPTY_MESSAGE",
+            LedgerCode::TypeNotCanonical => "LEDGER_TYPE_NOT_CANONICAL",
         }
     }
 

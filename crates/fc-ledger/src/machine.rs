@@ -177,6 +177,11 @@ pub enum Refusal {
     /// Deviation `empty-message`.
     #[error("an empty message")]
     EmptyMessage,
+    /// A type written in a form the device wouldn't rebuild from its
+    /// descriptors (`array-suffix-written-form`): its encodeType, and so the
+    /// digest it signs, would differ from the confirmed hash.
+    #[error("a type written in a form a Ledger can't sign")]
+    NotCanonical,
     #[error("{0}")]
     Transaction(fc_evm::Error),
     /// 0002's refusal of the typed data, a name outside its identifiers
@@ -201,6 +206,7 @@ impl Refusal {
         match self {
             Refusal::TooLarge(_) => Some(LedgerCode::TooLarge),
             Refusal::EmptyMessage => Some(LedgerCode::EmptyMessage),
+            Refusal::NotCanonical => Some(LedgerCode::TypeNotCanonical),
             _ => None,
         }
     }
@@ -388,6 +394,7 @@ impl Operation {
         if parsed.hash != *confirmed {
             return Err(Refusal::HashMismatch);
         }
+        crate::typed::check_written_forms(types, &parsed)?;
         let hash = parsed.hash;
         let mut hashes = [0u8; 64];
         hashes[..32].copy_from_slice(&parsed.domain_separator);
