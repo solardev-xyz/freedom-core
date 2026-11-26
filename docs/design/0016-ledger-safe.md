@@ -260,7 +260,7 @@ The forms, exactly as `@x402/evm` 2.29.0 builds them (`exact/client/index.js`):
 
 ### The app
 
-- **Every signature** reads `B0 01` after the address check (deviation `app-check`: today only typed data reads it). The answer's format byte must be 1, and the name must be the Ethereum app's, `Ethereum` (LDG-3's device recordings pin it). Any other name ends the operation with `LEDGER_ETH_APP_NOT_OPEN`, as today's `6D00` and `6E00` do.
+- **Every signature** reads `B0 01` after the address check (deviation `app-check`: today only typed data reads it). The answer's format byte must be 1, and the name must be the Ethereum app's, `Ethereum` (LDG-3's device recordings pin it). Any other name ends the operation with `LEDGER_ETH_APP_NOT_OPEN`, as today's `6D00` and `6E00` do, and so does a format other than 1 (as built).
 - **The version** is kept for the operation's error report only. Field mode is detected by the device's own answer (`6D00`), as today, not by a version table that differs by model.
 
 ### Answers the core checks
@@ -269,6 +269,8 @@ The forms, exactly as `@x402/evm` 2.29.0 builds them (`exact/client/index.js`):
 - **Lengths:** an answer to an APDU that doesn't sign is exactly its status word, but for:
   - `E0 02`: `65 ‖ key (65 bytes) ‖ 40 ‖ address (40 ASCII hex)`. The address must be the one the key derives (keccak256 of its last 64 bytes; deviation `key-check`), and equal the record's;
   - `B0 01`: format, name and version, each within its length.
+
+  An answer the core can't read ends the operation with `LEDGER_UNKNOWN` (as built): another length, a key that isn't an uncompressed one, an address that isn't 40 hex digits, or one that isn't the address its key derives (`key-check`).
 - **A signature:** `v ‖ r ‖ s`, 65 bytes. For type 0, `v` is read as hw-app-eth's `getV` reads it: the device keeps one byte of `chainId'·2 + 35 + parity`, where `chainId'` is the chain ID's first four bytes (`utils.js:123–187`). Then:
   - **a transaction:** the core assembles the signed transaction, as hw-app-eth and ethers do, and recovers its sender, which must be the account;
   - **a message:** recovered over its EIP-191 hash;
@@ -289,8 +291,8 @@ The forms, exactly as `@x402/evm` 2.29.0 builds them (`exact/client/index.js`):
 
 ### Bounds
 
-- **Typed data a Ledger can't carry** is refused before the first APDU, with `LEDGER_TOO_LARGE` (deviation `device-bounds`): an array of more than 255 entries; a fixed array size or a number of dimensions above 255; a type or field name over 255 characters (which are bytes, since names are ASCII, [Encodings](#the-apdu-grammar)); a definition whose APDU would carry more than 255 bytes (a field's descriptor: its type byte, its size or its custom type's name with a length byte, its array dimensions, and its name with a length byte, so that a string field's name of 254 characters already makes 256 bytes, F-2); a value whose encoding is over 65,535 bytes; or more than 2,048 APDUs in all.
-- **APDUs per operation:** at most 2,048 (proposed), so a message is at most about 300 KiB and a transaction's data about 500 KiB on a Ledger. LDG-3 measures the time per APDU on each model, and replaces the number if needed.
+- **Typed data a Ledger can't carry** is refused before the first APDU, with `LEDGER_TOO_LARGE` (deviation `device-bounds`): an array of more than 255 entries; a fixed array size or a number of dimensions above 255; a type or field name over 255 characters (which are bytes, since names are ASCII, [Encodings](#the-apdu-grammar)); a definition whose APDU would carry more than 255 bytes (a field's descriptor: its type byte, its size or its custom type's name with a length byte, its array dimensions, and its name with a length byte, so that a string field's name of 254 characters already makes 256 bytes, F-2); a value whose encoding is over 65,535 bytes (its own bytes, as built: its 2-byte length can say no more); or more than 2,048 APDUs in all (the address check and `B0 01` among them, as built).
+- **APDUs per operation:** at most 2,048 (proposed), every APDU of the operation counted, the address check and `B0 01` included, so a message is at most about 300 KiB and a transaction's data about 500 KiB on a Ledger. LDG-3 measures the time per APDU on each model, and replaces the number if needed.
 - **Memory:** the core builds each APDU as it goes from the parsed request, which 0002's limits already bound. One APDU and one answer are in flight, at most 260 bytes each. An operation's state is at most 64 KiB beyond its request. Main holds one APDU and one answer.
 
 ### Accounts
@@ -445,6 +447,7 @@ From the pinned reference (AGENTS rule 5): the browser at an `integration/rust-c
 | `pending-atomic` | written in place; unreadable loads as `{}` (F-6) | atomic; unreadable renamed aside |
 | `name-ascii` | a non-ASCII type or field name is announced with its length in UTF-16 units (F-2) | refused before any APDU by 0002's identifier rule; a name is ASCII, and its prefix is its byte count |
 | `chain-id-width` | a chain ID of 2^53 or more: a type 2 fails before its first piece, `LEDGER_UNKNOWN`, and a type 0's `v` is refused, `LEDGER_BAD_SIGNATURE` (F-7) | signed, `v` read from the bound chain ID |
+| `no-device` | no Ledger attached, which hw-transport-node-hid reports as `TransportError("NoDevice")`, is `LEDGER_UNKNOWN` (`open-no-device-*`); node-hid's "cannot open device" is `LEDGER_DEVICE_NOT_FOUND` | main opens the device and reports a missing one as `{ failed: "not_found" }`, `LEDGER_DEVICE_NOT_FOUND`; its other failures as the lane has them: `busy` `LEDGER_BUSY`, `disconnected` `LEDGER_DISCONNECTED`, `unresponsive` (15 s) `LEDGER_UNRESPONSIVE`, `timeout` (5 minutes) `LEDGER_TIMEOUT` |
 | `safe-unverified` | the setup isn't read, and the nonce is one endpoint's | every read a signing or an execution rests on verified (a proof, or a quorum of m ≥ 2), else `safe_unverified` with nothing signed |
 
 Each case has a vector or a test. A vector records what the reference does; the core's expected answer comes from this table.
@@ -490,7 +493,7 @@ Once decided:
 - **Deviations:** `signature-check`, `blind-typed-data` and `address-from-device` describe today as it is; `device-bounds` adds the definition bound; `chain-id-width` is new (F-7).
 - **API:** `LEDGER_BAD_SIGNATURE` is today's code, so four codes are new.
 
-**2026-11-26, LDG-1 part 2** (`fc-ledger`): F-7 is filed upstream as LedgerHQ/ledger-live#25605 (hw-app-eth, still present on its default branch at 7.14.0); F-1 notes that what #1063 still takes is recorded in a comment on freedom-browser#1063.
+**2026-11-26, LDG-1 part 2** (`fc-ledger`): F-7 is filed upstream as LedgerHQ/ledger-live#25605 (hw-app-eth, still present on its default branch at 7.14.0); F-1 notes that what #1063 still takes is recorded in a comment on freedom-browser#1063. The coordinator's decisions on `fc-ledger`'s open points (2026-11-26): a missing device becomes the deviation `no-device` (its row; `open-no-device-*` marked through the generator); as-built details recorded where they belong: an answer the core can't read, an address that isn't its key's among them, ends `LEDGER_UNKNOWN` (*Answers the core checks*); a `B0 01` format other than 1 is `LEDGER_ETH_APP_NOT_OPEN` (*The app*); a value's bound counts its own bytes, not its 2-byte length, and the 2,048-APDU bound counts the address check and `B0 01` (*Bounds*).
 
 ## Options weighed
 
