@@ -193,6 +193,9 @@ fc-naming = { path = "../fc-naming" }
 # (design 0013).
 fc-profile = { path = "../fc-profile" }
 fc-protocol = { path = "../fc-protocol" }
+# The Safe's setup reads, their decoders and the setup check (design 0016,
+# SAFE-2): the chain thread makes the reads, fc-safe judges their answers.
+fc-safe = { path = "../fc-safe" }
 # The sealed release of the Radicle node key (design 0008), and the key
 # store's answers, sealed to each request's reply key (design 0013).
 fc-seal = { path = "../fc-seal" }
