@@ -75,6 +75,7 @@ use tokio::runtime::Handle;
 use crate::budget::{Budgets, Fixed};
 use crate::nat64::{Discovery, Lease};
 use crate::network;
+use crate::oom;
 use crate::params::{self, Start, Store};
 use crate::requests::Requests;
 use crate::stats::GatewayCounters;
@@ -562,7 +563,9 @@ impl Instances {
             (Kind::Persistent { store }, Store::Disk { .. }) => {
                 SqliteBlockStore::open_with(store, fixed.options)
             }
-            (_, Store::Memory { .. }) => SqliteBlockStore::in_memory_with(fixed.options),
+            (_, Store::Memory { .. }) => {
+                SqliteBlockStore::in_memory_with(testhooks::memory_store(fixed.options))
+            }
             // Refused at admission.
             (Kind::Ephemeral, Store::Disk { .. }) => {
                 return Err(ErrorBody::new(
@@ -571,7 +574,9 @@ impl Instances {
                 ));
             }
         };
-        let store = store.map_err(|error| {
+        let store = store.and_then(testhooks::store_opened).map_err(|error| {
+            // Never a reply: exit 71 (0007, "Errors"; `oom.rs`).
+            oom::exit_on(&error, "store_open");
             log::error(
                 "the store won't open",
                 json!({ "instance": start.instance, "error": store_error_kind(&error) }),
@@ -972,8 +977,10 @@ fn stopped() -> ErrorBody {
     ErrorBody::new(ErrorCode::Stopped, "the instance was stopped")
 }
 
-/// A fixed name for a store error: its text can carry a path.
-fn store_error_kind(error: &StoreError) -> &'static str {
+/// A fixed name for a store error: its text can carry a path. Out of memory
+/// is never a reply's: the process ends with exit 71 for it, and logs this
+/// name (`oom.rs`).
+pub(crate) fn store_error_kind(error: &StoreError) -> &'static str {
     match error {
         StoreError::OutOfMemory(_) => "out_of_memory",
         StoreError::Sqlite(_) => "sqlite",

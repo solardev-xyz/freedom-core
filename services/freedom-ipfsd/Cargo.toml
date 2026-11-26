@@ -111,8 +111,15 @@ name = "nat64_confined"
 harness = false
 
 # The core's workspace lints, copied: workspace lints don't cross workspaces.
+# Except `unsafe_code`, which is `deny` here, as in freedom-radicled, not
+# `forbid` (AGENTS.md rule 6): the one unsafe call,
+# `freedom_ipfs_store::fail_stop_on_oom` first thing in src/main.rs, carries
+# its own reviewed `#[allow(unsafe_code)]` and a `SAFETY` comment, and every
+# other unsafe block still fails to compile. tests/unsafe_code.rs fails if
+# any other line lifts the lint.
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
@@ -124,6 +131,8 @@ unimplemented = "warn"
 dbg_macro = "warn"
 print_stdout = "warn"
 print_stderr = "warn"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
 
 # Dependencies carry no debug info in dev and test builds: freedom-ipfs's
 # graph is large, and its debug info is most of a target directory.

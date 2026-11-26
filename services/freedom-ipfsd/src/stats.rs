@@ -20,7 +20,9 @@
 //! - **`progress`:** in the persistent process, the instance's recorder's
 //!   snapshot, cut to fit the reply's frame ([`crate::progress`]); `null`
 //!   in the ephemeral process, which records none.
-//! - **`store`:** `block_count` and `total_bytes`.
+//! - **`store`:** `block_count` and `total_bytes`, or `null` if the store
+//!   can't say. Out of memory is no `null`: the process ends with exit 71
+//!   (`oom.rs`).
 //! - **`budget`:** each budget's use and limit: the memory budget, the
 //!   retrieval admission's four limits, the request admission, the writer's
 //!   data queue, and the instance's background queue.
@@ -59,7 +61,7 @@ use crate::budget::Budgets;
 use crate::instances::Instances;
 use crate::network::NetworkPolicy;
 use crate::requests::{MAX_ADMITTED, Requests};
-use crate::{params, progress, testhooks};
+use crate::{oom, params, progress, testhooks};
 
 /// `ipfs.stats`'s deadline (0007, "Methods").
 pub const STATS_DEADLINE: Duration = Duration::from_secs(5);
@@ -376,11 +378,18 @@ impl Stats {
             }
             stats.ran.fetch_add(1, Ordering::SeqCst);
             with_kind(CONTROL, || {
-                let store = match (store.block_count(), store.total_bytes()) {
-                    (Ok(block_count), Ok(total_bytes)) => {
+                let figures = store
+                    .block_count()
+                    .and_then(|block_count| Ok((block_count, store.total_bytes()?)));
+                let store = match testhooks::store_figures(figures) {
+                    Ok((block_count, total_bytes)) => {
                         json!({ "block_count": block_count, "total_bytes": total_bytes })
                     }
-                    _ => Value::Null,
+                    Err(error) => {
+                        // Never a reply: exit 71 (0007, "Errors"; `oom.rs`).
+                        oom::exit_on(&error, "stats");
+                        Value::Null
+                    }
                 };
                 // Here, not on the reader thread: a snapshot copies what
                 // the recorder holds.
