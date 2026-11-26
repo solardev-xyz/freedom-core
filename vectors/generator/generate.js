@@ -26,6 +26,7 @@ const { buildRadicleImport } = require('./radicle-import');
 const { buildApprovals } = require('./approvals');
 const { buildProfiles } = require('./profiles');
 const { buildEip1193 } = require('./eip1193');
+const { buildSafe } = require('./safe');
 const { buildJournal } = require('./journal');
 const { buildStores } = require('./stores');
 const { buildSqlite } = require('./sqlite');
@@ -241,6 +242,14 @@ function startSwarm(swarm) {
     worker.once('exit', (code) => reject(new Error(`the swarm vectors' worker exited (${code}) without an answer`)));
   });
 }
+
+// The Safe vectors' reference (design 0016, SAFE-1): the swarm reference's
+// checkout, whose src/main/wallet/safe/ has the pinned deployment (#1066)
+// and the core's pending SafeTx store (PRF-6(d)). Its generator (safe.js)
+// loads those modules whole over the checkout's installed protocol-kit
+// 8.0.11, safe-deployments 1.37.66 and ethers 6.17.0, refusing any other
+// version, which meta names.
+const SAFE_REFERENCE_COMMIT = SWARM_REFERENCE_COMMIT;
 
 function loadReference(checkout) {
   const commit = checkedCommit(checkout, REFERENCE_COMMIT, 'reference');
@@ -796,6 +805,14 @@ async function main() {
     ['sqlite.json', () => buildSqlite(stores.checkout, reference.checkout, {
       ...stores.meta,
       packages: { 'better-sqlite3': packageVersion(createRequire(path.join(reference.checkout, 'package.json')), 'better-sqlite3') },
+    })],
+    // Design 0016's Safe (SAFE-1): the Safe reference's src/main/wallet/safe/
+    // over its own protocol-kit and safe-deployments and the browser's test
+    // chain, keys.json's accounts as the owners.
+    ['safe.json', () => buildSafe(swarmReference.checkout, deterministic['keys.json'], {
+      freedomBrowserCommit: checkedCommit(swarmReference.checkout, SAFE_REFERENCE_COMMIT, 'safe reference'),
+      nodeVersion: process.version,
+      generator: 'vectors/generator/generate.js',
     })],
     // Design 0014's Colibri adapter (COL-1): the colibri reference's worker
     // service and checkpoint check over the real c4w.wasm, every call into
