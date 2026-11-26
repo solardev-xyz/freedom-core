@@ -1808,13 +1808,9 @@ fn a_detach_waits_for_a_check_in_flight() {
     );
     set_up(&mut main, &dir, &connected(&[SITE]), T0);
     let check_id = main.own_request("swarm.manifest", &check(), "shell");
-    let fetch = loop {
-        let message = main.recv();
-        if message["method"] == "shell.swarm_manifest" {
-            break message["id"].as_u64().unwrap();
-        }
-        panic!("before the fetch: {message}");
-    };
+    let message = main.recv();
+    assert_eq!(message["method"], "shell.swarm_manifest", "{message}");
+    let fetch = message["id"].as_u64().unwrap();
     let revoke = json!({ "store": "swarm", "key": SITE, "what": { "flag": "publish" } });
     approval(&mut main, "approval.revoke", revoke, chrome());
     let get = main.own_request(
