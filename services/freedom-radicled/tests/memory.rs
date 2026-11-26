@@ -156,6 +156,26 @@ fn ended(radicled: &mut Radicled) -> (ExitStatus, String) {
 /// Whether `status` is `std::process::abort`'s: `SIGABRT` on Unix, and
 /// `__fastfail`'s status (or the CRT's 3) on Windows.
 #[cfg(any(target_os = "linux", windows))]
+/// The log with the service's JSON lines taken out. Rust's allocator writes
+/// its abort message in pieces, and the log's writer can land a whole line
+/// between two of them ("memory allocation of N{...}\n bytes failed").
+fn without_json_lines(log: &str) -> String {
+    let mut out = String::new();
+    let mut rest = log;
+    while let Some(start) = rest.find("{\"") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("}\n") {
+            Some(end) => rest = &rest[start + end + 2..],
+            None => {
+                rest = &rest[start..];
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn aborted(status: &ExitStatus) -> bool {
     #[cfg(unix)]
     {
@@ -196,7 +216,7 @@ fn a_rust_allocation_past_the_cap_aborts_the_process() {
     let (status, log) = ended(&mut radicled);
     assert!(aborted(&status), "{status:?}\n{log}");
     assert!(
-        log.contains(&format!("memory allocation of {PAST_CAP} bytes failed")),
+        without_json_lines(&log).contains(&format!("memory allocation of {PAST_CAP} bytes failed")),
         "{log}"
     );
     // The hook's own lines go through the log's queue, which the abort
