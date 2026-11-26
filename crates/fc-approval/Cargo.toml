@@ -19,6 +19,12 @@ fc-evm = { path = "../fc-evm" }
 # lone surrogates, JS's key order (design 0012, "The files"). fc-evm
 # already links it.
 fc-json = { path = "../fc-json" }
+# A Safe approval's SafeTx and SafeMessage hashes and execTransaction's
+# calldata, on any chain the binding allows: the core's one implementation
+# of each, which SAFE-2 builds Safes with (design 0016, SAFE-2's D5). It
+# links fc-evm, fc-naming and serde_json, all logic crates the core
+# already links.
+fc-safe = { path = "../fc-safe" }
 # Token bytes come from the caller's RNG (AGENTS rule 2).
 rand_core = "0.10"
 # preserve_order: the typed-data view lists `types`' names in the order the
