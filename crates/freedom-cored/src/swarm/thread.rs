@@ -44,7 +44,11 @@
 //!   first, then the bodies' heads and bytes, within main's windows: 4
 //!   bodies' 128 KiB) within [`transport::MAX_QUEUED_SWARM_CONTROL_BYTES`],
 //!   ahead of its large answers within [`transport::MAX_QUEUED_SWARM_BYTES`]. What waits for
-//!   room waits here; the allowances and the gate wake the thread. Each
+//!   room waits here; the allowances and the gate wake the thread. While
+//!   an answer waits, the thread takes no new request: each waits with its
+//!   frame's credit, so the reader stops reading main once its credits are
+//!   spent, as the vault loop's backpressure (design 0001;
+//!   [`Thread::accept`]). Each
 //!   answer's hold carries a notice ([`Written`]), so a request's base
 //!   charge goes only once the writer has written its answer (design 0015,
 //!   "The swarm thread's memory").
@@ -98,8 +102,8 @@ use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
 use super::engine::{
-    Answer, Bounds, Engine, Fault, GrantWritten, GrantsWriter, Io, Ms, NAME_TAG, Outgoing, Sent,
-    Shared, VaultAnswer, VaultAsk,
+    Answer, Bounds, Cancelled, Engine, Fault, GrantWritten, GrantsWriter, Io, Ms, NAME_TAG,
+    Outgoing, Sent, Shared, VaultAnswer, VaultAsk,
 };
 use super::stores::{Files, Place};
 use super::{lane, stream, wire};
@@ -147,6 +151,8 @@ pub enum In {
         id: u64,
         params: Option<Box<RawValue>>,
         page: Option<PageContext>,
+        /// Set by the event loop as it reads main's cancel of the request.
+        cancelled: Cancelled,
     },
     /// `swarm.body` `id`, its params as main sent them: its stream's route
     /// is the thread's from now on (D4).
@@ -163,6 +169,8 @@ pub enum In {
         method: &'static str,
         params: Option<Box<RawValue>>,
         caller: CallerKind,
+        /// Set by the event loop as it reads main's cancel of the request.
+        cancelled: Cancelled,
     },
     /// A stream's entry of frames, coalesced under the reader's stream cap:
     /// taken here, and charged until handled.
@@ -325,6 +333,8 @@ pub fn spawn(start: Spawn) -> std::io::Result<Handle> {
                 duplex: Duplex::swarm(WRITER_DATA_CAP),
                 made: None,
                 unpushed: BTreeMap::new(),
+                #[cfg(feature = "testhooks")]
+                most_waiting: 0,
                 hashing: Some(hashing),
                 lane: None,
             };
@@ -348,6 +358,7 @@ pub fn spawn(start: Spawn) -> std::io::Result<Handle> {
                 ),
                 wire,
                 started: Instant::now(),
+                held: VecDeque::new(),
                 #[cfg(feature = "testhooks")]
                 parked: VecDeque::new(),
                 #[cfg(feature = "testhooks")]
@@ -405,12 +416,13 @@ fn run(rx: &Receiver<Mail>, mut thread: Thread) -> Stop {
             wait.min(Duration::from_millis(10))
         };
         let flow = match rx.recv_timeout(wait) {
-            // The frame's credit goes once its message is handled.
-            Ok((message, _credit)) => thread.handle(message),
+            // The frame's credit goes once its message is handled, or with
+            // it once a held request is.
+            Ok(mail) => thread.accept(mail),
             Err(RecvTimeoutError::Timeout) => Ok(()),
             Err(RecvTimeoutError::Disconnected) => Err(Stop::Gone),
         };
-        if let Err(stop) = flow {
+        if let Err(stop) = flow.and_then(|()| thread.release_held()) {
             break stop;
         }
     };
@@ -422,6 +434,9 @@ struct Thread {
     engine: Engine,
     wire: Wire,
     started: Instant,
+    /// New requests held, with their frames' credit, while answers wait for
+    /// the writer (and what must stay behind them): see [`Thread::accept`].
+    held: VecDeque<Mail>,
     /// Vault answers the test hooks hold back (`FREEDOM_CORED_TEST_SWARM_HOLD`,
     /// D11), in order, until the hook's release.
     #[cfg(feature = "testhooks")]
@@ -498,12 +513,64 @@ impl Thread {
         self.wire.flush()
     }
 
+    /// A message from the event loop: handled now, or held. While answers
+    /// of the thread's wait for the writer past its allowances, it takes no
+    /// new request (a page's `swarm.request`, main's own methods and the
+    /// chrome's): each waits here with its frame's credit, so once the
+    /// reader's credits are spent it stops reading main, which is
+    /// backpressure on main, as the vault loop's own (design 0001). The
+    /// answers already made, and those of the work in flight, are all that
+    /// waits. What must stay behind a held request waits behind it too: a
+    /// cancel for it, and the test hooks' requests while any request is
+    /// held. Everything else (main's answers, streams, bodies, the vault's
+    /// and naming's answers, room) is handled at once.
+    fn accept(&mut self, mail: Mail) -> Flow {
+        if self.holds(&mail.0) {
+            self.held.push_back(mail);
+            return Ok(());
+        }
+        let (message, _credit) = mail;
+        self.handle(message)
+    }
+
+    fn holds(&self, message: &In) -> bool {
+        match message {
+            In::Request { .. } | In::Own { .. } => {
+                !self.held.is_empty() || self.wire.answers_waiting()
+            }
+            In::Cancel { id } => self.held.iter().any(|(held, _)| match held {
+                In::Request { id: request, .. } | In::Own { id: request, .. } => request == id,
+                _ => false,
+            }),
+            #[cfg(feature = "testhooks")]
+            In::World { .. } | In::FeedChange { .. } => !self.held.is_empty(),
+            _ => false,
+        }
+    }
+
+    /// The held messages, in order, while no answer waits for the writer.
+    fn release_held(&mut self) -> Flow {
+        while !self.wire.answers_waiting() {
+            let Some((message, _credit)) = self.held.pop_front() else {
+                break;
+            };
+            self.handle(message)?;
+        }
+        Ok(())
+    }
+
     fn handle(&mut self, message: In) -> Flow {
         let now = self.now();
         let flow = match message {
-            In::Request { id, params, page } => {
+            In::Request {
+                id,
+                params,
+                page,
+                cancelled,
+            } => {
                 let params = wire::request_params(params.as_deref().map(RawValue::get));
-                self.engine.request(&mut self.wire, now, id, params, page)
+                self.engine
+                    .request_cancellable(&mut self.wire, now, id, params, page, cancelled)
             }
             In::Body { id, params } => {
                 self.wire
@@ -533,10 +600,18 @@ impl Thread {
                 method,
                 params,
                 caller,
+                cancelled,
             } => {
                 let params = params.as_deref().map(RawValue::get);
                 match ShellMethod::from_name(method) {
-                    Some(shell) => self.engine.shell(&mut self.wire, now, id, shell, params),
+                    Some(shell) => self.engine.shell_cancellable(
+                        &mut self.wire,
+                        now,
+                        id,
+                        shell,
+                        params,
+                        cancelled,
+                    ),
                     None => {
                         // The chrome's or main's: an op only main makes is
                         // refused to the chrome (D7).
@@ -700,7 +775,9 @@ impl Thread {
     /// store again from their files and opens the history again, as a start
     /// does. It answers `{ memory,
     /// requests, streams }`: the pool's charges, the requests the thread
-    /// holds and the incoming streams' slots taken, as they stand; with
+    /// holds and the incoming streams' slots taken, as they stand, and
+    /// `answers_waiting_most`, the most bytes of answers that have waited
+    /// for the writer at once; with
     /// `mining: true`, also `mining: { waiting, running, off, lane, batches
     /// }`, the lane's.
     #[cfg(feature = "testhooks")]
@@ -790,6 +867,7 @@ impl Thread {
             "memory": self.engine.memory_used(),
             "requests": self.engine.requests(),
             "streams": self.engine.streams_held(),
+            "answers_waiting_most": self.wire.most_waiting,
         });
         if world.mining {
             held["mining"] = self.engine.mining_mut().state();
@@ -903,6 +981,10 @@ struct Wire {
     unpushed: BTreeMap<u64, Unpushed>,
     /// `None` once stopped.
     hashing: Option<SwarmHashing>,
+    /// The most bytes of answers that have waited here for the writer at
+    /// once, for the test hooks (`test.swarm_world`'s `answers_waiting_most`).
+    #[cfg(feature = "testhooks")]
+    most_waiting: usize,
 }
 
 /// A body's bytes the duplex's sender didn't take yet, and whether its end
@@ -1154,6 +1236,11 @@ impl Io for Wire {
             }
             Some(reply) => self.large.push_back((reply, Some(id))),
             None => {}
+        }
+        #[cfg(feature = "testhooks")]
+        {
+            let waiting = self.waiting_bytes();
+            self.most_waiting = self.most_waiting.max(waiting);
         }
     }
 
@@ -1424,6 +1511,25 @@ impl GrantsWriter for GrantsFile {
 }
 
 impl Wire {
+    /// Whether an answer of the thread's waits here for room in the
+    /// writer's allowances (an event queued behind one waits with it).
+    fn answers_waiting(&self) -> bool {
+        !self.large.is_empty() || self.small.iter().any(|(_, answer)| answer.is_some())
+    }
+
+    /// The bytes of the answers waiting here.
+    #[cfg(feature = "testhooks")]
+    fn waiting_bytes(&self) -> usize {
+        let small: usize = self
+            .small
+            .iter()
+            .filter(|(_, answer)| answer.is_some())
+            .map(|(frame, _)| frame.len())
+            .sum();
+        let large: usize = self.large.iter().map(|(reply, _)| reply.len()).sum();
+        small + large
+    }
+
     /// The stores' files: the engine asks for a write only once they have
     /// moved (its door), so their absence is the core's own bug, answered
     /// as a failed write.

@@ -361,7 +361,7 @@ pub enum VaultAsk {
     /// [`Need::Sign`] for main's own SOC (`swarm.feed`'s update: no page,
     /// so no page decision), signed only with the Bee wallet key (SW-1:
     /// `swarm.feed` takes only that key). Answered [`Event::Signed`].
-    OwnSign(Box<SignSoc>),
+    OwnSign(Box<OwnSignAsk>),
     /// A store op's [`ops::Need::Accounts`]: the user's accounts as
     /// `accounts.list` reads them for main (`getDerivedWallets`), answered
     /// [`VaultAnswer::Accounts`].
@@ -386,6 +386,66 @@ pub struct SignAsk {
     /// The site holds its feed grant in the keeper's store as the
     /// signature is asked (`hasFeedGrant`).
     pub feed_grant: bool,
+    /// Its request's cancellation: the vault signs nothing once it is set.
+    pub cancelled: Cancelled,
+}
+
+/// Main's own SOC to sign (`swarm.feed`'s update), and its request's
+/// cancellation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OwnSignAsk {
+    pub soc: SignSoc,
+    pub cancelled: Cancelled,
+}
+
+/// A request's cancellation (design 0015, "Deadlines and cancel": nothing
+/// is signed after the cancel). The event loop sets it as it reads main's
+/// cancel of the request, before it handles any vault ask that came behind
+/// that cancel, and the engine as the request answers; the vault checks it
+/// just before it signs, and signs nothing once it is set. A vault ask
+/// already on the loop's queue when the swarm thread hears of the cancel
+/// is so refused, not signed and dropped.
+#[derive(Debug, Clone, Default)]
+pub struct Cancelled(Arc<std::sync::atomic::AtomicBool>);
+
+impl Cancelled {
+    pub fn set(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_set(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The event loop's hold on it, which doesn't keep it alive: it goes
+    /// with its request (and the vault asks that carry it).
+    pub fn watch(&self) -> CancelWatch {
+        CancelWatch(Arc::downgrade(&self.0))
+    }
+}
+
+impl PartialEq for Cancelled {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// The event loop's side of a [`Cancelled`].
+#[derive(Debug, Clone)]
+pub struct CancelWatch(std::sync::Weak<std::sync::atomic::AtomicBool>);
+
+impl CancelWatch {
+    /// Main cancelled the request: set, if the request is still there.
+    pub fn set(&self) {
+        if let Some(flag) = self.0.upgrade() {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Whether its request has gone.
+    pub fn gone(&self) -> bool {
+        self.0.strong_count() == 0
+    }
 }
 
 /// What the swarm thread holds that every request reads (design 0015, "In
@@ -696,6 +756,9 @@ struct Slot {
     bound: Deadline,
     /// When it came, for D13's bound on a wait for a place or its base.
     arrived: Ms,
+    /// Its cancellation, which its vault asks carry: set by the event loop
+    /// at main's cancel, and here once it has answered.
+    cancelled: Cancelled,
     /// The page's name binding (D1), when its transport key binds its key,
     /// and the document it binds.
     binding: Option<(Binding, Document)>,
@@ -983,6 +1046,7 @@ impl Engine {
 
     /// Main's `swarm.request` `id` from page `page`, its params read (or
     /// why not).
+    #[cfg(test)]
     pub fn request(
         &mut self,
         io: &mut impl Io,
@@ -990,6 +1054,20 @@ impl Engine {
         id: u64,
         params: Result<Params, &'static str>,
         page: Option<PageContext>,
+    ) -> Result<(), Fault> {
+        self.request_cancellable(io, now, id, params, page, Cancelled::default())
+    }
+
+    /// [`Engine::request`], with the cancellation the event loop sets as
+    /// it reads main's cancel of it.
+    pub fn request_cancellable(
+        &mut self,
+        io: &mut impl Io,
+        now: Ms,
+        id: u64,
+        params: Result<Params, &'static str>,
+        page: Option<PageContext>,
+        cancelled: Cancelled,
     ) -> Result<(), Fault> {
         self.deadlines(io, now)?;
         if !self.grants_moved {
@@ -1068,6 +1146,7 @@ impl Engine {
                 page_json,
                 bound: Deadline::Swarm,
                 arrived: now,
+                cancelled: cancelled.clone(),
                 binding,
                 deadline: now.saturating_add(total),
                 asks: BTreeMap::new(),
@@ -1093,6 +1172,7 @@ impl Engine {
     /// It takes a place in the admission gate, past which it is the
     /// protocol error `busy` ("Budgets"); its deadline is its row's (D5):
     /// `swarm`'s 300 s, or for `swarm.publish` none, only D13's bounds.
+    #[cfg(test)]
     pub fn shell(
         &mut self,
         io: &mut impl Io,
@@ -1100,6 +1180,20 @@ impl Engine {
         id: u64,
         method: ShellMethod,
         params: Option<&str>,
+    ) -> Result<(), Fault> {
+        self.shell_cancellable(io, now, id, method, params, Cancelled::default())
+    }
+
+    /// [`Engine::shell`], with the cancellation the event loop sets as it
+    /// reads main's cancel of it.
+    pub fn shell_cancellable(
+        &mut self,
+        io: &mut impl Io,
+        now: Ms,
+        id: u64,
+        method: ShellMethod,
+        params: Option<&str>,
+        cancelled: Cancelled,
     ) -> Result<(), Fault> {
         self.deadlines(io, now)?;
         let parsed = params
@@ -1143,6 +1237,7 @@ impl Engine {
                 page_json: String::new(),
                 bound,
                 arrived: now,
+                cancelled: cancelled.clone(),
                 binding: None,
                 deadline,
                 asks: BTreeMap::new(),
@@ -1695,6 +1790,7 @@ impl Engine {
         let withdraw = matches!(slot.phase, Phase::Base(_)) && slot.base == 0;
         slot.phase = Phase::Done;
         slot.answered = true;
+        slot.cancelled.set();
         if slot.placed {
             slot.placed = false;
             self.running = self.running.saturating_sub(1);
@@ -1829,6 +1925,8 @@ impl Engine {
         {
             let answer = answer?;
             slot.answered = true;
+            // Answered: its vault asks still on the loop sign nothing.
+            slot.cancelled.set();
             io.answer(id, answer);
             // Its place, its topics and its upload's turn go with its
             // answer; what it still has open keeps its own charges.
@@ -1990,7 +2088,11 @@ impl Engine {
             Need::Sign(soc) if slot.page.is_none() => {
                 self.next_vault += 1;
                 let tag = self.next_vault;
-                io.vault(tag, VaultAsk::OwnSign(Box::new(soc.clone())));
+                let ask = OwnSignAsk {
+                    soc: soc.clone(),
+                    cancelled: slot.cancelled.clone(),
+                };
+                io.vault(tag, VaultAsk::OwnSign(Box::new(ask)));
                 self.vaults.insert(tag, (id, ask_id));
                 Stage::Vault(tag)
             }
@@ -2010,6 +2112,7 @@ impl Engine {
                     soc: soc.clone(),
                     key: origin.to_owned(),
                     feed_grant: self.shared.keeper.store().has_feed_grant(&key),
+                    cancelled: slot.cancelled.clone(),
                 };
                 self.next_vault += 1;
                 let tag = self.next_vault;
@@ -2434,18 +2537,22 @@ fn stores_not_moved() -> Answer {
     )
 }
 
+/// The most bytes of an `invalid_argument`'s text from a reader's own.
+pub(crate) const MOST_INVALID_TEXT: usize = 256;
+
 /// An `invalid_argument`'s text from a reader's own (which can name a
-/// member main sent), at most 256 bytes.
+/// member main sent), at most [`MOST_INVALID_TEXT`] bytes: past it, cut at
+/// a character's boundary, its ellipsis within the bound.
 fn bounded_text(text: &str) -> String {
-    const MOST: usize = 256;
-    if text.len() <= MOST {
+    const ELLIPSIS: &str = "…";
+    if text.len() <= MOST_INVALID_TEXT {
         return text.to_owned();
     }
-    let mut end = MOST;
+    let mut end = MOST_INVALID_TEXT - ELLIPSIS.len();
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}…", &text[..end])
+    format!("{}{ELLIPSIS}", &text[..end])
 }
 
 /// A machine's protocol outcome's category (D5: it ends the connection).

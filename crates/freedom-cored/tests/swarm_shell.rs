@@ -2173,3 +2173,166 @@ fn play_concurrent(case: &JsValue) {
     let after = field(case, "after");
     check_shell_files(&main, &format!("{id}: after"), after);
 }
+
+/// Answers waiting for the writer hold new requests (design 0001's
+/// backpressure, as the vault loop's): main pipelines `get-all-origins` (no
+/// place in the gate) over a feed store of a few MiB while it doesn't
+/// read; the thread answers until the writer's allowances are full, then
+/// takes no new request while an answer waits, each keeping its frame's
+/// credit, so the answers that wait for the writer at once stay one
+/// answer's bytes, not every pipelined call's.
+#[test]
+fn answers_waiting_for_the_writer_hold_new_requests() {
+    let mut main = swarm_world::main();
+    main.world(json!({ "reset": true, "clock": T0 }));
+    let mut origins = serde_json::Map::new();
+    const SITES: usize = 9000;
+    for i in 0..SITES {
+        origins.insert(
+            format!("https://site-{i}.example"),
+            json!({
+                "activeIdentityId": "bee-wallet",
+                "identities": { "bee-wallet": {
+                    "id": "bee-wallet", "mode": "bee-wallet", "publisherKeyIndex": null,
+                    "walletIndex": null, "label": "Bee wallet identity", "createdAt": 1, "lastUsedAt": null,
+                } },
+                "feedGranted": true, "grantedAt": 1, "feeds": {},
+            }),
+        );
+    }
+    let text = json!({ "version": 2, "nextPublisherKeyIndex": 0, "origins": origins }).to_string();
+    assert!(text.len() > 1 << 20, "{} bytes", text.len());
+    std::fs::write(main.core.grant_root.join(feeds::FILE_NAME), &text).unwrap();
+    main.world(json!({ "reload": true }));
+    let calls = 24;
+    main.core.pause_reading();
+    let ids: Vec<u64> = (0..calls)
+        .map(|_| {
+            main.own_request(
+                "swarm.identities",
+                &op_params("get-all-origins", &[]),
+                "chrome",
+            )
+        })
+        .collect();
+    // Time for an unbounded thread to answer every one.
+    std::thread::sleep(std::time::Duration::from_secs(6));
+    main.core.resume_reading();
+    let mut largest = 0;
+    for id in &ids {
+        let message = main.recv();
+        assert_eq!(message["id"], *id, "in order");
+        let size = message.to_string().len();
+        largest = largest.max(size);
+        let Got::Value(JsValue::Array(ref sites)) = got(&message) else {
+            panic!("an answer")
+        };
+        assert_eq!(sites.len(), SITES);
+    }
+    let held = main.world(json!({}));
+    let most = held["answers_waiting_most"].as_u64().unwrap() as usize;
+    // The answers are over twice the writer's 32 MiB allowance: unbounded,
+    // over 32 MiB of them would wait at once.
+    assert!(
+        largest * calls > 2 * (32 << 20),
+        "{largest} bytes an answer"
+    );
+    assert!(
+        most <= largest + (64 << 10),
+        "{most} bytes waited at once, an answer is {largest}"
+    );
+    main.settled();
+}
+
+/// Nothing is signed after main's cancel (design 0015, "Deadlines and
+/// cancel"): `swarm.feed`'s update reaches its signature, whose ask waits
+/// on the event loop (the test hooks' `ask` hold) as one queued behind a
+/// cancel does; main cancels; the ask then reaches the vault, which signs
+/// nothing for a cancelled request.
+#[test]
+fn a_cancel_before_a_queued_signature_signs_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("parked");
+    let release = dir.path().join("release");
+    let signs = dir.path().join("signs");
+    let hold = format!("ask={}={}", marker.display(), release.display());
+    let mut main = swarm_world::main_with(
+        &["swarm"],
+        &[
+            ("FREEDOM_CORED_TEST_SWARM_HOLD", hold.as_str()),
+            (
+                "FREEDOM_CORED_TEST_SWARM_SIGN_MARKER",
+                signs.to_str().unwrap(),
+            ),
+        ],
+    );
+    main.import_vault();
+    main.world(json!({ "reset": true, "clock": T0 }));
+    let update = json!({
+        "op": "update", "key": { "kind": "bee_wallet" }, "topic": "77".repeat(32),
+        "reference": "ef".repeat(32), "batch": "a1".repeat(32),
+    });
+    let request = main.own_request("swarm.feed", &update, "shell");
+    let call = loop {
+        let message = main.recv();
+        if message["type"] == "request" && message["method"] == "shell.swarm_api" {
+            break message;
+        }
+        panic!("{message}");
+    };
+    assert_eq!(call["params"]["form"], "feed_head");
+    main.answer(
+        call["id"].as_u64().unwrap(),
+        json!({
+            "status": 200, "status_text": "OK",
+            "headers": [["swarm-feed-index", "0000000000000002"], ["swarm-feed-index-next", "0000000000000003"]],
+            "body_base64": "",
+        }),
+    );
+    // The signature's ask waits on the loop; then main's cancel.
+    while std::fs::read_to_string(&marker)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    main.core.send(&json!({ "type": "cancel", "id": request }));
+    let reply = main.core.response(request);
+    assert_eq!(reply["error"]["code"], "cancelled", "{reply}");
+    std::fs::write(&release, "").unwrap();
+    // The ask reaches the vault, which refuses it; the thread drops the
+    // refusal; nothing was signed.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    main.settled();
+    assert_eq!(std::fs::read_to_string(&signs).unwrap_or_default(), "");
+    // Without a cancel, the same update signs once.
+    let request = main.own_request("swarm.feed", &update, "shell");
+    let call = main.recv();
+    assert_eq!(call["params"]["form"], "feed_head");
+    main.answer(
+        call["id"].as_u64().unwrap(),
+        json!({
+            "status": 200, "status_text": "OK",
+            "headers": [["swarm-feed-index", "0000000000000002"], ["swarm-feed-index-next", "0000000000000003"]],
+            "body_base64": "",
+        }),
+    );
+    let soc = main.recv();
+    assert_eq!(soc["params"]["form"], "soc_up", "{soc}");
+    let address = soc["params"]["path"].as_str().unwrap().to_owned();
+    let segments: Vec<&str> = address.split('/').collect();
+    let owner: [u8; 20] = logic::unhex(segments[2]).try_into().unwrap();
+    let id: [u8; 32] = logic::unhex(segments[3]).try_into().unwrap();
+    let reference = logic::hex(&fc_swarm::verify::soc_address(&id, &owner));
+    main.answer(
+        soc["id"].as_u64().unwrap(),
+        json!({
+            "status": 201, "status_text": "Created",
+            "headers": [["content-type", "application/json"]],
+            "body_base64": fc_swarm_provider::value::encode_base64(format!(r#"{{"reference":"{reference}"}}"#).as_bytes()),
+        }),
+    );
+    let answer = main.core.response(request);
+    assert!(answer["result"]["result_typed"].is_object(), "{answer}");
+    assert_eq!(std::fs::read_to_string(&signs).unwrap(), "sign\n");
+}
