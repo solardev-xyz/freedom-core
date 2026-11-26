@@ -138,7 +138,8 @@ Stage 1 trusts main (0001). The attackers are 0011's and 0012's: a compromised c
 | Make a new Safe's address unreachable (one endpoint) | No since #1066: the reference pins the constants (F-4, yes at `32532528`) | No: the address uses pinned constants and no chain read |
 | Mark an undeployed Safe deployed, or deploy elsewhere (one endpoint) | No since #1066: only a verified read or receipt marks it, and activation compares the address (F-4, yes at `32532528`) | No on a verified read; otherwise the router's answer, and activation compares the address |
 | Have owners sign a SafeTx whose operation, gas, refund or nonce fields the prompt didn't cover (a main bug) | Yes: the token binds only `to`, `value` and `data`, and the Safe pays a refund out of its own balance | No: the token binds the whole SafeTx the core built |
-| Execute for a Safe whose owners or threshold were changed elsewhere | The record's owners and threshold count | Refused ([Q24](#open-questions)) |
+| Execute for a Safe whose owners or threshold were changed elsewhere | The record's owners and threshold count | Refused ([Q24](#open-questions)), for every change the setup reads see |
+| Act for a Safe through an owner or module its lists don't show (a delegatecall another owner's wallet signed, outside Freedom) | The setup isn't read | Not seen: the reads walk the owner and module lists from the sentinel, so an entry left off them stays hidden. Freedom itself never writes one ([What the reads can and can't see](#owners-threshold-and-setup)) |
 | Report the record's setup for a Safe that was changed (one lying endpoint) | The setup isn't read | No: every read the decision rests on must be verified, or nothing is signed ([Chain reads](#chain-reads)) |
 | Change the Safe's own setup through a site's transaction | Yes, like any call | No: refused, `safe_self_call` ([question 4](#open-questions)) |
 | Sign with the executor's key for something other than a ready SafeTx (a main bug) | Yes, under `shell` | No: only the core's prepared send, or an `executor-send` token for a fee the check stopped |
@@ -151,6 +152,7 @@ Stage 1 trusts main (0001). The attackers are 0011's and 0012's: a compromised c
 - **Typed data on a Ledger that can't show its fields** (a Nano S): the device shows only two hashes, and the browser's view is the only display ([Q23](#open-questions)).
 - **The chrome's wallet kinds** until APS-3 (0011, 0012).
 - **Unverified reads for display only** (a balance, an activation cost): the router's quorum or one endpoint decides them, as the user's policy sets. No signature or execution rests on one.
+- **A Safe's storage the setup reads don't reach:** a delegatecall signed outside Freedom can leave an owner or a module that `getOwners` and `getModulesPaginated` don't list, or an approved hash or a signed message, each of which the Safe accepts and no read sees. Freedom never makes a delegatecall, so only owners who signed one elsewhere expose a Safe to this ([Owners, threshold and setup](#owners-threshold-and-setup)).
 
 ## Ledger
 
@@ -396,7 +398,7 @@ After SAFE-3, main's `wallet/safe/` modules are thin clients of the core's `safe
 0012 lists a Ledger's signatures, a Safe's Ledger owner's included, as advised until this design, and enforces a Safe's vault owners' and executor's from APR-4, through Safe approvals. From LDG-2 a Ledger's are enforced too, and from SAFE-2 a Safe's tokens bind the SafeTx the core built, under 0012's rules: checked when present at first (APR-3's rule), and required once APR-4's rule applies.
 - **A Ledger account** is treated as a vault account is. A page's signature needs a token or a standing rule the core checked for that page; a `chrome` call needs a wallet-kind token; a `shell` call carries none. A standing rule skips the browser's prompt, never the device's. For x402, `x402.authorize` (X402-1) takes main's `now_s` for a Ledger account and returns its authorization as typed data, which main rebuilds, compares and sends back as `x402.settle { reservation, typed_data }`, which the core signs on the device lane ([x402 from a Ledger account](#x402-from-a-ledger-account)).
 - **`safe-send`** binds the SafeTx the core built at `safe.prepare`, in a new form, `{ safe, chain_id, safe_tx, safe_tx_hash }`: the Safe's address, the chain, all ten fields (the nonce included) and its hash, and, for a site's, the page and the handle (0012). Only `safe.propose` spends it.
-- **The legacy `safe-send`,** `{ safe, chain_id, tx: { to, value, data } }` (0012's, `fc-approval`'s `Approved::Send`), keeps APR-4's path until SAFE-3 (decided 2026-11-26): `approval.spend` gives its Safe approval, for main's own SafeTx. Neither form is spent as the other.
+- **The legacy `safe-send`,** `{ safe, chain_id, tx: { to, value, data } }` (0012's, `fc-approval`'s `Approved::Send`), keeps APR-4's path until SAFE-3 (decided 2026-11-26): `approval.spend` gives its Safe approval, for the SafeTx main builds itself, as today. Neither form is spent as the other.
 - **Owner signatures** need no token each: the spent `safe-send` authorized every local owner's signature over that SafeTx, as today.
 - **The executor's transaction** is signed only as `safe.execute` or `safe.deploy` prepared it, or with an `executor-send` token for a fee the check stopped.
 - **`safe-message`** binds the method, a digest of the request, the digest the SafeMessage carries and the SafeMessage's hash, the page and the handle. `safe.message_start` spends it.
@@ -406,8 +408,8 @@ After SAFE-3, main's `wallet/safe/` modules are thin clients of the core's `safe
 
 | Method | Callers | Params → result |
 |---|---|---|
-| `sign.transaction`, `sign.message`, `sign.typed_data` | as 0002 and 0012 | `key: { kind: "ledger", index, path?, address? }` is new; the replies are 0002's |
-| `ledger.accounts` | chrome, shell | `{ scheme, start, count }` → `{ accounts: [{ path, address }] }` |
+| `sign.transaction`, `sign.message`, `sign.typed_data` | as 0002 and 0012 | `key: { kind: "ledger", index, path?, address? }` is new: `not_moved` until `vault_meta` is moved, and a `path` or `address` given must be the record's; the replies are 0002's |
+| `ledger.accounts` | chrome, shell | `{ scheme, start, count }` → `{ accounts: [{ path, address }], mismatched: [{ index, name, address, path }] }` |
 | `ledger.add` | chrome, shell | `{ scheme, index, name? }` → `{ path, address }`, and the record once PRF-6(a) |
 | `safe.create` | chrome, shell | `{ name, owners: [index], threshold }` → the record, its address computed in the core |
 | `safe.status` | chrome, shell | `{ safe }` → `getSafeStatus`'s fields |
@@ -419,10 +421,11 @@ After SAFE-3, main's `wallet/safe/` modules are thin clients of the core's `safe
 | `safe.pending`, `safe.discard` | chrome, shell | today's `getAllSafeSendStates` and `cancelSafeSend` |
 | `safe.message_start` | page | `{ safe, request, display?, authorization }` → `{ session, state }` |
 | `safe.message_sign`, `safe.message_state`, `safe.message_cancel`, `safe.message_complete` | chrome | `{ safe, session, owner? }` → today's shapes |
+| `x402.settle` | shell | a new form, `{ reservation, typed_data }` → `{ payload, charged, grant?, durable? }`, for a Ledger reservation made with `now_s`; 0012's `{ reservation, outcome }` and #392's `{ reservation, signature }` stay |
 
-- **Errors:** a device's failure is `device_failed` with `data.ledger`, today's `LEDGER_*` code (`BAD_SIGNATURE` among them since #1063) or one of the five new ones (`UNRESPONSIVE`, `TIMEOUT`, `TOO_LARGE`, `EMPTY_MESSAGE`, `TYPE_NOT_CANONICAL`). Main shows `errors.js`'s text for it. A Safe refusal is `invalid_argument` with `data.safe`: `unsupported`, `changed`, `unverified`, `self_call`, `nonce_behind`, or today's `SAFE_*` codes.
-- **Deadlines:** a new class, `device`: no overall deadline while a `shell.ledger_apdu` waits for the user, and the lane's own bounds otherwise. Main's hang watchdog skips such a request, as 0012 has it skip one with an open prompt.
-- **0012's `{ device }` result** goes for Ledger accounts: `eip1193.request` drives the device itself. A Safe account's request answers `{ safe: { safe_tx_hash } }`, and the page's answer comes from the board's execution, as `awaitSafeExecution` gives it today (`dapp-tx.js:826`).
+- **Errors:** a device's failure is `device_failed` with `data.ledger`, today's `LEDGER_*` code (`BAD_SIGNATURE` among them since #1063) or one of the five new ones (`UNRESPONSIVE`, `TIMEOUT`, `TOO_LARGE`, `EMPTY_MESSAGE`, `TYPE_NOT_CANONICAL`). Main shows `errors.js`'s text for it. A Safe refusal is `invalid_argument` with `data.safe`: `unsupported`, `changed`, `unverified`, `self_call`, `nonce_behind`, `store_full` ([The pending store](#the-pending-store)), `not_deployed` (proposed, [Chain reads](#chain-reads)), or today's `SAFE_*` codes.
+- **Deadlines** (decided 2026-11-26): a new class, `device`, `"device"` in `schema.json`, on `sign.*`, `ledger.*`, `x402.settle` and `safe.sign_owner`. It has no overall deadline. Main treats such a request as immediate until a `shell.ledger_apdu` names it in `for`, which a vault key's never does. From then on main's hang watchdog skips it, as 0012 has it skip one with an open prompt, and each APDU's exchange has the `deadline_ms` its `shell.ledger_apdu` carries ([`shell.ledger_apdu`](#shellledger_apdu)): 15 s, or 5 minutes for the APDU that waits for the user to confirm. The lane's own bounds hold otherwise; how a wait in its queue counts is [question 5](#open-questions).
+- **0012's `{ device }` result stays** (decided 2026-11-26), for a Ledger account and a Safe account alike (`eip1193.rs:27–32`): `eip1193.request` mints the token and returns it to main, which presents it to `sign.*` with the Ledger key, so the Ledger still signs in the core, on the lane; a Safe's carries the legacy `safe-send` ([Approvals: enforced](#approvals-enforced)). Two follow-ups come later, with LDG-3 and SAFE-3: `eip1193.request` driving the device itself (L6), and a Safe account's request answering `{ safe: { safe_tx_hash } }`, with the page's answer from the board's execution, as `awaitSafeExecution` gives it today (`dapp-tx.js:826`) (S7). Each is used only once main declares it with a new field in `core.hello`.
 
 ## Vectors
 
@@ -456,9 +459,10 @@ From the pinned reference (AGENTS rule 5): the browser at an `integration/rust-c
 | `device-deadlines` | none | 15 s and 5 minutes |
 | `cancel` | none in the browser | the parent's cancel closes the device |
 | `discovery-busy` | a poll waits behind a signature | `LEDGER_BUSY` at once |
+| `check-bound` | discovery checks every Ledger record no device has matched, in a second session (`account-checks.js:27–50`) | at most 20, in the wallet list's order, in discovery's own operation ([Accounts](#accounts)) |
 | `safe-reads` | the first endpoint that answers | the chain machine |
 | `creation-code` | pinned since #1066 (`PINNED_DEPLOYMENTS`); read from the factory at `32532528` (F-4) | pinned: no longer a deviation |
-| `deployed-mark` | since #1066, a verified `eth_getCode` read or a verified receipt, for good; code no verified source confirms is `SAFE_UNVERIFIED`, nothing marked; activation compares the address (`SAFE_ADDRESS_MISMATCH`). At `32532528`, one endpoint's code, and the address not compared (F-4) | the record's own address, after a prepared deployment or on a verified read |
+| `deployed-mark` | since #1066, a verified `eth_getCode` read or a verified receipt, for good; code no verified source confirms is `SAFE_UNVERIFIED`, nothing marked; activation compares the address (`SAFE_ADDRESS_MISMATCH`). At `32532528`, one endpoint's code, and the address not compared (F-4) | only verified evidence: a verified receipt with status 1 whose factory `ProxyCreation` log names the record's address (the reference takes any verified, confirmed receipt of the deployment it sent, `safe-service.js:302–305`, `321–325`), or a verified `eth_getCode` that isn't empty; an unverified answer reported for the session only |
 | `safe-setup` | the record's owners and threshold count | the Safe's setup must be the record's (Q24) |
 | `self-call` | allowed | refused, `safe_self_call` (question 4) |
 | `safe-tx-binding` | `safe-send` binds `to`, `value`, `data` | the whole SafeTx and its hash |
