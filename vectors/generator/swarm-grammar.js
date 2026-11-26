@@ -86,9 +86,11 @@ const ROWS = {
     binds: '<a> = params.address, or keccak256(params.identifier ‖ params.owner)' }] },
   readData: { ready: 'reachable', calls: [
     { forms: ['chunk'], count: [1, 1], binds: 'the root: <a> = params.reference' },
+    // After the root: chunk at most 2 + 2⌈B / 4,096⌉ = 2,562 times (one per
+    // slot of the walk's set), and bytes once.
     { forms: ['chunk', 'bytes'], count: [0, 2 + 2 * 1280 + 1], when: 'the root\'s size n is over 4,096 bytes (at most n ≤ B)',
       binds: 'bytes at most once: <a> = params.reference, range: bytes=0-<n − 1>, max_bytes = n; every later chunk with tree { length, depth }, '
-        + 'an unfetched occurrence of a data child of an intermediate main returned (0009\'s geometry); chunk at most 2 + 2⌈B / 4,096⌉ = 2,562 in all, 8 open at once' },
+        + 'an unfetched occurrence of a data child of an intermediate main returned (0009\'s geometry); chunk at most 2 + 2⌈B / 4,096⌉ = 2,562 after the root, 8 open at once' },
   ] },
   readFeedEntry_index: { ready: 'reachable', calls: [
     { forms: ['chunk'], count: [1, 1], binds: 'with feed { owner, index }: <a> = keccak256(keccak256(<t> ‖ index as 8 bytes BE) ‖ <o>)' },

@@ -535,7 +535,7 @@ function checkReadDataScenarios(honest, forbidden, dwebVerify) {
 /** main's own rows (`swarm.publish`, `swarm.feed`, `swarm.stamps`, `swarm.upload_status`), from publish-service.js and feed-service.js. */
 async function mainRows(env) {
   const out = [];
-  const record = async (id, row, params, nodeSpec, fn) => {
+  const record = async (id, row, params, nodeSpec, fn, parts) => {
     const requests = await withReference(env, { node: nodeSpec }, async (ref, node, world) => {
       await fn(ref, world);
       return node.requests.map((r) => ({ ...requestRecord(r, node), raw: r }));
@@ -547,22 +547,43 @@ async function mainRows(env) {
     });
     const indexHeaders = requests.map((r) => Object.fromEntries(Object.entries(r.raw.replyHeaders || {})
       .map(([n, v]) => [n.toLowerCase(), String(v)]).filter(([n]) => n.startsWith('swarm-feed-index'))));
-    out.push({ id, row, from: 'publish-service.js / feed-service.js at the swarm reference', params, calls, ...(row === 'swarm.feed:read' ? { indexHeaders } : {}) });
+    out.push({ id, row, from: 'publish-service.js / feed-service.js at the swarm reference', params, ...(parts ? { parts } : {}), calls,
+      ...(row === 'swarm.feed:read' ? { indexHeaders } : {}) });
   };
   const stamps = { stamps: C.STAMPS.usable };
-  await record('swarm.publish-data-default', 'swarm.publish:data,file', { kind: 'data', parts: [{ bytes: 5 }] }, stamps,
-    (ref) => ref.publishService.publishData(Buffer.from('hello')));
-  await record('swarm.publish-data-batch-encrypt', 'swarm.publish:data,file', { kind: 'data', parts: [{ bytes: 5 }], batch: C.BATCH_B, encrypt: true }, stamps,
-    (ref) => ref.publishService.publishData(Buffer.from('hello'), { batchId: C.BATCH_B, encrypt: true, name: 'draft.md', contentType: 'text/markdown' }));
-  await record('swarm.publish-file-default', 'swarm.publish:data,file', { kind: 'file', parts: [{ bytes: 9 }], name: 'notes.txt' }, stamps, (ref, world) => {
-    const file = path.join(world.dir, 'notes.txt');
-    fs.writeFileSync(file, 'the notes');
-    return ref.publishService.publishFile(file);
+  // swarm.publish's params are main's own, whole, in the wire form
+  // swarm.json's shell cases use (SWM-4's D5): every option the reference
+  // was called with, pin and deferred, and each part as main sends it:
+  // held bytes inline, a picked file's or a collection entry's as
+  // { part: k }, its bytes in the scenario's `parts`.
+  const inline = (bytes) => ({ bytes: bytes.length, base64: b64(bytes) });
+  const streamed = (entries) => ({
+    parts: entries.map(([p, bytes], k) => ({ ...(p === undefined ? {} : { path: p }), bytes: bytes.length, part: k })),
+    bytes: entries.map(([, bytes]) => inline(bytes)),
   });
-  await record('swarm.publish-collection-index-default', 'swarm.publish:collection', { kind: 'collection', parts: [{ path: 'index.html', bytes: 4 }, { path: 'a/b.txt', bytes: 1 }] },
-    stamps, (ref) => ref.publishService.publishCollection([{ path: 'index.html', bytes: Buffer.from('home') }, { path: 'a/b.txt', bytes: Buffer.from('b') }]));
-  await record('swarm.publish-collection-batch-encrypt', 'swarm.publish:collection', { kind: 'collection', parts: [{ path: 'x.txt', bytes: 1 }], batch: C.BATCH_B, encrypt: true },
-    stamps, (ref) => ref.publishService.publishCollection([{ path: 'x.txt', bytes: Buffer.from('x') }], { batchId: C.BATCH_B, encrypt: true, indexDocument: 'x.txt' }));
+  const hello = Buffer.from('hello');
+  await record('swarm.publish-data-default', 'swarm.publish:data,file', { kind: 'data', parts: [inline(hello)], pin: true, deferred: false }, stamps,
+    (ref) => ref.publishService.publishData(hello));
+  await record('swarm.publish-data-batch-encrypt', 'swarm.publish:data,file', { kind: 'data', parts: [inline(hello)], name: 'draft.md',
+    content_type: 'text/markdown', encrypt: true, batch: C.BATCH_B, pin: true, deferred: false }, stamps,
+  (ref) => ref.publishService.publishData(hello, { batchId: C.BATCH_B, encrypt: true, name: 'draft.md', contentType: 'text/markdown' }));
+  const notes = streamed([[undefined, Buffer.from('the notes')]]);
+  await record('swarm.publish-file-default', 'swarm.publish:data,file', { kind: 'file', parts: notes.parts, name: 'notes.txt', pin: true, deferred: true },
+    stamps, (ref, world) => {
+      const file = path.join(world.dir, 'notes.txt');
+      fs.writeFileSync(file, 'the notes');
+      return ref.publishService.publishFile(file);
+    }, notes.bytes);
+  const site = [['index.html', Buffer.from('home')], ['a/b.txt', Buffer.from('b')]];
+  const siteParts = streamed(site);
+  await record('swarm.publish-collection-index-default', 'swarm.publish:collection', { kind: 'collection', parts: siteParts.parts, pin: true, deferred: true },
+    stamps, (ref) => ref.publishService.publishCollection(site.map(([p, bytes]) => ({ path: p, bytes }))), siteParts.bytes);
+  const one = [['x.txt', Buffer.from('x')]];
+  const oneParts = streamed(one);
+  await record('swarm.publish-collection-batch-encrypt', 'swarm.publish:collection', { kind: 'collection', parts: oneParts.parts, index_document: 'x.txt',
+    encrypt: true, batch: C.BATCH_B, pin: true, deferred: true }, stamps,
+  (ref) => ref.publishService.publishCollection(one.map(([p, bytes]) => ({ path: p, bytes })), { batchId: C.BATCH_B, encrypt: true, indexDocument: 'x.txt' }),
+  oneParts.bytes);
   const signer = async (ref) => ref.load('./swarm-signer.js').resolveSwarmSigner({ mode: 'bee-wallet' });
   const agentTopic = 'freedom-agent/publications';
   await record('swarm.feed-create-batch', 'swarm.feed:create', { op: 'create', key: { kind: 'bee_wallet' }, topic: env.beeJs.Topic.fromString(agentTopic).toHex(), batch: C.BATCH_B },
@@ -621,7 +642,8 @@ function forbiddenFrom(honest, env) {
     const base = byId.get(fromId);
     if (!base) throw new Error(`forbidden ${id}: no honest scenario ${fromId}`);
     const calls = structuredClone(base.calls);
-    const scenario = { id, row: base.row, from: `honest/${fromId}`, key: base.key, params: base.params, ...(base.ready ? { ready: base.ready } : {}), rule, note };
+    const scenario = { id, row: base.row, from: `honest/${fromId}`, key: base.key, params: base.params, ...(base.parts ? { parts: base.parts } : {}),
+      ...(base.ready ? { ready: base.ready } : {}), rule, note };
     scenario.calls = edit(calls, base) || calls;
     // The refused call is the last; it has no reply.
     delete scenario.calls.at(-1).reply;
@@ -770,8 +792,9 @@ function forbiddenFrom(honest, env) {
   add('swarm.publish-batch-other', 'swarm.publish-data-batch-encrypt', 'value', 'a swarm-postage-batch-id other than the parent\'s batch', (calls) => {
     last(calls).headers = last(calls).headers.map(([n, v]) => (n === 'swarm-postage-batch-id' ? [n, C.BATCH_A] : [n, v]));
   });
-  add('swarm.publish-batch-and-stamps', 'swarm.publish-data-batch-encrypt', 'order', 'a /stamps when the parent named its batch', (calls) => [
-    call('stamps', 'GET', '/stamps', { headers: mainHeaders() }), ...calls]);
+  // With a batch the row has no stamps: the /stamps is refused as the first call.
+  add('swarm.publish-batch-and-stamps', 'swarm.publish-data-batch-encrypt', 'order', 'a /stamps when the parent named its batch', () => [
+    call('stamps', 'GET', '/stamps', { headers: mainHeaders() })]);
   add('swarm.publish-encrypt-not-asked', 'swarm.publish-data-default', 'header', 'swarm-encrypt under swarm.publish without encrypt', (calls) => {
     last(calls).headers.push(['swarm-encrypt', 'true']);
   });
@@ -835,7 +858,9 @@ async function buildGrammar(env, methods, nodeBodies, dwebVerify, meta) {
     reply_headers: { read: ['content-type', 'content-length', 'swarm-tag', 'swarm-feed-index', 'swarm-feed-index-next'], max: 8, name_bytes: 64,
       value_bytes: 1024, reason_bytes: 1024 },
     error_reply: { whole: 8192 },
-    failed: ['unreachable', 'error', 'aborted', 'too_large', 'busy'],
+    // 0009's closed set plus busy and stopped (design 0015, shell.swarm_api:
+    // `failed`; freedom-cored's swarm/wire.rs reads the same six).
+    failed: ['unreachable', 'error', 'aborted', 'too_large', 'busy', 'stopped'],
     rules: ['form', 'order', 'count', 'value', 'header', 'query', 'body', 'ended'],
     forms: FORMS,
     rows: ROWS,
@@ -855,7 +880,9 @@ const GRAMMAR_FORMATS = {
     + 'readFeedEntry_index and readFeedEntry_latest are readFeedEntry with and without params.index.',
   deviation_requests: 'the reference\'s requests the core drops, by deviation id; vectors/swarm.json marks each such request `deviation`.',
   checked: 'the requests of every vectors/swarm.json methods case, by row: each matched its row as `form <name>`, was its ready probe, or was one of a named deviation\'s requests.',
-  scenarios: 'honest and forbidden: { id, row, from, key (the page key), params (swarm.json\'s typed form, or main\'s own params), ready, calls }. '
+  scenarios: 'honest and forbidden: { id, row, from, key (the page key), params (swarm.json\'s typed form, or main\'s own params, whole, in the wire '
+    + 'form swarm.json\'s shell cases use), parts (main\'s own rows: part k\'s bytes, { bytes, base64 }, for a { part: k } in params, as a shell '
+    + 'step\'s parts), ready, calls }. '
     + 'A call: form, method, path, query, headers (as main sends them, main_headers included), body ({ bytes, base64 } or { bytes, sha256 }), '
     + 'max_bytes, feed { owner, index }, tree { length, depth }, and reply (status, headers, body { base64 } or body_ref naming the chunk store it comes from, '
     + 'such as dweb-verify.json swarm.chunks). Every call of an honest scenario is admitted in order; a forbidden scenario\'s calls before its last are '

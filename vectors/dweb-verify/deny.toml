@@ -12,9 +12,9 @@
 # on 127.0.0.1, by address (src/kubo.rs): it resolves no name and reaches
 # nothing else. The patched releases these pins allow are taken (tokio
 # 1.54.1, h2 0.4.20, crossbeam-epoch 0.9.21, spin 0.9.9, quinn-proto 0.11.19,
-# rustls 0.23.46, rustls-webpki 0.103.16); what remains needs a manifest
-# change in Ant v0.5.71 or freedom-ipfs, the oracles, which would change what
-# the vectors record.
+# rustls 0.23.46, rustls-webpki 0.103.16, url 2.5.9, libp2p-quic 0.13.1,
+# quinn-udp 0.5.16); what remains needs a manifest change in Ant v0.5.71 or
+# freedom-ipfs, the oracles, which would change what the vectors record.
 
 [graph]
 all-features = true
@@ -22,15 +22,53 @@ all-features = true
 [advisories]
 yanked = "deny"
 ignore = [
-    # hickory-proto 0.25.2, through libp2p-dns (libp2p, ant-retrieval): the
+    # hickory-proto 0.25.2, through hickory-resolver 0.25.2, which both
+    # libp2p-dns (libp2p, ant-retrieval) and freedom-ipfs-net take: the
     # NSEC3 loop is in DNSSEC validation, which needs hickory's dnssec
     # features, and this graph builds it without them. The fix is hickory
-    # 0.26, which libp2p-dns 0.44 doesn't take. The generator resolves no
-    # name.
+    # 0.26, which neither libp2p-dns 0.44 nor freedom-ipfs-net takes. The
+    # generator resolves no name.
     { id = "RUSTSEC-2026-0118", reason = "DNSSEC validation only, built without its features; the generator resolves no name" },
-    # The same crate and path: quadratic name compression when encoding a
+    # The same crate and paths: quadratic name compression when encoding a
     # message. The generator encodes and sends no DNS message.
     { id = "RUSTSEC-2026-0119", reason = "message encoding only; the generator sends no DNS message" },
+    # The same crate and paths: ten more flaws in DNSSEC validation (NSEC and
+    # NSEC3 proofs, unrelated or other-class RRsets taken as secure), and
+    # hickory-resolver's lookups returning records that failed it. All of it
+    # lives in hickory-proto's `dnssec` module (DnssecDnsHandle), compiled
+    # only with its dnssec-ring or dnssec-aws-lc-rs feature, and in
+    # hickory-resolver's `__dnssec` branch: this graph enables neither
+    # (hickory-proto: std, tokio, futures-io; hickory-resolver:
+    # system-config, tokio), so a resolver can't even ask to validate. No
+    # hickory-proto release fixes these; the fixes are in hickory-net and
+    # hickory-resolver 0.26.2, outside libp2p-dns 0.44 and freedom-ipfs-net.
+    { id = "RUSTSEC-2026-0504", reason = "DNSSEC validation only, not compiled: no dnssec feature in this graph" },
+    { id = "RUSTSEC-2026-0505", reason = "DNSSEC validation only, not compiled: no dnssec feature in this graph" },
+    { id = "RUSTSEC-2026-0511", reason = "DNSSEC validation only, not compiled: no dnssec feature in this graph" },
+    { id = "RUSTSEC-2026-0512", reason = "DNSSEC validation only, not compiled: no dnssec feature in this graph" },
+    { id = "RUSTSEC-2026-0514", reason = "hickory-resolver's DNSSEC validation, not compiled: no dnssec feature in this graph" },
+    { id = "RUSTSEC-2026-0530", reason = "DNSSEC validation only, not compiled: no dnssec feature in this graph" },
+    { id = "RUSTSEC-2026-0531", reason = "DNSSEC validation only, not compiled: no dnssec feature in this graph" },
+    { id = "RUSTSEC-2026-0532", reason = "DNSSEC validation only, not compiled: no dnssec feature in this graph" },
+    { id = "RUSTSEC-2026-0549", reason = "DNSSEC validation only, not compiled: no dnssec feature in this graph" },
+    { id = "RUSTSEC-2026-0550", reason = "DNSSEC validation only, not compiled: no dnssec feature in this graph" },
+    { id = "RUSTSEC-2026-0551", reason = "DNSSEC validation only, not compiled: no dnssec feature in this graph" },
+    # The same crate and paths: panics parsing SVCB or HTTPS records, and
+    # zone-file tokens, from their text form. That parser
+    # (`serialize::txt`) is compiled only with hickory-proto's text-parsing
+    # feature, which this graph doesn't enable; DNS answers are decoded
+    # from the wire format, which doesn't reach it. Fixed in 0.26.2.
+    { id = "RUSTSEC-2026-0487", reason = "zone-file text parser only, not compiled: no text-parsing feature in this graph" },
+    { id = "RUSTSEC-2026-0489", reason = "zone-file text parser only, not compiled: no text-parsing feature in this graph" },
+    { id = "RUSTSEC-2026-0490", reason = "zone-file text parser only, not compiled: no text-parsing feature in this graph" },
+    # The same crate and paths: decoding a DNS message reserves memory by the
+    # record counts its header claims. Only DNS answers reach that decoder,
+    # through a resolver: freedom-ipfs-net's system lookup and /dnsaddr
+    # expansion, or libp2p-dns. The generator builds none of them: GatewayCore
+    # gets its own resolver (src/ipfs.rs), Ant's router its own node loop
+    # (src/node.rs), and neither half builds a libp2p transport or a
+    # freedom-ipfs Network. Fixed in 0.26.2.
+    { id = "RUSTSEC-2026-0491", reason = "decodes DNS answers only; the generator builds no resolver and receives no DNS message" },
     # instant 0.1.13, through parking_lot 0.11 (reed-solomon-erasure 6,
     # ant-retrieval): unmaintained, no upgrade within Ant's pins. It reads the
     # clock; nothing of it is security-relevant here.
@@ -50,6 +88,15 @@ ignore = [
     # and these are made, but with test keys derived from public labels
     # (src/ipns.rs), offline, where no one times them: there is no secret.
     { id = "RUSTSEC-2023-0071", reason = "signs test records with public test keys, offline; there is no secret to leak" },
+    # libsqlite3-sys 0.37.0, through rusqlite 0.39 (ant-retrieval's disk
+    # cache, freedom-ipfs-store): the bundled SQLite can return stale page
+    # cache memory when it opens a database beside a crafted -wal file. The
+    # fix, libsqlite3-sys 0.39, comes with rusqlite 0.41, which neither Ant's
+    # nor freedom-ipfs's rusqlite 0.39 takes. The generator opens no SQLite
+    # database: its chunks and blocks are in memory (src/store.rs,
+    # src/ipfs.rs), and it builds neither a DiskChunkCache nor a
+    # SqliteBlockStore.
+    { id = "RUSTSEC-2026-0459", reason = "the generator opens no SQLite database; its stores are in memory" },
 ]
 
 [licenses]

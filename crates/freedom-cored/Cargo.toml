@@ -185,6 +185,10 @@ fc-evm = { path = "../fc-evm" }
 # dweb.verify's plan reads back as dweb.open wrote it (design 0009).
 fc-json = { path = "../fc-json" }
 fc-keys = { path = "../fc-keys" }
+# Design 0016's Ledger (LDG-2): the operations the device lane drives and
+# the answers they take, which shell.ledger_apdu's reader reads into. A
+# logic crate of this workspace.
+fc-ledger = { path = "../fc-ledger" }
 # The key store's trait and types (design 0013): the core's desktop
 # KeyStore over `shell.keystore`, and the helper's answers.
 fc-keystore = { path = "../fc-keystore" }
