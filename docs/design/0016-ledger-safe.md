@@ -138,8 +138,7 @@ Stage 1 trusts main (0001). The attackers are 0011's and 0012's: a compromised c
 | Make a new Safe's address unreachable (one endpoint) | No since #1066: the reference pins the constants (F-4, yes at `32532528`) | No: the address uses pinned constants and no chain read |
 | Mark an undeployed Safe deployed, or deploy elsewhere (one endpoint) | No since #1066: only a verified read or receipt marks it, and activation compares the address (F-4, yes at `32532528`) | No on a verified read; otherwise the router's answer, and activation compares the address |
 | Have owners sign a SafeTx whose operation, gas, refund or nonce fields the prompt didn't cover (a main bug) | Yes: the token binds only `to`, `value` and `data`, and the Safe pays a refund out of its own balance | No: the token binds the whole SafeTx the core built |
-| Execute for a Safe whose owners or threshold were changed elsewhere | The record's owners and threshold count | Refused ([Q24](#open-questions)), for every change the setup reads see |
-| Act for a Safe through an owner or module its lists don't show (a delegatecall another owner's wallet signed, outside Freedom) | The setup isn't read | Not seen: the reads walk the owner and module lists from the sentinel, so an entry left off them stays hidden. Freedom itself never writes one ([What the reads can and can't see](#owners-threshold-and-setup)) |
+| Execute for a Safe whose owners or threshold were changed elsewhere | The record's owners and threshold count | Refused ([Q24](#open-questions)) |
 | Report the record's setup for a Safe that was changed (one lying endpoint) | The setup isn't read | No: every read the decision rests on must be verified, or nothing is signed ([Chain reads](#chain-reads)) |
 | Change the Safe's own setup through a site's transaction | Yes, like any call | No: refused, `safe_self_call` ([question 4](#open-questions)) |
 | Sign with the executor's key for something other than a ready SafeTx (a main bug) | Yes, under `shell` | No: only the core's prepared send, or an `executor-send` token for a fee the check stopped |
@@ -152,7 +151,6 @@ Stage 1 trusts main (0001). The attackers are 0011's and 0012's: a compromised c
 - **Typed data on a Ledger that can't show its fields** (a Nano S): the device shows only two hashes, and the browser's view is the only display ([Q23](#open-questions)).
 - **The chrome's wallet kinds** until APS-3 (0011, 0012).
 - **Unverified reads for display only** (a balance, an activation cost): the router's quorum or one endpoint decides them, as the user's policy sets. No signature or execution rests on one.
-- **A Safe's storage the setup reads don't reach:** a delegatecall signed outside Freedom can leave an owner or a module that `getOwners` and `getModulesPaginated` don't list, or an approved hash or a signed message, each of which the Safe accepts and no read sees. Freedom never makes a delegatecall, so only owners who signed one elsewhere expose a Safe to this ([Owners, threshold and setup](#owners-threshold-and-setup)).
 
 ## Ledger
 
@@ -354,11 +352,6 @@ Before each owner's signature and before execution, the core reads the [setup](#
 Anything else is `safe_changed`: "This Safe was changed outside Freedom, so Freedom can't sign for it." Nothing is signed. The board shows the state and offers only to discard (deviation `safe-setup`). Today Freedom counts the record's owners and threshold and never reads the Safe's.
 
 **A site's transaction to the Safe itself** (`to` is the Safe: an owner, threshold, module, guard or handler change) is refused with `safe_self_call` ([question 4](#open-questions), decided 2026-11-25). `to` being the Safe catches every setup change: the Safe's setup functions accept only a call from the Safe itself, and Freedom builds every SafeTx as a CALL, never a delegatecall ([Built and hashed in the core](#built-and-hashed-in-the-core)). The wallet's own screens never build one.
-
-**What the reads can and can't see** (found by SAFE-2's S0, #519). They read the singleton's, the guard's and the handler's slots whole, the threshold and the nonce, and the owner and module lists as `getOwners` and `getModulesPaginated` walk them from the sentinel.
-- **They see** every change made through the Safe's own functions (`addOwnerWithThreshold`, `removeOwner`, `swapOwner`, `changeThreshold`, `enableModule`, `disableModule`, `setGuard`, `setFallbackHandler`), which keep the lists linked, and any write to a slot or value they read, a delegatecall's included.
-- **They can't see** the rest of the Safe's storage, which a delegatecall can write. One made outside Freedom (a SafeTx with operation 1 that another owner's wallet signed and executed) could leave an `owners` or `modules` mapping entry that the sentinel's list doesn't link. `getOwners` and `getModulesPaginated` wouldn't show it, but `checkNSignatures` would accept that owner's signature, and `execTransactionFromModule` that module's calls. The same holds for an `approvedHashes` or `signedMessages` entry.
-- **Freedom itself never writes one:** it builds every SafeTx as a CALL, refuses one to the Safe itself (question 4), and sets a Safe up with no setup call. So the check vouches for a Safe whose owners signed only in Freedom. A delegatecall signed elsewhere is beyond it ([What stays open](#threat-model)).
 
 ### Owner signatures
 
