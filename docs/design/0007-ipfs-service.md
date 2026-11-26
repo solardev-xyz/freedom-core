@@ -561,8 +561,11 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 - **Exit codes:**
   - 0001's: 64, 74, 75 and 76;
   - 70 for `teardown_unproven`, and for a panic or unexpected end outside a request;
-  - 71 for `out_of_memory`: a native library's out-of-memory error under the memory cap ([0010](0010-service-confinement.md#the-memory-cap)), a crash;
-  - 77 for `confinement` ([0010](0010-service-confinement.md)), before `ipfs.hello`.
+  - 71 for `out_of_memory`: a native library's out-of-memory error under the memory cap ([0010](0010-service-confinement.md#the-memory-cap)), a crash. As built:
+    - **SQLite's allocator ends the process itself.** `main` calls freedom-ipfs-store's `fail_stop_on_oom` first, before any thread or store. From then on an allocation SQLite can't make exits 71 at once, with the store's line on stderr (`OUT_OF_MEMORY_LINE`), before any statement fails with it. The call is the service's one unsafe call (AGENTS.md rule 6): SQLite's allocator is process-global, and `sqlite3_config`, which sets it, has no sound safe form.
+    - **What is left** is an out-of-memory error SQLite reports without its allocator failing: a size past its allocation limit, or a heap limit, neither of which the store's statements reach. The store returns it as its own kind (`StoreError::OutOfMemory`, or `CoreError::OutOfMemory` through its block provider). Where a store error reaches the service, at the store's open in `ipfs.start` and in `ipfs.stats`, the process ends with 71 for one in place of the reply, and logs where.
+    - **Requests** see no store error: the gateway's heads and a body's failure carry text only, so the hook is what covers them;
+  - 77 for `confinement` ([0010](0010-service-confinement.md)), before `ipfs.hello`. Also when SQLite's out-of-memory hook is refused (`TooLate`: something used SQLite before `main` called it), which only a fault in the service can cause, and which main doesn't restart either.
 
 ### Stats
 
@@ -584,7 +587,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
   - **The persistent process only.** In the ephemeral process, which records nothing, it is `null`.
   - **The reply fits one frame.** A snapshot's events are bounded by count, but neither they nor its active targets are bounded by bytes. If the reply would pass 1 MiB, it keeps as many active targets as fit, in order, then as many of the newest events as fit. `active_count` and `event_count` stay the recorder's, so a reader can tell what was cut.
   - Main has no `clearProgress`, and neither does the service: a target closes when its request ends or its span closes.
-- **`store`:** `block_count` and `total_bytes`, or `null` if the store can't say.
+- **`store`:** `block_count` and `total_bytes`, or `null` if the store can't say. Out of memory is no `null`: the process ends with exit 71 ([Errors](#errors)).
 - **`network`:** the instance's mode, and, under `direct`, what [NAT64 discovery](#network-specific-nat64-prefixes) knows. It is `{ mode: "direct", nat64: { state, prefixes, failures } }` or `{ mode: "socks5", nat64: null }`.
   - `state` is `pending`, `known`, `unknown` or `incomplete`. In `unknown` and `incomplete`, it is why IPv6 targets are refused; in `pending`, why they wait. Pending with failures is a round that has failed and hasn't ended.
   - `prefixes` are the prefixes learned, as `address/length`.
@@ -683,7 +686,7 @@ Upstream's constants are per instance, and some limit bookkeeping rather than wo
   2. idle private instances are evicted first ([Private windows](#private-windows));
   3. admitted work waits, or ends, as above.
 
-  The process doesn't promise a bound on memory it can't account for. **A safety cap** ([question 9](#open-questions), decided 2026-11-25) catches a runaway instead: about 2 GiB of private memory for each process, the persistent one and the ephemeral one, far above its memory budget, where the operating system enforces one: a Windows job memory limit, and Linux's `RLIMIT_DATA`. `RLIMIT_DATA` counts private writable mappings, file-backed or not, and not read-only or shared maps or address space only reserved, so it is no cap on the process's whole resident memory (`RLIMIT_AS` would count those, and isn't used). macOS has no reliable per-process cap, so it gets none. [0010](0010-service-confinement.md#the-memory-cap) sets it in each process's confinement step, before `ipfs.hello`. **Out of memory is then fatal, from any allocation:** Rust's allocator aborts, and an out-of-memory error from SQLite (`SQLITE_NOMEM`) or any other native library the service links ends the process with exit 71 (`out_of_memory`), never a request's error. Main restarts it as it does a crash. Setting it is a later implementation step, with 0010's confinement.
+  The process doesn't promise a bound on memory it can't account for. **A safety cap** ([question 9](#open-questions), decided 2026-11-25) catches a runaway instead: about 2 GiB of private memory for each process, the persistent one and the ephemeral one, far above its memory budget, where the operating system enforces one: a Windows job memory limit, and Linux's `RLIMIT_DATA`. `RLIMIT_DATA` counts private writable mappings, file-backed or not, and not read-only or shared maps or address space only reserved, so it is no cap on the process's whole resident memory (`RLIMIT_AS` would count those, and isn't used). macOS has no reliable per-process cap, so it gets none. [0010](0010-service-confinement.md#the-memory-cap) sets it in each process's confinement step, before `ipfs.hello`. **Out of memory is then fatal, from any allocation:** Rust's allocator aborts, and an out-of-memory error from SQLite (`SQLITE_NOMEM`) or any other native library the service links ends the process with exit 71 (`out_of_memory`), never a request's error. Main restarts it as it does a crash. 0010's confinement sets it, and `main` installs SQLite's out-of-memory hook first ([Errors](#errors)).
 - **Stopping instances** keep their reservations until their teardown is complete.
 
 ## Main's side
@@ -1199,6 +1202,10 @@ Each is a pull request to freedom-ipfs, and none changes mobile's behavior by de
    - **a maximum block size** for every block fetch (2 MiB), on the Bitswap path as on the HTTP one, reserved before the fetch begins;
    - **caches built with a fixed capacity:** the hot cache, the small-body cache and the UnixFS metadata cache, reserved at that capacity;
    - **the background queue bound** of 64.
+9. **Out of memory under the memory cap** ([question 9](#open-questions); freedom-ipfs #91, pinned):
+   - **its own kind:** the store's `StoreError::OutOfMemory` for `SQLITE_NOMEM` and `SQLITE_IOERR_NOMEM`, never `StoreError::Sqlite` and never a write left uncached, and `CoreError::OutOfMemory` from its block provider;
+   - **a fail-stop hook,** `fail_stop_on_oom`, an `unsafe fn` the service calls first in `main`: it wraps SQLite's default `xMalloc` and `xRealloc` (`SQLITE_CONFIG_GETMALLOC`, then `SQLITE_CONFIG_MALLOC`) so that a NULL writes a static line and calls `_exit(71)`. Called after a store has opened, or after other code has initialized SQLite, it installs nothing and returns `TooLate` ([Errors](#errors)).
+   - **Left to a follow-up upstream:** retrieval, UnixFS and the gateway still fold the kind into text, which the hook makes moot for SQLite's own allocation failures.
 
 ## Where the code lives
 
@@ -1334,7 +1341,14 @@ As 0006's 4.7 did, before anything moves:
   - **The lock:** contention gives 75, a network filesystem gives 74, and `hold-lock`.
   - **Parent death,** the 5 s exit watchdog, and parent death while the writer is backed up.
   - **The stall:** exit 76.
-  - **The memory cap's fail-stop,** as [0010's tests](0010-service-confinement.md#tests) list it: with the cap lowered, a Rust allocation and an SQLite one past it each end the process, the SQLite one with exit 71, and no request is answered with an out-of-memory error.
+  - **The memory cap's fail-stop,** as [0010's tests](0010-service-confinement.md#tests) list it: with the cap lowered, a Rust allocation and an SQLite one past it each end the process, the SQLite one with exit 71, and no request is answered with an out-of-memory error. As built (`tests/out_of_memory.rs`), each case in a process of its own:
+    - **the hooks:** one lowers the cap to a headroom above what the process uses at its confinement point (Linux's `VmData`), and `hello` reports it as read back; another fills a memory store, its page cap lifted and its hot cache off, with distinct 64 KiB blocks in `ipfs.start`'s build, or makes one 1 GiB Rust allocation there;
+    - **SQLite past the cap:** exit 71, the store's line on stderr, and the start never answered (Linux);
+    - **Rust past it:** `SIGABRT`, with Rust's message, and the start never answered (Linux);
+    - **an out-of-memory error reaching the service,** injected at the store's open and in `ipfs.stats`: exit 71, never a reply;
+    - **a late hook:** with SQLite used first, the hook is refused and the process exits 77 before `ipfs.hello`.
+
+    Windows's fail-stop cases aren't built yet: its job limit needs a baseline of committed memory, which the hook doesn't read.
 - **Network policy tests:**
   - **A SOCKS5 test proxy** records every connection, and a canary TCP and UDP listener is advertised in provider records and is the target of a configured router's redirect. In `socks5` mode the canary must see nothing, and the proxy everything.
   - **Expansion and redirects:**
@@ -1531,6 +1545,8 @@ Every body already passes through main today, so the pipe adds one copy into the
 
 **2026-11-25, the user's answer to question 9:** a safety cap of about 2 GiB per process, the persistent one and the ephemeral one, where the operating system enforces one: a Windows job memory limit and Linux's `RLIMIT_DATA`; none on macOS, which has no reliable per-process cap. Hitting it ends the process, which main restarts as it does a crash. That every out-of-memory is fatal, a native library's with exit 71, is the coordinator's call (from Codex's review of #503), which the user may veto. [0010](0010-service-confinement.md#the-memory-cap) sets it in the confinement step, a later implementation step. *Budgets*, *Errors*' exit codes, *Bounds*, `memory-cap` and the Rust tests follow. 0008's question 10 has the same answer for `freedom-radicled`.
 - **0010,** amended in this PR: [The memory cap](0010-service-confinement.md#the-memory-cap) specifies the cap for every service process, with its read-back, its report, its fail-stop and its tests, and *Windows*' job object takes the limit.
+
+**2026-11-26, the fail-stop as built:** `main` installs freedom-ipfs-store's out-of-memory hook first (freedom-ipfs #91), a refused hook exits 77, and an out-of-memory error that reaches the service at the store's open or in `ipfs.stats` exits 71 ([Errors](#errors), [Stats](#stats)); the Rust tests are listed in [Tests first](#tests-first). The hook is `unsafe`, so `freedom-ipfsd`'s `unsafe_code` lint is `deny`, with one `#[allow]` on that call, and AGENTS.md rule 6 names it beside `freedom-radicled`'s.
 
 ## Open questions
 
