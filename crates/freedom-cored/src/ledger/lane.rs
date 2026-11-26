@@ -13,9 +13,10 @@
 //!   wait ([`Turn::Now`], deviation `discovery-busy`): while an operation
 //!   runs or waits, it is refused `LEDGER_BUSY` at once.
 //! - **The queue's limit** ([`MAX_QUEUE_WAIT`], 5 minutes): the core may
-//!   not keep a device request queued past it (#520's rule; main's
-//!   watchdog gives a request no `shell.ledger_apdu` has named 5 minutes
-//!   and 15 s). One whose first APDU hasn't gone by then ends `LEDGER_BUSY`
+//!   not keep a device request queued past it (0016's *The device lane*,
+//!   as #520 amends it: main's watchdog gives a request no
+//!   `shell.ledger_apdu` has named 5 minutes and 15 s). One whose first
+//!   APDU hasn't gone by then ends `LEDGER_BUSY`
 //!   ([`LaneEnd::QueueLimit`]), the device busy with another request all
 //!   that time.
 //! - **Each APDU's deadline** goes with it as `deadline_ms`: 15 s, or 5
