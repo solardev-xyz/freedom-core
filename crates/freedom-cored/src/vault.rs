@@ -1374,31 +1374,57 @@ impl Vault {
         use fc_swarm_provider::machine::Event;
         match ask {
             VaultAsk::Owner(key) => VaultAnswer::Event(Event::Owner(self.swarm_owner(*key))),
-            // Its request cancelled (main's cancel read before this ask, or
-            // the request answered): nothing is signed after the cancel.
-            VaultAsk::Sign(sign) if sign.cancelled.is_set() => {
-                VaultAnswer::Event(Event::Signed(Err(fc_json::JsString::from("Cancelled"))))
-            }
-            VaultAsk::OwnSign(own) if own.cancelled.is_set() => {
-                VaultAnswer::Event(Event::Signed(Err(fc_json::JsString::from("Cancelled"))))
-            }
             VaultAsk::Sign(sign) => VaultAnswer::Event(Event::Signed(self.swarm_sign(sign))),
-            VaultAsk::OwnSign(own) => {
-                VaultAnswer::Event(Event::Signed(self.swarm_own_sign(&own.soc)))
-            }
+            VaultAsk::OwnSign(own) => VaultAnswer::Event(Event::Signed(self.swarm_own_sign(own))),
             VaultAsk::Accounts => VaultAnswer::Accounts(self.swarm_accounts()),
         }
     }
 
-    /// Main's own SOC (`swarm.feed`'s update: no page, so 0012's page-SOC
-    /// decision doesn't apply): signed only with the Bee wallet key, as
-    /// `swarm.feed` takes no other (SW-1). The key is derived for the one
-    /// digest and its address, and wiped.
-    pub fn swarm_own_sign(
+    /// A SOC's signature and its key's owner, unless its request has ended
+    /// (main's cancel read before this ask, or the request answered: design
+    /// 0015, "Deadlines and cancel"). The check and the signature hold the
+    /// request's state ([`crate::swarm::engine::Cancelled::unless_ended`]),
+    /// which its end takes too, so the end comes wholly before the
+    /// signature (nothing signed) or after it. The key is derived for the
+    /// one digest and its address, and wiped.
+    fn swarm_soc_signature(
         &self,
         soc: &fc_swarm_provider::machine::SignSoc,
+        cancelled: &crate::swarm::engine::Cancelled,
     ) -> Result<fc_swarm_provider::machine::Signed, fc_json::JsString> {
-        use fc_swarm_provider::machine::{SignKey, Signed};
+        crate::testhooks::swarm_sign_hold("presign");
+        let signed = cancelled.unless_ended(|| {
+            crate::testhooks::swarm_sign_hold("signing");
+            let signed = crate::signing::chunk_signature(
+                &self.state,
+                soc.key,
+                &soc.identifier,
+                soc.span,
+                &soc.payload,
+            );
+            if signed.is_ok() {
+                crate::testhooks::swarm_signed();
+            }
+            signed
+        });
+        let Some(signed) = signed else {
+            return Err(fc_json::JsString::from("Cancelled"));
+        };
+        let (signature, owner) =
+            signed.map_err(|body| fc_json::JsString::from(body.message.as_str()))?;
+        Ok(fc_swarm_provider::machine::Signed { signature, owner })
+    }
+
+    /// Main's own SOC (`swarm.feed`'s update: no page, so 0012's page-SOC
+    /// decision doesn't apply): signed only with the Bee wallet key, as
+    /// `swarm.feed` takes no other (SW-1), unless its request has ended
+    /// ([`Vault::swarm_soc_signature`]).
+    pub fn swarm_own_sign(
+        &self,
+        own: &crate::swarm::engine::OwnSignAsk,
+    ) -> Result<fc_swarm_provider::machine::Signed, fc_json::JsString> {
+        use fc_swarm_provider::machine::SignKey;
+        let soc = &own.soc;
         if soc.key != SignKey::BeeWallet || soc.hold.is_some() {
             crate::log::warn(
                 "swarm: main's own SOC under a key swarm.feed doesn't take",
@@ -1406,16 +1432,7 @@ impl Vault {
             );
             return Err(fc_json::JsString::from(SOC_NOT_COVERED));
         }
-        let (signature, owner) = crate::signing::chunk_signature(
-            &self.state,
-            soc.key,
-            &soc.identifier,
-            soc.span,
-            &soc.payload,
-        )
-        .map_err(|body| fc_json::JsString::from(body.message.as_str()))?;
-        crate::testhooks::swarm_signed();
-        Ok(Signed { signature, owner })
+        self.swarm_soc_signature(soc, &own.cancelled)
     }
 
     /// The user's accounts for a store op (`getDerivedWallets`, which is
@@ -1458,14 +1475,14 @@ impl Vault {
     /// `write-feed-rule-custody-before-write` and
     /// `write-feed-rule-off-before-write` sign after they changed, and
     /// refuse at the upload). A refusal, a locked vault or a failure is the
-    /// text the machine reads. The key is derived for the one digest and
-    /// its address, and wiped.
+    /// text the machine reads. It then signs unless its request has ended
+    /// ([`Vault::swarm_soc_signature`]).
     pub fn swarm_sign(
         &self,
         sign: &crate::swarm::engine::SignAsk,
     ) -> Result<fc_swarm_provider::machine::Signed, fc_json::JsString> {
         use fc_approval::standing::{SocApproval, SocAsk, SocRequest};
-        use fc_swarm_provider::machine::{Signed, SocKind};
+        use fc_swarm_provider::machine::SocKind;
         let decision = SocAsk {
             key: &sign.key,
             agent: None,
@@ -1483,17 +1500,7 @@ impl Vault {
             );
             return Err(fc_json::JsString::from(SOC_NOT_COVERED));
         }
-        let soc = &sign.soc;
-        let (signature, owner) = crate::signing::chunk_signature(
-            &self.state,
-            soc.key,
-            &soc.identifier,
-            soc.span,
-            &soc.payload,
-        )
-        .map_err(|body| fc_json::JsString::from(body.message.as_str()))?;
-        crate::testhooks::swarm_signed();
-        Ok(Signed { signature, owner })
+        self.swarm_soc_signature(&sign.soc, &sign.cancelled)
     }
 
     /// Main asked for `chain.fee_reference`: its reply is the chain's fee

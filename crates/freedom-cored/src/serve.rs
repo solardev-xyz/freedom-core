@@ -45,6 +45,9 @@
 //!   until requests are taken again.
 //! - **A stall ends the core:** once frames have waited [`STALL`] with the
 //!   writer writing nothing, main has stopped reading, and the core exits.
+//!   The swarm thread watches its own frames the same way, with the same
+//!   bound ([`transport::Watchdog`]), as it too holds new requests while
+//!   they wait.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::Range;
@@ -69,7 +72,7 @@ use crate::keystore::client::DesktopKeyStore;
 use crate::requests::{self, Owner, Requests};
 use crate::secrets::Secrets;
 use crate::swarm::thread as swarm;
-use crate::transport::{self, Allowance, Credits, Link, Pending, Route, StreamKey};
+use crate::transport::{self, Allowance, Credits, Link, Pending, Route, StreamKey, Watchdog};
 use crate::vault::{FileSnapshot, Finished, NodeRecovery, Out, Vault};
 use crate::worker::Worker;
 use crate::{chain, gate, hardening, journal, log, naming};
@@ -136,6 +139,13 @@ pub enum Event {
     /// A framing error, as a fixed category (never input text).
     ProtocolError(&'static str),
     WriterFailed,
+    /// A thread's frames waited past its allowance for the stall bound
+    /// with the writer writing nothing ([`Watchdog`]): main has stopped
+    /// reading.
+    NotReading {
+        waited: Duration,
+        thread: &'static str,
+    },
     ThreadDied(&'static str),
     ParentGone,
     /// The startup read of the vault file finished.
@@ -695,6 +705,7 @@ pub fn run(options: &Options) -> Exit {
                 log::error("stdout closed", serde_json::json!({}));
                 break Exit::Protocol;
             }
+            Ok(Event::NotReading { waited, thread }) => break not_reading(waited, thread),
             Ok(Event::ThreadDied(name)) => {
                 log::error("a thread died", serde_json::json!({ "thread": name }));
                 break Exit::Internal;
@@ -2266,6 +2277,7 @@ impl Core {
                 events: start.events.clone(),
                 requests: Arc::clone(&self.requests),
                 link: Arc::clone(&self.link),
+                stall: crate::testhooks::stall(STALL),
                 naming: self.naming.clone(),
                 grants,
                 grants_file,
@@ -2494,12 +2506,10 @@ impl Waiting {
 struct Outbox {
     out: Sender<transport::Out>,
     allowance: Arc<Allowance>,
-    link: Arc<Link>,
     waiting: VecDeque<Waiting>,
-    /// Since when frames have waited.
-    since: Option<Instant>,
-    /// [`STALL`], or a test's.
-    stall: Duration,
+    /// The writer's progress while frames wait, against [`STALL`] or a
+    /// test's bound.
+    watchdog: Watchdog,
 }
 
 impl Outbox {
@@ -2512,10 +2522,8 @@ impl Outbox {
         Outbox {
             out,
             allowance,
-            link,
             waiting: VecDeque::new(),
-            since: None,
-            stall,
+            watchdog: Watchdog::new(link, stall),
         }
     }
 
@@ -2534,9 +2542,7 @@ impl Outbox {
     /// allowance had no room.
     fn hold(&mut self, waiting: Waiting, now: Instant) -> Flow {
         self.waiting.push_back(waiting);
-        if self.since.is_none() {
-            self.since = Some(now);
-        }
+        self.watchdog.waiting(true, now);
         Flow::Continue
     }
 
@@ -2577,11 +2583,7 @@ impl Outbox {
                 return Flow::Exit(Exit::Protocol);
             }
         }
-        if self.waiting.is_empty() {
-            self.since = None;
-        } else if self.since.is_none() {
-            self.since = Some(now);
-        }
+        self.watchdog.waiting(!self.waiting.is_empty(), now);
         Flow::Continue
     }
 
@@ -2590,34 +2592,19 @@ impl Outbox {
         !self.waiting.is_empty()
     }
 
-    /// While frames wait, since when the writer has written nothing: since
-    /// they started waiting, or since its last write if later.
-    fn still(&self) -> Option<Instant> {
-        let since = self.since?;
-        Some(self.link.last_write().map_or(since, |at| at.max(since)))
-    }
-
     /// When the stall bound passes unless the writer moves: the loop wakes
     /// then to look.
     fn deadline(&self) -> Option<Instant> {
-        self.still()?.checked_add(self.stall)
+        self.watchdog.deadline()
     }
 
     /// Ends the core once frames have waited for the stall bound with the
     /// writer writing nothing: main has stopped reading.
     fn check(&self, now: Instant) -> Flow {
-        let Some(still) = self.still() else {
-            return Flow::Continue;
-        };
-        let waited = now.saturating_duration_since(still);
-        if waited < self.stall {
-            return Flow::Continue;
+        match self.watchdog.stalled(now) {
+            Some(waited) => Flow::Exit(not_reading(waited, "loop")),
+            None => Flow::Continue,
         }
-        log::error(
-            "main is not reading replies",
-            serde_json::json!({ "ms": u64::try_from(waited.as_millis()).unwrap_or(u64::MAX) }),
-        );
-        Flow::Exit(Exit::Protocol)
     }
 
     /// Hands every waiting frame to the writer, past the allowance: on
@@ -2631,8 +2618,22 @@ impl Outbox {
             let hold = self.allowance.force(frame.len());
             let _ = self.out.send(transport::Out::Frame { frame, hold });
         }
-        self.since = None;
+        self.watchdog.waiting(false, Instant::now());
     }
+}
+
+/// The core's end once `producer`'s frames waited `waited`, the stall
+/// bound or more, with the writer writing nothing: main has stopped
+/// reading.
+fn not_reading(waited: Duration, producer: &'static str) -> Exit {
+    log::error(
+        "main is not reading replies",
+        serde_json::json!({
+            "ms": u64::try_from(waited.as_millis()).unwrap_or(u64::MAX),
+            "frames": producer,
+        }),
+    );
+    Exit::Protocol
 }
 
 #[cfg(test)]
