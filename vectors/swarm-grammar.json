@@ -17,7 +17,7 @@
     "rows": "each parent's ready check and calls in order: forms, count [min, max], when, and the values the row binds (the design's text). readFeedEntry_index and readFeedEntry_latest are readFeedEntry with and without params.index.",
     "deviation_requests": "the reference's requests the core drops, by deviation id; vectors/swarm.json marks each such request `deviation`.",
     "checked": "the requests of every vectors/swarm.json methods case, by row: each matched its row as `form <name>`, was its ready probe, or was one of a named deviation's requests.",
-    "scenarios": "honest and forbidden: { id, row, from, key (the page key), params (swarm.json's typed form, or main's own params), ready, calls }. A call: form, method, path, query, headers (as main sends them, main_headers included), body ({ bytes, base64 } or { bytes, sha256 }), max_bytes, feed { owner, index }, tree { length, depth }, and reply (status, headers, body { base64 } or body_ref naming the chunk store it comes from, such as dweb-verify.json swarm.chunks). Every call of an honest scenario is admitted in order; a forbidden scenario's calls before its last are admitted and its last is refused before any dial with `rule`.",
+    "scenarios": "honest and forbidden: { id, row, from, key (the page key), params (swarm.json's typed form, or main's own params, whole, in the wire form swarm.json's shell cases use), parts (main's own rows: part k's bytes, { bytes, base64 }, for a { part: k } in params, as a shell step's parts), ready, calls }. A call: form, method, path, query, headers (as main sends them, main_headers included), body ({ bytes, base64 } or { bytes, sha256 }), max_bytes, feed { owner, index }, tree { length, depth }, and reply (status, headers, body { base64 } or body_ref naming the chunk store it comes from, such as dweb-verify.json swarm.chunks). Every call of an honest scenario is admitted in order; a forbidden scenario's calls before its last are admitted and its last is refused before any dial with `rule`.",
     "scenarios_checked": "the readData scenarios played against the design's admission rules (Values main derives: the root at params.reference, one ranged bytes, and each later chunk an unfetched slot of an occurrence, address, logical length and depth, that an intermediate main returned names, by 0009's geometry): honest ones admitted whole, forbidden ones refused at their last call by their rule. A tree whose chunks carry a redundancy level is skipped (its parities aren't modelled here): `skipped` names those scenarios.",
     "deep_trees": "readData-one-chunk-at-depths-6-and-7, readData-leaf-at-depth-8-fetched-again, readData-over-full-intermediate and their forbidden alternatives: chains of lone-reference wrappers (one reference, the child's span, as Ant writes one), each giving its child its whole length one level deeper, and a root with more references than its length needs, every chunk core-sdk's makeContentAddressedChunk. No honest splitter writes them inside readData's 5 MiB; a node can serve them."
   },
@@ -37296,9 +37296,12 @@
         "kind": "data",
         "parts": [
           {
-            "bytes": 5
+            "bytes": 5,
+            "base64": "aGVsbG8="
           }
-        ]
+        ],
+        "pin": true,
+        "deferred": false
       },
       "calls": [
         {
@@ -37373,11 +37376,16 @@
         "kind": "data",
         "parts": [
           {
-            "bytes": 5
+            "bytes": 5,
+            "base64": "aGVsbG8="
           }
         ],
+        "name": "draft.md",
+        "content_type": "text/markdown",
+        "encrypt": true,
         "batch": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
-        "encrypt": true
+        "pin": true,
+        "deferred": false
       },
       "calls": [
         {
@@ -37438,11 +37446,20 @@
         "kind": "file",
         "parts": [
           {
-            "bytes": 9
+            "bytes": 9,
+            "part": 0
           }
         ],
-        "name": "notes.txt"
+        "name": "notes.txt",
+        "pin": true,
+        "deferred": true
       },
+      "parts": [
+        {
+          "bytes": 9,
+          "base64": "dGhlIG5vdGVz"
+        }
+      ],
       "calls": [
         {
           "form": "stamps",
@@ -37517,14 +37534,28 @@
         "parts": [
           {
             "path": "index.html",
-            "bytes": 4
+            "bytes": 4,
+            "part": 0
           },
           {
             "path": "a/b.txt",
-            "bytes": 1
+            "bytes": 1,
+            "part": 1
           }
-        ]
+        ],
+        "pin": true,
+        "deferred": true
       },
+      "parts": [
+        {
+          "bytes": 4,
+          "base64": "aG9tZQ=="
+        },
+        {
+          "bytes": 1,
+          "base64": "Yg=="
+        }
+      ],
       "calls": [
         {
           "form": "stamps",
@@ -37601,12 +37632,22 @@
         "parts": [
           {
             "path": "x.txt",
-            "bytes": 1
+            "bytes": 1,
+            "part": 0
           }
         ],
+        "index_document": "x.txt",
+        "encrypt": true,
         "batch": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
-        "encrypt": true
+        "pin": true,
+        "deferred": true
       },
+      "parts": [
+        {
+          "bytes": 1,
+          "base64": "eA=="
+        }
+      ],
       "calls": [
         {
           "form": "bzz_tar",
@@ -44531,11 +44572,16 @@
         "kind": "data",
         "parts": [
           {
-            "bytes": 5
+            "bytes": 5,
+            "base64": "aGVsbG8="
           }
         ],
+        "name": "draft.md",
+        "content_type": "text/markdown",
+        "encrypt": true,
         "batch": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
-        "encrypt": true
+        "pin": true,
+        "deferred": false
       },
       "rule": "value",
       "note": "a swarm-postage-batch-id other than the parent's batch",
@@ -44595,11 +44641,16 @@
         "kind": "data",
         "parts": [
           {
-            "bytes": 5
+            "bytes": 5,
+            "base64": "aGVsbG8="
           }
         ],
+        "name": "draft.md",
+        "content_type": "text/markdown",
+        "encrypt": true,
         "batch": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
-        "encrypt": true
+        "pin": true,
+        "deferred": false
       },
       "rule": "order",
       "note": "a /stamps when the parent named its batch",
@@ -44618,51 +44669,6 @@
               "identity"
             ]
           ]
-        },
-        {
-          "form": "bzz_file",
-          "method": "POST",
-          "path": "/bzz",
-          "query": [
-            [
-              "name",
-              "draft.md"
-            ]
-          ],
-          "headers": [
-            [
-              "accept",
-              "application/json, text/plain, */*"
-            ],
-            [
-              "accept-encoding",
-              "identity"
-            ],
-            [
-              "content-type",
-              "text/markdown"
-            ],
-            [
-              "swarm-postage-batch-id",
-              "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
-            ],
-            [
-              "swarm-pin",
-              "true"
-            ],
-            [
-              "swarm-encrypt",
-              "true"
-            ],
-            [
-              "swarm-deferred-upload",
-              "false"
-            ]
-          ],
-          "body": {
-            "bytes": 5,
-            "base64": "aGVsbG8="
-          }
         }
       ]
     },
@@ -44674,9 +44680,12 @@
         "kind": "data",
         "parts": [
           {
-            "bytes": 5
+            "bytes": 5,
+            "base64": "aGVsbG8="
           }
-        ]
+        ],
+        "pin": true,
+        "deferred": false
       },
       "rule": "header",
       "note": "swarm-encrypt under swarm.publish without encrypt",
