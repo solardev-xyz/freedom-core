@@ -105,7 +105,7 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::fragment::{self, Delivery, FragmentError, Reassembler, Splitter};
@@ -690,6 +690,59 @@ impl Link {
         let frame = Zeroizing::new(fragment::credit_frame().to_vec());
         let hold = self.control.force(frame.len());
         self.send(Out::Frame { frame, hold });
+    }
+}
+
+/// The writer's progress, watched for a producer whose frames wait past its
+/// allowance: while they wait, since when the writer has written nothing,
+/// since they started waiting or since its last write if later. Once that
+/// lasts the stall bound, main has stopped reading, and the core exits
+/// (design 0001). The vault loop watches its frames so, and the swarm
+/// thread its own (design 0015): each producer that holds new requests
+/// while its frames wait.
+pub struct Watchdog {
+    link: Arc<Link>,
+    /// Since when frames have waited.
+    since: Option<Instant>,
+    /// The stall bound.
+    stall: Duration,
+}
+
+impl Watchdog {
+    pub fn new(link: Arc<Link>, stall: Duration) -> Self {
+        Watchdog {
+            link,
+            since: None,
+            stall,
+        }
+    }
+
+    /// Whether frames wait `now`: a wait starts its clock, its end stops it.
+    pub fn waiting(&mut self, waiting: bool, now: Instant) {
+        if !waiting {
+            self.since = None;
+        } else if self.since.is_none() {
+            self.since = Some(now);
+        }
+    }
+
+    /// While frames wait, since when the writer has written nothing.
+    pub fn still(&self) -> Option<Instant> {
+        let since = self.since?;
+        Some(self.link.last_write().map_or(since, |at| at.max(since)))
+    }
+
+    /// When the stall bound passes unless the writer moves: the producer
+    /// wakes then to look.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.still()?.checked_add(self.stall)
+    }
+
+    /// How long frames have waited with the writer writing nothing, once
+    /// that is the stall bound or more: main has stopped reading.
+    pub fn stalled(&self, now: Instant) -> Option<Duration> {
+        let waited = now.saturating_duration_since(self.still()?);
+        (waited >= self.stall).then_some(waited)
     }
 }
 

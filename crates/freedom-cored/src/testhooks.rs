@@ -7,8 +7,8 @@
 //!   anything (so before its commit point).
 //! - `FREEDOM_CORED_TEST_KDF_DEADLINE_MS` replaces the 30 s KDF deadline.
 //! - `FREEDOM_CORED_TEST_STALL_MS` replaces the 30 s the vault loop's
-//!   replies may wait on a writer that writes nothing before the core
-//!   exits.
+//!   replies, and the swarm thread's frames, may wait on a writer that
+//!   writes nothing before the core exits.
 //! - `FREEDOM_CORED_TEST_COMMIT_DELAY_MS` stalls a job right after it claims
 //!   its commit point, before the rename or unlink.
 //! - `FREEDOM_CORED_TEST_COMMIT_MARKER` names a file created the moment a job

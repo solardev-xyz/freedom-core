@@ -2189,37 +2189,10 @@ fn play_concurrent(case: &JsValue) {
 #[test]
 fn answers_waiting_for_the_writer_hold_new_requests() {
     let mut main = swarm_world::main();
-    main.world(json!({ "reset": true, "clock": T0 }));
-    let mut origins = serde_json::Map::new();
-    const SITES: usize = 9000;
-    for i in 0..SITES {
-        origins.insert(
-            format!("https://site-{i}.example"),
-            json!({
-                "activeIdentityId": "bee-wallet",
-                "identities": { "bee-wallet": {
-                    "id": "bee-wallet", "mode": "bee-wallet", "publisherKeyIndex": null,
-                    "walletIndex": null, "label": "Bee wallet identity", "createdAt": 1, "lastUsedAt": null,
-                } },
-                "feedGranted": true, "grantedAt": 1, "feeds": {},
-            }),
-        );
-    }
-    let text = json!({ "version": 2, "nextPublisherKeyIndex": 0, "origins": origins }).to_string();
-    assert!(text.len() > 1 << 20, "{} bytes", text.len());
-    std::fs::write(main.core.grant_root.join(feeds::FILE_NAME), &text).unwrap();
-    main.world(json!({ "reload": true }));
+    a_large_feed_store(&mut main);
     let calls = 24;
     main.core.pause_reading();
-    let ids: Vec<u64> = (0..calls)
-        .map(|_| {
-            main.own_request(
-                "swarm.identities",
-                &op_params("get-all-origins", &[]),
-                "chrome",
-            )
-        })
-        .collect();
+    let ids = pipelined_origins(&mut main, calls);
     // Time for an unbounded thread to answer every one.
     std::thread::sleep(std::time::Duration::from_secs(6));
     main.core.resume_reading();
@@ -2247,6 +2220,78 @@ fn answers_waiting_for_the_writer_hold_new_requests() {
         "{most} bytes waited at once, an answer is {largest}"
     );
     main.settled();
+}
+
+/// A main that stops reading for good ends the core (design 0001's stall
+/// bound, 30 s, 3 s here), as the vault loop's replies do: the Swarm
+/// answers wait past the writer's allowances, new requests are held, and
+/// nothing else bounds the wait (`get-all-origins` has no deadline); once
+/// the writer has written nothing for the bound, the core exits 76.
+#[test]
+fn a_main_that_never_reads_again_ends_the_core() {
+    let mut main = swarm_world::main_with(&["swarm"], &[("FREEDOM_CORED_TEST_STALL_MS", "3000")]);
+    a_large_feed_store(&mut main);
+    main.core.pause_reading();
+    let started = std::time::Instant::now();
+    pipelined_origins(&mut main, 24);
+    // Within the bound: alive.
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+    assert!(
+        main.core.child.try_wait().unwrap().is_none(),
+        "exited early"
+    );
+    assert_eq!(main.core.exit_code(std::time::Duration::from_secs(20)), 76);
+    // With slack, as for the thread's other bounds.
+    assert!(
+        started.elapsed() + std::time::Duration::from_millis(2)
+            >= std::time::Duration::from_secs(3)
+    );
+    let stderr = main.core.stderr();
+    let line = stderr
+        .lines()
+        .find(|line| line.contains("main is not reading replies"))
+        .unwrap_or_else(|| panic!("no stall line: {stderr}"));
+    assert!(line.contains(r#""frames":"swarm""#), "{line}");
+}
+
+/// The sites in [`a_large_feed_store`].
+const SITES: usize = 9000;
+
+/// A feed store of a few MiB, loaded: each `get-all-origins` answer is
+/// that large.
+fn a_large_feed_store(main: &mut Main) {
+    main.world(json!({ "reset": true, "clock": T0 }));
+    let mut origins = serde_json::Map::new();
+    for i in 0..SITES {
+        origins.insert(
+            format!("https://site-{i}.example"),
+            json!({
+                "activeIdentityId": "bee-wallet",
+                "identities": { "bee-wallet": {
+                    "id": "bee-wallet", "mode": "bee-wallet", "publisherKeyIndex": null,
+                    "walletIndex": null, "label": "Bee wallet identity", "createdAt": 1, "lastUsedAt": null,
+                } },
+                "feedGranted": true, "grantedAt": 1, "feeds": {},
+            }),
+        );
+    }
+    let text = json!({ "version": 2, "nextPublisherKeyIndex": 0, "origins": origins }).to_string();
+    assert!(text.len() > 1 << 20, "{} bytes", text.len());
+    std::fs::write(main.core.grant_root.join(feeds::FILE_NAME), &text).unwrap();
+    main.world(json!({ "reload": true }));
+}
+
+/// Main's `calls` pipelined `get-all-origins` calls, not read: their IDs.
+fn pipelined_origins(main: &mut Main, calls: usize) -> Vec<u64> {
+    (0..calls)
+        .map(|_| {
+            main.own_request(
+                "swarm.identities",
+                &op_params("get-all-origins", &[]),
+                "chrome",
+            )
+        })
+        .collect()
 }
 
 /// Nothing is signed after main's cancel (design 0015, "Deadlines and

@@ -114,6 +114,7 @@ use crate::requests::{self, Dispatch, Expect, Owner, Requests, Start};
 use crate::serve::Event;
 use crate::transport::{
     self, Allowance, Credit, Link, Out, Reply, StreamEntry, StreamKey, StreamMark, StreamRoutes,
+    Watchdog,
 };
 
 /// The methods this thread serves (design 0015, SWM-4's D5): a page's
@@ -271,6 +272,10 @@ pub struct Spawn {
     pub events: Sender<Event>,
     pub requests: Arc<Requests>,
     pub link: Arc<Link>,
+    /// The stall bound: once the thread's frames have waited past its
+    /// allowances this long with the writer writing nothing, main has
+    /// stopped reading, and the core exits ([`transport::Watchdog`]).
+    pub stall: Duration,
     /// The naming thread, for the name checks (D1).
     pub naming: naming::Handle,
     /// The Swarm grants, shared with the event loop (D2), and once they
@@ -304,12 +309,14 @@ pub fn spawn(start: Spawn) -> std::io::Result<Handle> {
         events,
         requests,
         link,
+        stall,
         naming,
         grants,
         grants_file,
         bindings,
         stores,
     } = start;
+    let watchdog = Watchdog::new(Arc::clone(&link), stall);
     let grants_moved = grants_file.is_some();
     std::thread::Builder::new()
         .name("swarm".into())
@@ -359,6 +366,7 @@ pub fn spawn(start: Spawn) -> std::io::Result<Handle> {
                 wire,
                 started: Instant::now(),
                 held: VecDeque::new(),
+                watchdog,
                 #[cfg(feature = "testhooks")]
                 parked: VecDeque::new(),
                 #[cfg(feature = "testhooks")]
@@ -367,6 +375,10 @@ pub fn spawn(start: Spawn) -> std::io::Result<Handle> {
             let event = match run(&rx, thread) {
                 Stop::Protocol(category) => Event::ProtocolError(category),
                 Stop::Writer => Event::WriterFailed,
+                Stop::NotReading(waited) => Event::NotReading {
+                    waited,
+                    thread: "swarm",
+                },
                 // The event loop has gone: nothing to report to.
                 Stop::Gone => return,
             };
@@ -382,6 +394,9 @@ enum Stop {
     Protocol(&'static str),
     /// The writer has gone.
     Writer,
+    /// The thread's frames waited past its allowances for the stall bound
+    /// with the writer writing nothing: main has stopped reading.
+    NotReading(Duration),
     /// The event loop has gone.
     Gone,
 }
@@ -408,6 +423,10 @@ fn run(rx: &Receiver<Mail>, mut thread: Thread) -> Stop {
             .map_or(Duration::from_secs(3600), |at| {
                 Duration::from_millis(at.saturating_sub(thread.now()))
             });
+        // While frames wait, the thread wakes at the stall bound to look.
+        let wait = thread.watchdog.deadline().map_or(wait, |at| {
+            wait.min(at.saturating_duration_since(Instant::now()))
+        });
         // A vault answer the test hooks park is polled for its release.
         #[cfg(feature = "testhooks")]
         let wait = if thread.parked.is_empty() {
@@ -437,6 +456,11 @@ struct Thread {
     /// New requests held, with their frames' credit, while answers wait for
     /// the writer (and what must stay behind them): see [`Thread::accept`].
     held: VecDeque<Mail>,
+    /// The writer's progress while the thread's frames wait past its
+    /// allowances: with new requests held, nothing else bounds the wait
+    /// (an immediate store op has no deadline), so a main that stops
+    /// reading for good ends the core, as the vault loop's frames do.
+    watchdog: Watchdog,
     /// Vault answers the test hooks hold back (`FREEDOM_CORED_TEST_SWARM_HOLD`,
     /// D11), in order, until the hook's release.
     #[cfg(feature = "testhooks")]
@@ -510,7 +534,13 @@ impl Thread {
         if self.engine.next_due().is_some_and(|at| at <= now) {
             self.engine.tick(&mut self.wire, now).map_err(fault)?;
         }
-        self.wire.flush()
+        self.wire.flush()?;
+        let now = Instant::now();
+        self.watchdog.waiting(self.wire.frames_waiting(), now);
+        match self.watchdog.stalled(now) {
+            Some(waited) => Err(Stop::NotReading(waited)),
+            None => Ok(()),
+        }
     }
 
     /// A message from the event loop: handled now, or held. While answers
@@ -1519,6 +1549,13 @@ impl Wire {
     /// writer's allowances (an event queued behind one waits with it).
     fn answers_waiting(&self) -> bool {
         !self.large.is_empty() || self.small.iter().any(|(_, answer)| answer.is_some())
+    }
+
+    /// Whether any frame of the thread's waits here for room in the
+    /// writer's allowances: an answer, an event, a request to main, or a
+    /// stream's frame.
+    fn frames_waiting(&self) -> bool {
+        !self.small.is_empty() || self.made.is_some() || !self.large.is_empty()
     }
 
     /// The bytes of the answers waiting here.
