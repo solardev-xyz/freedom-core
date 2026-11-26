@@ -13,8 +13,8 @@ use common::*;
 use fc_evm::{Transaction, typed_data_parse};
 use fc_ledger::bounds::Bound;
 use fc_ledger::{
-    Cause, Failed, LedgerCode, LedgerPath, Operation, ProtocolFault, Refusal, Reply, Scheme,
-    SignatureFault, Signed, Step,
+    Cause, Failed, LedgerCode, LedgerPath, Operation, ProtocolFault, Refusal, Reply, Retained,
+    Scheme, SignatureFault, Signed, Step,
 };
 use serde_json::{Value, json};
 
@@ -256,17 +256,24 @@ fn an_address_answer_out_of_form() {
         assert_eq!(code(&run), LedgerCode::Unknown, "{what}");
         assert!(matches!(cause(&run), Cause::Answer(_)), "{what}");
     }
-    // An all-lowercase address is read.
-    let mut op = Operation::sign_message(account.clone(), b"m".to_vec()).unwrap();
-    let mut device = Device::default();
-    let run = run(&mut op, |index, apdu| {
-        let mut answer = device.answer(apdu);
-        if let (0, Answer::Bytes(bytes)) = (index, &mut answer) {
-            bytes[67..107].make_ascii_lowercase();
-        }
-        relay(index, apdu, answer)
-    });
-    assert!(run.done.is_ok(), "{:?}", run.done);
+    // An address all in lower case, or all in upper case, is read, as
+    // fc-evm's parse_address reads one.
+    for upper in [false, true] {
+        let mut op = Operation::sign_message(account.clone(), b"m".to_vec()).unwrap();
+        let mut device = Device::default();
+        let run = run(&mut op, |index, apdu| {
+            let mut answer = device.answer(apdu);
+            if let (0, Answer::Bytes(bytes)) = (index, &mut answer) {
+                if upper {
+                    bytes[67..107].make_ascii_uppercase();
+                } else {
+                    bytes[67..107].make_ascii_lowercase();
+                }
+            }
+            relay(index, apdu, answer)
+        });
+        assert!(run.done.is_ok(), "upper {upper}: {:?}", run.done);
+    }
 }
 
 #[test]
@@ -467,17 +474,56 @@ fn object(key: &str, value: Value) -> Value {
     Value::Object(map)
 }
 
-/// Typed data under abandon-12's first live account: its run over the
-/// scripted device, or its refusal.
-fn typed(types: Value, message: Value) -> Result<Run, Refusal> {
+/// 0016's *Bounds*: an operation's state is at most 64 KiB beyond its
+/// request.
+const BEYOND: usize = 64 * 1024;
+
+/// Runs an operation over the device, measuring what it holds before its
+/// first APDU and after each answer: the most of its request and the most
+/// beyond it.
+fn run_measured(op: &mut Operation, device: &mut Device) -> (Run, Retained) {
+    let mut most = op.retained();
+    let mut apdus = Vec::new();
+    let mut step = op.start();
+    loop {
+        let now = op.retained();
+        most.request = most.request.max(now.request);
+        most.beyond = most.beyond.max(now.beyond);
+        match step {
+            Step::Send(exchange) => {
+                let apdu = exchange.apdu.into_bytes();
+                let owned = relay(apdus.len(), &apdu, device.answer(&apdu));
+                apdus.push(apdu);
+                step = op.answer(owned.as_reply());
+            }
+            Step::Done(done) => {
+                let run = Run {
+                    apdus,
+                    confirms: Vec::new(),
+                    done,
+                };
+                return (run, most);
+            }
+        }
+    }
+}
+
+/// Typed data under abandon-12's first live account, and its device.
+fn typed_parts(types: Value, message: Value) -> Result<(Operation, Device), Refusal> {
     let domain = json!({ "name": "B" });
     // Typed data 0002 refuses has no hash: the parse refuses it first.
     let hash = fc_evm::typed_data_hash(&domain, &types, &message).unwrap_or_default();
-    let account = account_at("44'/60'/0'/0/0");
     let typed = json!({ "domain": domain, "types": types, "message": message });
-    let mut op = typed_operation(account, &typed, &hash)?;
+    let op = typed_operation(account_at("44'/60'/0'/0/0"), &typed, &hash)?;
     let mut device = Device::default();
     device.typed_hash = Some(hash);
+    Ok((op, device))
+}
+
+/// Typed data under abandon-12's first live account: its run over the
+/// scripted device, or its refusal.
+fn typed(types: Value, message: Value) -> Result<Run, Refusal> {
+    let (mut op, mut device) = typed_parts(types, message)?;
     let run = run_device(&mut op, &mut device);
     assert!(run.done.is_ok(), "{:?}", run.done);
     Ok(run)
@@ -563,6 +609,22 @@ fn typed_data_of_2048_and_2049_apdus() {
     };
     assert_eq!(build(238).unwrap().apdus.len(), 2048);
     assert_eq!(refusal_of(build(239)), Refusal::TooLarge(Bound::Apdus));
+    // At the edge, the parse and a cursor: nothing beyond the request past
+    // 64 KiB.
+    let mut fields = Vec::new();
+    let mut message = serde_json::Map::new();
+    for k in 0..8 {
+        fields.push(json!({ "name": format!("f{k}"), "type": "uint8[]" }));
+        message.insert(
+            format!("f{k}"),
+            json!(vec![1; if k < 7 { 255 } else { 238 }]),
+        );
+    }
+    let (mut op, mut device) = typed_parts(json!({ "M": fields }), Value::Object(message)).unwrap();
+    let (run, most) = run_measured(&mut op, &mut device);
+    assert!(run.done.is_ok());
+    assert_eq!(run.apdus.len(), 2048);
+    assert!(most.beyond <= BEYOND, "{most:?}");
 }
 
 #[test]
@@ -571,9 +633,12 @@ fn messages_of_2048_and_2049_apdus() {
     // 125 bytes in the first piece, 150 in each next: 2,046 pieces.
     let len = 125 + 2045 * 150;
     let mut op = Operation::sign_message(account.clone(), vec![7; len]).unwrap();
-    let run = run_device(&mut op, &mut Device::default());
+    let (run, most) = run_measured(&mut op, &mut Device::default());
     assert!(run.done.is_ok());
     assert_eq!(run.apdus.len(), 2048);
+    // The message is the request, held once; the rest within 64 KiB.
+    assert_eq!(most.request, len);
+    assert!(most.beyond <= BEYOND, "{most:?}");
     assert_eq!(
         refusal_of(Operation::sign_message(account.clone(), vec![7; len + 1])),
         Refusal::TooLarge(Bound::Apdus)
@@ -607,13 +672,26 @@ fn transactions_of_2048_and_2049_apdus() {
         len = len + target - payload;
     }
     let mut op = Operation::sign_transaction(account.clone(), &tx(len)).unwrap();
-    let run = run_device(&mut op, &mut Device::default());
+    let (run, most) = run_measured(&mut op, &mut Device::default());
     assert!(
         matches!(run.done, Ok(Signed::Transaction(_))),
         "{:?}",
         run.done
     );
     assert_eq!(run.apdus.len(), 2048);
+    // T, the unsigned serialization, is the request, held once; the pieces
+    // are cut from it and the path as they go, so what the operation holds
+    // beyond it stays within 64 KiB.
+    assert_eq!(most.request, target - 21);
+    assert!(most.beyond <= BEYOND, "{most:?}");
+    // And the pieces join to P ‖ T exactly.
+    let joined: Vec<u8> = run.apdus[2..]
+        .iter()
+        .flat_map(|a| a[5..].to_vec())
+        .collect();
+    let mut want = account_at("44'/60'/0'/0/0").path.encode();
+    want.extend_from_slice(tx(len).prepare().unwrap().unsigned());
+    assert_eq!(joined, want);
     assert_eq!(
         refusal_of(Operation::sign_transaction(account, &tx(len + 1))),
         Refusal::TooLarge(Bound::Apdus)

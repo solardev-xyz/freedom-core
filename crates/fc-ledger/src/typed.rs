@@ -107,6 +107,34 @@ impl TypedStream {
         })
     }
 
+    /// The heap the parsed request holds here: its types, and its values
+    /// in the order they are sent.
+    pub(crate) fn retained(&self) -> usize {
+        use std::mem::size_of;
+        let TypedStream {
+            types,
+            events,
+            cursor: _,
+        } = self;
+        let mut bytes = types.capacity() * size_of::<TypedStruct>();
+        for ty in types {
+            bytes += ty.name.capacity() + ty.fields.capacity() * size_of::<TypedField>();
+            for field in &ty.fields {
+                bytes += field.name.capacity() + field.dims.capacity() * size_of::<Option<u64>>();
+                if let TypedBase::Struct(name) = &field.base {
+                    bytes += name.capacity();
+                }
+            }
+        }
+        bytes += events.capacity() * size_of::<Event>();
+        for event in events {
+            if let Event::Value(value) = event {
+                bytes += value.capacity();
+            }
+        }
+        bytes
+    }
+
     /// The next definition or value APDU; `None` after the last.
     pub(crate) fn next(&mut self) -> Option<Apdu> {
         loop {

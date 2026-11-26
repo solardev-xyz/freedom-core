@@ -45,6 +45,6 @@ pub use apdu::{AnswerFault, Apdu, MAX_ANSWER, MAX_DATA, MIN_ANSWER};
 pub use code::{Failed, LedgerCode};
 pub use machine::{
     Account, Cause, ETHEREUM_APP, Exchange, Failure, MAX_ACCOUNTS, Operation, ProtocolFault,
-    Refusal, Reply, SignatureFault, Signed, Step,
+    Refusal, Reply, Retained, SignatureFault, Signed, Step,
 };
 pub use path::{LedgerPath, MAX_INDEX, PathError, Scheme};

@@ -212,6 +212,16 @@ impl Refusal {
     }
 }
 
+/// The heap an operation holds, as 0016's *Bounds* splits it: the
+/// request's own representation (the transaction's unsigned serialization,
+/// the message, typed data's parse), and everything beyond it, which is at
+/// most 64 KiB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retained {
+    pub request: usize,
+    pub beyond: usize,
+}
+
 /// One device operation.
 #[derive(Debug)]
 pub struct Operation {
@@ -255,11 +265,14 @@ enum Head {
 #[derive(Debug)]
 enum Body {
     Transaction {
-        prepared: PreparedTransaction,
+        /// The one copy of `T`, the unsigned serialization; the pieces of
+        /// `P ‖ T` are cut from it and the path as they are sent, and the
+        /// signed transaction reuses it. `None` once it is assembled.
+        prepared: Option<PreparedTransaction>,
+        digest: [u8; 32],
         /// A legacy transaction's chain ID's first four bytes, which the
         /// app keeps for its `v`; `None` for EIP-1559.
         legacy: Option<u64>,
-        payload: Vec<u8>,
         size: usize,
         next: usize,
     },
@@ -331,20 +344,19 @@ impl Operation {
     pub fn sign_transaction(account: Account, tx: &Transaction) -> Result<Self, Refusal> {
         let prepared = tx.prepare().map_err(Refusal::Transaction)?;
         let path = account.path.encode();
-        let mut payload = path.clone();
-        payload.extend_from_slice(prepared.unsigned());
+        let length = path.len() + prepared.unsigned().len();
         let legacy = (tx.tx_type() == 0).then(|| chain_prime(tx.chain_id()));
-        let size = piece_size(&payload, tx)?;
-        if payload.len().div_ceil(size) > MAX_APDUS - 2 {
+        let size = piece_size(length, tx)?;
+        if length.div_ceil(size) > MAX_APDUS - 2 {
             return Err(Refusal::TooLarge(Bound::Apdus));
         }
         Ok(Self::sign(
             account,
             path,
             Body::Transaction {
-                prepared,
+                digest: prepared.digest(),
+                prepared: Some(prepared),
                 legacy,
-                payload,
                 size,
                 next: 0,
             },
@@ -431,6 +443,70 @@ impl Operation {
             ended: false,
             app_version: None,
         }
+    }
+
+    /// What the operation holds now ([`Retained`]): every field counted,
+    /// buffers by their capacity, the transaction's serialization by its
+    /// length (fc-evm allocates it to fit).
+    pub fn retained(&self) -> Retained {
+        use std::mem::size_of;
+        let Operation {
+            kind,
+            pending: _,
+            started: _,
+            ended: _,
+            app_version,
+        } = self;
+        let mut request = 0;
+        let mut beyond = size_of::<Operation>() + app_version.as_ref().map_or(0, String::capacity);
+        match kind {
+            Kind::Accounts {
+                scheme: _,
+                start: _,
+                count: _,
+                found,
+            } => {
+                beyond += found.capacity() * size_of::<Account>();
+                beyond += found.iter().map(|a| path_heap(&a.path)).sum::<usize>();
+            }
+            Kind::Add { path } => beyond += path_heap(path),
+            Kind::Sign(sign) => {
+                let Sign {
+                    account,
+                    path,
+                    head: _,
+                    body,
+                } = &**sign;
+                beyond += size_of::<Sign>() + path_heap(&account.path) + path.capacity();
+                match body {
+                    Body::Transaction {
+                        prepared,
+                        digest: _,
+                        legacy: _,
+                        size: _,
+                        next: _,
+                    } => {
+                        request += prepared.as_ref().map_or(0, |p| p.unsigned().len());
+                    }
+                    Body::Message {
+                        head,
+                        message,
+                        first: _,
+                        next: _,
+                    } => {
+                        beyond += head.capacity();
+                        request += message.capacity();
+                    }
+                    Body::TypedData {
+                        stream,
+                        hash: _,
+                        hashes: _,
+                        phase: _,
+                    } => request += stream.retained(),
+                }
+            }
+        }
+        Retained { request, beyond }
     }
 
     /// The first APDU.
@@ -626,23 +702,27 @@ impl Sign {
     fn next(&mut self) -> (Option<Apdu>, Pending, bool) {
         match &mut self.body {
             Body::Transaction {
-                payload,
+                prepared,
                 size,
                 next,
                 ..
             } => {
+                let unsigned = prepared
+                    .as_ref()
+                    .map(PreparedTransaction::unsigned)
+                    .unwrap_or_default();
+                let length = self.path.len() + unsigned.len();
                 let start = *next * *size;
-                let end = (start + *size).min(payload.len());
-                let last = end >= payload.len();
+                let end = (start + *size).min(length);
+                let last = end >= length;
                 let header = if *next == 0 {
                     header::TX_FIRST
                 } else {
                     header::TX_MORE
                 };
                 *next += 1;
-                let apdu = payload
-                    .get(start..end)
-                    .and_then(|piece| Apdu::new(header, piece));
+                let apdu = piece(&self.path, unsigned, start, end)
+                    .and_then(|piece| Apdu::new(header, &piece));
                 (apdu, Pending::Piece { last }, last)
             }
             Body::Message {
@@ -707,7 +787,7 @@ impl Sign {
     /// The signature's answer, `v ‖ r ‖ s`, recovered against the account
     /// and the digest the user confirmed, `s` low (deviation
     /// `signature-check`); for a transaction, assembled and read back.
-    fn check(&self, body: &[u8]) -> Result<Signed, (LedgerCode, Cause)> {
+    fn check(&mut self, body: &[u8]) -> Result<Signed, (LedgerCode, Cause)> {
         let bad = |fault| (LedgerCode::BadSignature, Cause::Signature(fault));
         let (v, rs) = apdu::read_signature(body).ok_or(bad(SignatureFault::Length))?;
         let account = &self.account.address;
@@ -722,19 +802,24 @@ impl Sign {
             }
             Ok(signature)
         };
-        match &self.body {
+        match &mut self.body {
             Body::Transaction {
-                prepared, legacy, ..
+                prepared,
+                digest,
+                legacy,
+                ..
             } => {
                 let parity = match legacy {
                     None => (v <= 1).then_some(v),
                     Some(prime) => legacy_parity(*prime, v),
                 }
                 .ok_or(bad(SignatureFault::V))?;
-                let digest = prepared.digest();
+                let digest = *digest;
                 let signature = signed(&digest, parity)?;
+                // The last answer: the one copy becomes the signed transaction.
                 let tx = prepared
-                    .clone()
+                    .take()
+                    .ok_or(bad(SignatureFault::Assembly))?
                     .finish(&signature)
                     .map_err(|_| bad(SignatureFault::Assembly))?;
                 let decoded = decode_signed(&tx.raw).map_err(|_| bad(SignatureFault::Assembly))?;
@@ -756,6 +841,11 @@ impl Sign {
             }
         }
     }
+}
+
+/// A path's elements on the heap.
+fn path_heap(path: &LedgerPath) -> usize {
+    std::mem::size_of_val(path.derivation_path().children())
 }
 
 /// A message's and typed data's `v`: 27 or 28.
@@ -793,8 +883,8 @@ fn legacy_parity(prime: u64, v: u8) -> Option<u8> {
 /// piece ends where a legacy transaction could (`utils.js:202–247`): the
 /// last piece is whole or longer than the RLP of `[chainId, 0, 0]` without
 /// its list prefix.
-fn piece_size(payload: &[u8], tx: &Transaction) -> Result<usize, Refusal> {
-    if payload.len() <= MAX_DATA || tx.tx_type() != 0 {
+fn piece_size(length: usize, tx: &Transaction) -> Result<usize, Refusal> {
+    if length <= MAX_DATA || tx.tx_type() != 0 {
         return Ok(MAX_DATA);
     }
     let mut vrs = Vec::new();
@@ -803,8 +893,22 @@ fn piece_size(payload: &[u8], tx: &Transaction) -> Result<usize, Refusal> {
     rlp::uint(&mut vrs, &U256::ZERO);
     (1..=MAX_DATA)
         .rev()
-        .find(|size| payload.len().is_multiple_of(*size) || payload.len() % size > vrs.len())
+        .find(|size| length.is_multiple_of(*size) || length % size > vrs.len())
         .ok_or(Refusal::Inconsistent)
+}
+
+/// Bytes `start..end` of `path ‖ unsigned`, without joining the two.
+fn piece(path: &[u8], unsigned: &[u8], start: usize, end: usize) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(end.checked_sub(start)?);
+    if start < path.len() {
+        out.extend_from_slice(path.get(start..end.min(path.len()))?);
+    }
+    let from = start.saturating_sub(path.len());
+    let to = end.saturating_sub(path.len());
+    if from < to {
+        out.extend_from_slice(unsigned.get(from..to)?);
+    }
+    Some(out)
 }
 
 #[cfg(test)]
