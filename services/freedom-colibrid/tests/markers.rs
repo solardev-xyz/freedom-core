@@ -287,6 +287,13 @@ fn a_marker_still_queued_is_taken_back_and_the_request_is_busy() {
     // queued behind it can't be written within its second.
     let mut main = InProcess::start("open_requests");
     let stats = main.request("colibri.stats", json!({}));
+    // Held before the request is sent: otherwise a slow runner can write
+    // the request's marker ahead of the hello's and the stats' replies,
+    // and the case is the one a_marker_still_being_written_* covers.
+    assert!(
+        main.until_held(Duration::from_secs(30)),
+        "colibri.stats' reply never written"
+    );
     let id = main.request("colibri.request", block_number());
     std::thread::sleep(Duration::from_millis(1500));
     main.release();
