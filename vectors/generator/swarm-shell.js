@@ -158,11 +158,14 @@ function classify(env, caseId, row, params, raws) {
       break;
     }
     case 'swarm.feed:read': {
-      // No row yet (SWM-8's): the reference's whole GET /feeds, then its probe.
+      // readFeedState's lookup: the reference downloads the latest payload
+      // whole (index-probe), where the core asks feed_head for the same
+      // index; then the head probe, only after its 404.
       const look = next();
       if (!look) break;
-      if (formOf(look) !== 'feed_latest' || !look.path.endsWith(`/${params.topic}`)) fail(look, 'not the topic\'s GET /feeds');
-      take({ form: 'feed_latest' });
+      if (formOf(look) !== 'feed_latest' || !look.path.endsWith(`/${params.topic}`)) fail(look, 'the index lookup is not the topic\'s GET /feeds');
+      take({ deviation: 'index-probe' });
+      if (look.reply?.status !== 404) break;
       while (next() && formOf(next()) === 'chunk') take({ form: 'chunk' });
       break;
     }
@@ -517,9 +520,10 @@ function feedCases(env) {
   out.push(update('update-node-500', { nodeSpec: { stamps: STAMPS, latest: latest(at(0)), rules: [
     { match: { method: 'POST', prefix: '/soc/' }, reply: { status: 500, json: { code: 500, message: 'soc failed' } } }] } }));
   // readFeedState (op: read, which the agent's publication controller calls
-  // after updateFeed; SWM-8's): the latest index, or the probe's head.
+  // after updateFeed; SWM-8's): the latest index, or the probe's head. Its
+  // lookup is index-probe's, as the update's is.
   const read = (id, nodeSpec) => ({
-    id: `feed-${id}`, method: 'swarm.feed', row: 'swarm.feed:read', node: nodeSpec,
+    id: `feed-${id}`, method: 'swarm.feed', row: 'swarm.feed:read', node: nodeSpec, deviation: indexProbe,
     params: { op: 'read', key, topic },
     run: async (ref) => {
       const owner = env.keyOf('bee').address;

@@ -103,7 +103,8 @@
 //!   `flush`), each write of that store's permission
 //!   file fails at that step as if the OS had failed it (design 0012, "The
 //!   files": a failed write). Read at each write, so a test turns it on
-//!   and off while the core runs. `intents` fails `wallet-intents.jsonl`'s
+//!   and off while the core runs; `<store>:<step>-once` fails the step at
+//!   the first such write in the process only. `intents` fails `wallet-intents.jsonl`'s
 //!   journal steps: an append's `write` (half the line written), `fsync`,
 //!   `truncate` (its cut back) and `flush`, a compaction's `write`,
 //!   `fsync`, `rename` and `flush`, and the open's `flush`.
@@ -850,12 +851,15 @@ impl fc_store::Hooks for SecretsWrite<'_> {
 /// steps `FREEDOM_CORED_TEST_GRANT_WRITE_FAIL` names for this store
 /// (`dapp`, `swarm`, `radicle`, `x402`, `phone`, `vault_meta`,
 /// `safe_pending`, `receipts`), and of `wallet-intents.jsonl`'s journal
-/// (`intents`), read at each write.
+/// (`intents`), read at each write; `<store>:<step>-once` fails that step
+/// the first time only in the process (the event loop's write, and not the
+/// swarm thread's after it).
 pub struct GrantWrite<'a>(pub &'a str);
 
 impl fc_store::Hooks for GrantWrite<'_> {
     fn fails(&self, step: fc_store::Step) -> bool {
         grant_write_fails(self.0, step.name())
+            || grant_write_fails_once(self.0, &format!("{}-once", step.name()))
     }
 }
 

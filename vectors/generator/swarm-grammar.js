@@ -142,6 +142,8 @@ const ROWS = {
   'swarm.feed:update': { ready: null, calls: [{ forms: ['stamps'], count: [0, 1], when: 'no batch given', binds: '' }, { forms: ['feed_head'], count: [1, 1], binds: '<t> = topic' },
     { forms: ['chunk'], count: [0, 81], when: 'after feed_head\'s 404 or 500', binds: 'the probe\'s next index' },
     { forms: ['soc_up'], count: [1, 1], binds: 'the next index at least min_index; the body ending in reference' }] },
+  'swarm.feed:read': { ready: null, calls: [{ forms: ['feed_head'], count: [1, 1], binds: '<t> = topic' },
+    { forms: ['chunk'], count: [0, 81], when: 'after feed_head\'s 404', binds: 'the probe\'s next index' }] },
   'swarm.stamps': { ready: null, calls: [{ forms: ['stamps', 'stamp'], count: [1, 1], binds: '<b> = id' }] },
   'swarm.upload_status': { ready: null, calls: [{ forms: ['tag'], count: [1, 1], binds: '<uid> = tag_uid' }] },
 };

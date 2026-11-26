@@ -24,6 +24,10 @@
 //!   (`forbidden`), an op only main makes refused to the chrome,
 //!   admission's `busy` for main, `shell.swarm_manifest`'s answers and its
 //!   bound, and `approval.changed` after a projection's write.
+//! - **D17:** a user's Swarm grant change, which the event loop writes,
+//!   detaches what a manifest managed of it in the swarm thread's manifest
+//!   store, after a check in flight and before main's next op of the site;
+//!   a manifest's own projections detach nothing.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -33,7 +37,7 @@ mod swarm_world;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use fc_json::index::{Index, KeyOrder};
+use fc_json::index::{Index, KeyOrder, Value as V};
 use fc_json::{JsString, JsValue};
 use fc_swarm_provider::machine::{Event, Failed, Form, NodeCall, Reply};
 use fc_swarm_provider::stores::feeds::{self, FeedStore};
@@ -1603,6 +1607,307 @@ fn a_projection_sends_approval_changed_after_its_answer() {
     assert_eq!(read[SITE]["autoApprove"]["publish"], true);
 }
 
+// --- D17: a user's Swarm grant change detaches ----------------------------------
+
+/// `SITE`'s record: a manifest that manages the connection and the publish
+/// rule, the publish capability acknowledged.
+const MANAGED: &str = r#"{"managed":{"connection":["publish"],"autoApprove.publish":["publish"]},"acknowledged":{"publish":{"decision":"managed","source":"sheet","decidedAt":1}},"revision":1}"#;
+const OTHER: &str = "https://other.example";
+const OTHER_RECORD: &str = r#"{"managed":{"connection":["feeds"],"autoApprove.publish":["feeds"]},"acknowledged":{"feeds":{"decision":"managed","source":"sheet","decidedAt":1}},"revision":5}"#;
+/// A connected site with no record.
+const LEGACY: &str = "https://legacy.example";
+
+/// The Swarm grants (the file's form): each site connected with its
+/// publish rule.
+fn connected(sites: &[&str]) -> JsValue {
+    let mut grants = JsValue::Object(Vec::new());
+    for site in sites {
+        let grant = format!(
+            r#"{{"origin":"{site}","connectedAt":1,"lastUsed":1,"autoApprove":{{"publish":true,"feeds":false,"signing":false,"messaging":false}}}}"#
+        );
+        grants.set(*site, fc_json::parse(&grant).unwrap());
+    }
+    grants
+}
+
+/// `SITE` on the Bee wallet, with its feed grant.
+fn site_feeds() -> String {
+    format!(
+        r#"{{"version":2,"nextPublisherKeyIndex":0,"origins":{{"{SITE}":{{"activeIdentityId":"bee-wallet","identities":{{"bee-wallet":{{"id":"bee-wallet","mode":"bee-wallet","publisherKeyIndex":null,"walletIndex":null,"label":"Bee","createdAt":1,"lastUsedAt":null}}}},"feedGranted":true,"grantedAt":1,"feeds":{{}}}}}}}}"#
+    )
+}
+
+/// `swarm.manifest get` of `site`: its record, or null.
+fn record_of(main: &mut Main, site: &str) -> JsValue {
+    let mut own = OwnMain::new(|call, _| panic!("{call:?}"));
+    let params = op_params("get", &[("origin", JsValue::string(site))]);
+    value_of(got(&main.play_own(
+        &mut own,
+        "swarm.manifest",
+        &params,
+        "shell",
+    )))
+}
+
+/// An approval method from `context`'s caller: its result.
+fn approval(main: &mut Main, method: &str, params: Value, context: Value) -> Value {
+    let id = main.id();
+    main.core.send(&json!({
+        "type": "request", "id": id, "method": method, "params": params, "context": context,
+    }));
+    let reply = main.core.response(id);
+    assert!(reply["result"].is_object(), "{method}: {reply}");
+    reply["result"].clone()
+}
+
+fn chrome() -> Value {
+    json!({ "caller": "chrome" })
+}
+
+/// `approval.changed` for `site`, once: the event loop's own for its write,
+/// and nothing from the swarm thread's detach.
+fn told_once(main: &mut Main, site: &str) {
+    let events = main.core.events();
+    assert_eq!(
+        events,
+        [
+            json!({ "type": "event", "event": "approval.changed", "data": { "store": "swarm", "key": site } })
+        ]
+    );
+}
+
+/// D17 through the pipe: the chrome's narrowing and a page's own rule,
+/// which the event loop writes, detach that projection from the site's
+/// record in the swarm thread's manifest store, saved before the next op
+/// of main's reads it; the record's other projections stay managed, another
+/// site's record and a site with none change nothing, and main hears only
+/// the loop's own `approval.changed`. A connection the user revoked
+/// disconnects: the record goes, and the site's feed grant with it.
+#[test]
+fn a_users_grant_change_detaches_through_the_pipe() {
+    let mut main = swarm_world::main();
+    let root = main.core.grant_root.clone();
+    let mut dir = Dir::new();
+    dir.insert(
+        manifests::FILE_NAME.to_owned(),
+        format!(r#"{{"version":1,"records":{{"{SITE}":{MANAGED},"{OTHER}":{OTHER_RECORD}}}}}"#),
+    );
+    dir.insert(feeds::FILE_NAME.to_owned(), site_feeds());
+    set_up(&mut main, &dir, &connected(&[SITE, OTHER, LEGACY]), T0);
+    let swarm = |key: &str, what: Value| json!({ "store": "swarm", "key": key, "what": what });
+    main.core.events.clear();
+    // The chrome turns the publish rule off.
+    let revoked = approval(
+        &mut main,
+        "approval.revoke",
+        swarm(SITE, json!({ "flag": "publish" })),
+        chrome(),
+    );
+    assert_eq!(revoked, json!({ "revoked": true }));
+    assert_eq!(
+        record_of(&mut main, SITE).stringify(),
+        r#"{"managed":{"connection":["publish"]},"acknowledged":{"publish":{"decision":"managed","source":"sheet","decidedAt":1}},"revision":2,"detached":{"autoApprove.publish":true}}"#
+    );
+    told_once(&mut main, SITE);
+    let file = std::fs::read_to_string(root.join(manifests::FILE_NAME)).unwrap();
+    assert!(file.contains(r#""autoApprove.publish": true"#), "{file}");
+    // The page's own "always allow" for feeds, which the manifest doesn't
+    // manage: marked detached all the same, as the reference does.
+    let page = json!({ "caller": "page", "page": swarm_world::page(SITE) });
+    let grant = json!({ "store": "swarm", "change": { "op": "flag", "flag": "feeds" } });
+    approval(&mut main, "approval.grant", grant, page);
+    let record = record_of(&mut main, SITE);
+    assert_eq!(
+        field(&record, "detached").stringify(),
+        r#"{"autoApprove.publish":true,"autoApprove.feeds":true}"#
+    );
+    assert_eq!(field(&record, "revision"), &JsValue::Number(3.0));
+    assert_eq!(
+        field(&record, "managed").stringify(),
+        r#"{"connection":["publish"]}"#
+    );
+    told_once(&mut main, SITE);
+    // A site with no record: the file stays as it was.
+    let before = files_in(&root, |n| n.starts_with("swarm-manifest-grants"));
+    approval(
+        &mut main,
+        "approval.revoke",
+        swarm(LEGACY, json!({ "flag": "publish" })),
+        chrome(),
+    );
+    assert_eq!(record_of(&mut main, LEGACY), JsValue::Null);
+    assert_eq!(
+        files_in(&root, |n| n.starts_with("swarm-manifest-grants")),
+        before
+    );
+    told_once(&mut main, LEGACY);
+    // The connection: the record goes, and the feed grant with it.
+    approval(
+        &mut main,
+        "approval.revoke",
+        swarm(SITE, json!("grant")),
+        chrome(),
+    );
+    assert_eq!(record_of(&mut main, SITE), JsValue::Null);
+    assert!(!feeds_on_disk(&root).has_feed_grant(&JsString::from(SITE)));
+    assert!(!grants_read(&mut main).contains_key(SITE));
+    told_once(&mut main, SITE);
+    // Another site's record, untouched throughout.
+    assert_eq!(record_of(&mut main, OTHER).stringify(), OTHER_RECORD);
+    main.settled();
+}
+
+/// D17 and a failed narrowing: the chrome's revoke whose rename fails
+/// stands in memory, unsaved (`storage`, `applied: true`), and still
+/// detaches. The detach's disconnect finds the connection already gone in
+/// memory, and writes the file the loop left behind before the record's
+/// removal commits, so a restart reads the site disconnected, its record
+/// and its feed grant gone.
+#[test]
+fn a_failed_revoke_detaches_and_stays_after_a_restart() {
+    let hooks = tempfile::tempdir().unwrap();
+    let hook = hooks.path().join("grant-write-fail");
+    std::fs::write(&hook, "").unwrap();
+    let hook_env = hook.to_string_lossy().into_owned();
+    let env = [("FREEDOM_CORED_TEST_GRANT_WRITE_FAIL", hook_env.as_str())];
+    let mut main = swarm_world::main_with(&["swarm"], &env);
+    let root = main.core.grant_root.clone();
+    let grants = connected(&[SITE]);
+    let mut dir = Dir::new();
+    dir.insert(
+        manifests::FILE_NAME.to_owned(),
+        format!(r#"{{"version":1,"records":{{"{SITE}":{MANAGED}}}}}"#),
+    );
+    dir.insert(feeds::FILE_NAME.to_owned(), site_feeds());
+    dir.insert("swarm-permissions.json".to_owned(), grants.stringify());
+    set_up(&mut main, &dir, &grants, T0);
+    // The loop's write alone: the swarm thread's after it succeeds.
+    std::fs::write(&hook, "swarm:rename-once").unwrap();
+    let id = main.id();
+    main.core.send(&json!({
+        "type": "request", "id": id, "method": "approval.revoke",
+        "params": { "store": "swarm", "key": SITE, "what": "grant" },
+        "context": { "caller": "chrome" },
+    }));
+    let reply = main.core.response(id);
+    assert_eq!(reply["error"]["code"], "storage", "{reply}");
+    assert_eq!(
+        reply["error"]["data"],
+        json!({ "store": "swarm", "applied": true })
+    );
+    std::fs::write(&hook, "").unwrap();
+    assert_eq!(record_of(&mut main, SITE), JsValue::Null);
+    let file = std::fs::read_to_string(root.join("swarm-permissions.json")).unwrap();
+    assert!(!file.contains(SITE), "the detach wrote the file: {file}");
+    told_once(&mut main, SITE);
+    main.settled();
+    let mut main = main.restart(&env);
+    assert!(!grants_read(&mut main).contains_key(SITE));
+    assert_eq!(record_of(&mut main, SITE), JsValue::Null);
+    assert!(!feeds_on_disk(&root).has_feed_grant(&JsString::from(SITE)));
+    main.settled();
+}
+
+/// D17: a manifest's own projections detach nothing: a decision's
+/// connection and rule, which the swarm thread writes, and main's own
+/// grant writes (`shell`, a manifest's projection under the old path).
+#[test]
+fn a_manifest_s_own_projections_detach_nothing() {
+    let mut main = swarm_world::main();
+    main.world(json!({ "reset": true, "clock": T0 }));
+    no_manifests(&mut main);
+    let mut own = OwnMain::new(|call, _| panic!("{call:?}"));
+    own.manifest = Box::new(|_| Some(fetched(200, MANIFEST.as_bytes())));
+    let answer = value_of(got(&main.play_own(
+        &mut own,
+        "swarm.manifest",
+        &check(),
+        "shell",
+    )));
+    let decide = op_params(
+        "decide",
+        &[
+            ("key", JsValue::string(SITE)),
+            ("token", field(&answer, "token").clone()),
+            ("outcome", JsValue::string("allow")),
+            ("live", JsValue::Bool(true)),
+        ],
+    );
+    let mut own = OwnMain::new(|call, _| panic!("{call:?}"));
+    main.play_own(&mut own, "swarm.manifest", &decide, "shell");
+    let decided = record_of(&mut main, SITE);
+    assert_eq!(
+        field(&decided, "managed").stringify(),
+        r#"{"connection":["publish"],"autoApprove.publish":["publish"]}"#
+    );
+    assert!(decided.get("detached").is_none(), "{}", decided.stringify());
+    let shell = json!({ "caller": "shell" });
+    let grant =
+        json!({ "store": "swarm", "change": { "op": "flag", "flag": "publish", "key": SITE } });
+    approval(&mut main, "approval.grant", grant, shell.clone());
+    let revoke = json!({ "store": "swarm", "key": SITE, "what": { "flag": "signing" } });
+    approval(&mut main, "approval.revoke", revoke, shell);
+    assert_eq!(record_of(&mut main, SITE).stringify(), decided.stringify());
+    main.settled();
+}
+
+/// D17's order through the pipe: the chrome turns a rule off while main
+/// holds a check's fetch; the detach waits for the check, which keeps the
+/// record it read, and main's next op of the site waits for the detach.
+#[test]
+fn a_detach_waits_for_a_check_in_flight() {
+    let mut main = swarm_world::main();
+    let mut dir = Dir::new();
+    dir.insert(
+        manifests::FILE_NAME.to_owned(),
+        format!(r#"{{"version":1,"records":{{"{SITE}":{MANAGED}}}}}"#),
+    );
+    set_up(&mut main, &dir, &connected(&[SITE]), T0);
+    let check_id = main.own_request("swarm.manifest", &check(), "shell");
+    let message = main.recv();
+    assert_eq!(message["method"], "shell.swarm_manifest", "{message}");
+    let fetch = message["id"].as_u64().unwrap();
+    let revoke = json!({ "store": "swarm", "key": SITE, "what": { "flag": "publish" } });
+    approval(&mut main, "approval.revoke", revoke, chrome());
+    let get = main.own_request(
+        "swarm.manifest",
+        &op_params("get", &[("origin", JsValue::string(SITE))]),
+        "shell",
+    );
+    // Neither answers while the fetch is out.
+    let quiet = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    while let Some(wire) = main
+        .core
+        .recv_wire_within(quiet.saturating_duration_since(std::time::Instant::now()))
+    {
+        match wire {
+            common::Wire::Message(message) if message["type"] == "event" => {
+                main.core.events.push(message);
+            }
+            other => panic!("while the fetch is out: {other:?}"),
+        }
+    }
+    main.answer(fetch, fetched(200, MANIFEST.as_bytes()));
+    let first = main.recv();
+    assert_eq!(first["id"], check_id, "{first}");
+    assert_eq!(text_at(&value_of(got(&first)), "kind"), "ready");
+    let second = main.recv();
+    assert_eq!(second["id"], get, "{second}");
+    let record = value_of(got(&second));
+    assert!(record.get("observed").is_some(), "{}", record.stringify());
+    assert_eq!(
+        field(&record, "detached").stringify(),
+        r#"{"autoApprove.publish":true}"#
+    );
+    assert_eq!(
+        field(&record, "managed").stringify(),
+        r#"{"connection":["publish"]}"#
+    );
+    assert_eq!(field(&record, "revision"), &JsValue::Number(2.0));
+    told_once(&mut main, SITE);
+    main.settled();
+}
+
 // --- D12's recorded cases: the `shell` section ---------------------------------------
 
 fn shell_section() -> Vec<JsValue> {
@@ -1693,7 +1998,8 @@ struct WantCall {
 
 /// The calls the core makes for a step's recorded requests: the
 /// reference's own, its second `/stamps` dropped (`stamps-one-read`) and
-/// its whole `GET /feeds` index lookup asked as `feed_head` (`index-probe`).
+/// its whole `GET /feeds` index lookup (an update's and a read's) asked as
+/// `feed_head` (`index-probe`).
 fn want_calls(step: &JsValue) -> Vec<WantCall> {
     let mut out = Vec::new();
     for r in field(step, "requests").as_array().unwrap() {
@@ -1711,19 +2017,6 @@ fn want_calls(step: &JsValue) -> Vec<WantCall> {
                 reply: recorded_reply(reply, &["swarm-feed-index", "swarm-feed-index-next"]),
             }),
             Some(other) => panic!("a shell request of deviation {other}"),
-            // swarm.feed's read learns the latest index by bee-js's whole
-            // download (`feed_latest`, unmarked while the read has no
-            // grammar row): the core asks feed_head, as for the update.
-            None if r.get("form").map(str_of) == Some("feed_latest") => out.push(WantCall {
-                form: "feed_head".to_owned(),
-                method: "GET".to_owned(),
-                path: str_of(field(r, "path")).to_owned(),
-                query: Vec::new(),
-                headers: vec![("swarm-only-root-chunk".to_owned(), "true".to_owned())],
-                body: None,
-                feed: None,
-                reply: recorded_reply(reply, &["swarm-feed-index", "swarm-feed-index-next"]),
-            }),
             None => out.push(WantCall {
                 form: str_of(field(r, "form")).to_owned(),
                 method: str_of(field(r, "method")).to_owned(),
@@ -1792,7 +2085,8 @@ fn check_call(id: &str, k: usize, (call, body): &(NodeCall, Vec<u8>), want: &Wan
 ///   `swarm.upload_status`): main's params as the case gives them; each of
 ///   the core's node calls against the reference's (form, method, path,
 ///   query, headers, body, a probe's feed update), answered with the
-///   node's recorded reply; parts streamed through `shell.swarm_part`, and
+///   node's recorded reply, and within the case's row in
+///   `swarm-grammar.json`; parts streamed through `shell.swarm_part`, and
 ///   a picked file's read failing with its errno's name; the answer
 ///   (typed), and the history `swarm.history` reads after;
 /// - **the store ops** (`swarm.identities`, `swarm.history`,
@@ -1809,6 +2103,9 @@ fn check_call(id: &str, k: usize, (call, body): &(NodeCall, Vec<u8>), want: &Wan
 #[test]
 fn every_shell_case_through_the_pipe() {
     let cases = shell_section();
+    let grammar_text = logic::text_of("swarm-grammar.json");
+    let grammar_index = Index::new(&grammar_text).unwrap();
+    let grammar = grammar_index.root();
     let mut main = store_main();
     let mut played: BTreeMap<String, usize> = BTreeMap::new();
     for case in &cases {
@@ -1818,7 +2115,7 @@ fn every_shell_case_through_the_pipe() {
         } else if ["swarm.identities", "swarm.history", "swarm.manifest"].contains(&method) {
             play_shell_op(&mut main, case);
         } else {
-            play_shell_node(&mut main, case);
+            play_shell_node(&mut main, case, grammar);
         }
         *played.entry(method.to_owned()).or_default() += 1;
     }
@@ -1837,7 +2134,27 @@ fn every_shell_case_through_the_pipe() {
     );
 }
 
-fn play_shell_node(main: &mut Main, case: &JsValue) {
+/// The calls' forms within `row`'s in the grammar file, in order and
+/// within their counts (common's `check_row_shape`).
+fn within_row(id: &str, grammar: V<'_, '_>, row: &str, calls: &[(NodeCall, Vec<u8>)]) {
+    let ran = logic::Ran {
+        outcome: fc_swarm_provider::machine::Outcome::Cancelled,
+        ready: Vec::new(),
+        calls: calls
+            .iter()
+            .map(|(call, _)| logic::Logged {
+                call: call.clone(),
+                charge: 0,
+                body: None,
+            })
+            .collect(),
+        cancels_after_outcome: 0,
+        most_open: 0,
+    };
+    logic::check_row_shape(id, grammar, row, &ran);
+}
+
+fn play_shell_node(main: &mut Main, case: &JsValue, grammar: V<'_, '_>) {
     let id = str_of(field(case, "id"));
     let world = field(case, "world");
     let clock = num(field(world, "clock")) as u64;
@@ -1881,6 +2198,7 @@ fn play_shell_node(main: &mut Main, case: &JsValue) {
     }
     let params = json_of(field(step, "params"));
     let answer = main.play_own(&mut own, str_of(field(case, "method")), &params, "shell");
+    within_row(id, grammar, str_of(field(case, "row")), &own.calls);
     let extra = usize::from(picked_read);
     assert_eq!(own.calls.len(), wants.len() + extra, "{id}");
     for (k, (got, want)) in own.calls.iter().zip(&wants).enumerate() {

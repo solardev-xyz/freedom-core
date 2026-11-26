@@ -127,6 +127,17 @@ pub trait Grants {
     /// [`Effect::Disconnect`], [`Effect::Flag`], [`Effect::Messaging`]),
     /// written durably as main's own change; the write's text if it fails.
     fn apply(&mut self, key: &JsString, effect: Effect) -> Result<(), JsString>;
+    /// The grants' file made to hold the store as memory has it, where an
+    /// earlier write left it behind (a narrowing whose write failed stands
+    /// in memory alone); the write's text if it fails. The manifest store
+    /// saves only after it (D17): a record a transaction removes, or a
+    /// projection it marks off, is never on disk while the grants' file
+    /// still holds what memory no longer does (the user's revoke whose
+    /// write failed, which a disconnect then finds already made and
+    /// leaves). Nothing to do by default.
+    fn settle(&mut self) -> Result<(), JsString> {
+        Ok(())
+    }
 }
 
 /// The stores' files, their randomness and the history's database: the
@@ -277,6 +288,18 @@ impl Op {
         self.ticket
     }
 
+    /// The site whose manifest record a `swarm.manifest` op reads or
+    /// changes (`check`'s and `decide`'s `key`, the chrome's ops'
+    /// `origin`); `None` for `release`, which reads no record, and for
+    /// every other method's op. A user's change of the site's Swarm grants
+    /// detaches in order with these (D17).
+    pub fn manifest_key(&self) -> Option<&JsString> {
+        match &self.run {
+            Run::Manifest(run) => run.key(),
+            Run::Identities(_) | Run::History(_) => None,
+        }
+    }
+
     /// Runs it as far as it goes.
     pub fn start(&mut self, stores: &mut Stores<'_>) -> Step {
         if self.ended {
@@ -382,13 +405,26 @@ impl Cx<'_> {
     }
 }
 
-/// The user changed a projection a manifest manages, outside an op (a
-/// change the swarm thread makes for main through the keeper, or the user's
-/// change of the Swarm grants): the record lets go of it, as
-/// `detachManagedLater` does. A store that can't be read or written keeps
-/// its record, as the reference only logs that failure.
-pub fn detach(stores: &mut Stores<'_>, key: &JsString, projection: Projection) {
+/// The user changed a projection of site `key` outside an op (design 0015,
+/// D17: a change of the Swarm grants, which the event loop writes):
+/// `detachManaged(key, projection)`, as the reference's
+/// `detachManagedLater` runs it. A connection changed by hand disconnects
+/// (the record removed, the feed grant and the connection revoked); any
+/// other projection is marked detached in the site's record, dropped from
+/// what it manages, the revision moved on and the store saved, and a site
+/// with no record keeps nothing to change. A store that can't be read or
+/// written keeps its record, as the reference only logs that failure.
+///
+/// `false`, with nothing changed, while SW-1's hold would defer a
+/// feed-store change it makes (the disconnect's revoke of a held site's
+/// feed grant, or a journal it replays): the caller tries again once a
+/// hold ends, as a manifest op waits ([`Waiting::Hold`]).
+pub fn detach(stores: &mut Stores<'_>, key: &JsString, projection: Projection) -> bool {
+    if manifest::detach_held(stores, key, projection) {
+        return false;
+    }
     manifest::detach(stores, key, projection);
+    true
 }
 
 /// A feed-store change's refusal as its caller reads it: the reference's

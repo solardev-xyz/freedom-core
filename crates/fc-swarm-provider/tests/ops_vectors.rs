@@ -1697,6 +1697,121 @@ fn a_users_change_detaches_what_a_manifest_managed() {
     );
 }
 
+/// D17: a user's change of the Swarm grants, which the event loop writes,
+/// detaches as `detachManagedLater` does (`ops::detach`): the projection
+/// changed is marked detached and dropped from what the record manages,
+/// the others stay managed, the revision moves on and the store is saved;
+/// a site with no record changes nothing; a connection changed by hand
+/// disconnects, waiting while SW-1's hold would defer its revoke of the
+/// site's feed grant.
+#[test]
+fn a_users_grant_change_detaches_as_detach_managed_does() {
+    use fc_swarm_provider::stores::manifests::Projection;
+    let managed = r#"{"version":1,"records":{"a":{"managed":{"connection":["feeds"],"feedGrant":["feeds"],"autoApprove.feeds":["feeds"]},"acknowledged":{"feeds":{"decision":"managed","source":"sheet","decidedAt":1}},"revision":3}}}"#;
+    let grants = r#"{"a":{"origin":"a","connectedAt":1,"lastUsed":1,"autoApprove":{"publish":false,"feeds":true,"signing":false,"messaging":false}}}"#;
+    let mut world = feeds_world(HELD_FEEDS, grants, Some(managed));
+    let record = |world: &World| {
+        let file = js(&world.disk.dir[manifests::FILE_NAME]);
+        file.get("records").and_then(|r| r.get("a")).cloned()
+    };
+    // The rule the user turned off: detached, the others still managed.
+    let feeds_rule = Projection::AutoApprove(Capability::Feeds);
+    assert!(ops::detach(&mut world.stores(T0), &key("a"), feeds_rule));
+    assert_eq!(
+        record(&world).unwrap().stringify(),
+        r#"{"managed":{"connection":["feeds"],"feedGrant":["feeds"]},"acknowledged":{"feeds":{"decision":"managed","source":"sheet","decidedAt":1}},"revision":4,"detached":{"autoApprove.feeds":true}}"#
+    );
+    // A projection the record doesn't manage is marked detached all the
+    // same (the reference's), so no later decision takes it.
+    let messaging = Projection::MessagingGrant;
+    assert!(ops::detach(&mut world.stores(T0), &key("a"), messaging));
+    let after = record(&world).unwrap();
+    assert_eq!(after.get("revision"), Some(&JsValue::Number(5.0)));
+    assert_eq!(
+        after.get("detached").map(JsValue::stringify).as_deref(),
+        Some(r#"{"autoApprove.feeds":true,"messagingGrant":true}"#)
+    );
+    // A site with no record: nothing to change, nothing saved.
+    let before = world.disk.dir.clone();
+    assert!(ops::detach(&mut world.stores(T0), &key("b"), feeds_rule));
+    assert_eq!(world.disk.dir, before);
+    // The connection, while the site's SOC holds SW-1: the disconnect would
+    // revoke the held site's feed grant, so nothing is made yet.
+    world.keeper.hold(HoldId(1), key("a"));
+    assert!(!ops::detach(
+        &mut world.stores(T0),
+        &key("a"),
+        Projection::Connection
+    ));
+    assert_eq!(world.disk.dir, before);
+    let disk = &mut world.disk;
+    world
+        .keeper
+        .release(HoldId(1), T0, &mut |t: &str| disk.write_feeds(t));
+    assert!(ops::detach(
+        &mut world.stores(T0),
+        &key("a"),
+        Projection::Connection
+    ));
+    assert_eq!(record(&world), None);
+    assert!(!world.keeper.store().has_feed_grant(&key("a")));
+    assert!(!world.grants.connected(&key("a")));
+}
+
+/// D17: the manifest store saves only once the grants' file holds what
+/// memory does (`Grants::settle`): a settle that fails fails the save, so a
+/// detach's disconnect commits nothing, its journal included, and the
+/// record stays until a detach whose settle succeeds.
+#[test]
+fn a_detach_commits_nothing_while_the_grants_file_cannot_be_settled() {
+    use fc_swarm_provider::stores::manifests::Projection;
+    struct Unsettled<'a>(&'a mut GrantMirror);
+    impl Grants for Unsettled<'_> {
+        fn connected(&self, key: &JsString) -> bool {
+            self.0.connected(key)
+        }
+        fn messaging(&self, key: &JsString) -> bool {
+            self.0.messaging(key)
+        }
+        fn auto_approve(&self, key: &JsString, capability: Capability) -> bool {
+            self.0.auto_approve(key, capability)
+        }
+        fn apply(&mut self, key: &JsString, effect: Effect) -> Result<(), JsString> {
+            self.0.apply(key, effect)
+        }
+        fn settle(&mut self) -> Result<(), JsString> {
+            Err(JsString::from("The Swarm grants could not be written"))
+        }
+    }
+    let managed = r#"{"version":1,"records":{"a":{"managed":{"connection":["feeds"]},"acknowledged":{"feeds":{"decision":"managed","source":"sheet","decidedAt":1}},"revision":3}}}"#;
+    let mut world = feeds_world(HELD_FEEDS, "{}", Some(managed));
+    let before = world.disk.dir.clone();
+    let World {
+        keeper,
+        manifests,
+        grants,
+        disk,
+        ..
+    } = &mut world;
+    let mut unsettled = Unsettled(grants);
+    let mut stores = Stores {
+        now_ms: T0,
+        keeper,
+        manifests,
+        grants: &mut unsettled,
+        io: disk,
+    };
+    assert!(ops::detach(&mut stores, &key("a"), Projection::Connection));
+    assert_eq!(world.disk.dir, before, "nothing saved");
+    assert!(ops::detach(
+        &mut world.stores(T0),
+        &key("a"),
+        Projection::Connection
+    ));
+    let file = js(&world.disk.dir[manifests::FILE_NAME]);
+    assert_eq!(file.get("records").and_then(|r| r.get("a")), None);
+}
+
 /// Owners (identity-manager.js's): every owner a list needs is asked at
 /// once; the answer is read when the last arrives, in the reference's
 /// order, and an owner a change made meanwhile needs is asked then.

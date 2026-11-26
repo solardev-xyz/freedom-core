@@ -957,6 +957,32 @@
         }
       ]
     },
+    "swarm.feed:read": {
+      "ready": null,
+      "calls": [
+        {
+          "forms": [
+            "feed_head"
+          ],
+          "count": [
+            1,
+            1
+          ],
+          "binds": "<t> = topic"
+        },
+        {
+          "forms": [
+            "chunk"
+          ],
+          "count": [
+            0,
+            81
+          ],
+          "when": "after feed_head's 404",
+          "binds": "the probe's next index"
+        }
+      ]
+    },
     "swarm.stamps": {
       "ready": null,
       "calls": [
@@ -37767,6 +37793,330 @@
       ]
     },
     {
+      "id": "swarm.feed-read-latest",
+      "row": "swarm.feed:read",
+      "from": "publish-service.js / feed-service.js at the swarm reference",
+      "params": {
+        "op": "read",
+        "key": {
+          "kind": "bee_wallet"
+        },
+        "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
+      },
+      "calls": [
+        {
+          "form": "feed_head",
+          "method": "GET",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-only-root-chunk",
+              "true"
+            ]
+          ],
+          "reply": {
+            "status": 200,
+            "headers": {
+              "swarm-feed-index": "0000000000000002",
+              "swarm-feed-index-next": "0000000000000003"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "swarm.feed-read-empty",
+      "row": "swarm.feed:read",
+      "from": "publish-service.js / feed-service.js at the swarm reference",
+      "params": {
+        "op": "read",
+        "key": {
+          "kind": "bee_wallet"
+        },
+        "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
+      },
+      "calls": [
+        {
+          "form": "feed_head",
+          "method": "GET",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-only-root-chunk",
+              "true"
+            ]
+          ],
+          "reply": {
+            "status": 404
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/cb9ed24947351b4806f9444fbe6ac90ac1892a618951193ecceb320d59e1b7c2",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 0
+          },
+          "reply": {
+            "status": 404
+          }
+        }
+      ]
+    },
+    {
+      "id": "swarm.feed-read-probe",
+      "row": "swarm.feed:read",
+      "from": "publish-service.js / feed-service.js at the swarm reference",
+      "params": {
+        "op": "read",
+        "key": {
+          "kind": "bee_wallet"
+        },
+        "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
+      },
+      "calls": [
+        {
+          "form": "feed_head",
+          "method": "GET",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-only-root-chunk",
+              "true"
+            ]
+          ],
+          "reply": {
+            "status": 404
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/cb9ed24947351b4806f9444fbe6ac90ac1892a618951193ecceb320d59e1b7c2",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 0
+          },
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/9244652ae16c85c7f2348e529a837cff740bb56f40b192d184bd28460e4d9a5c",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 1
+          },
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/ff38ae6540af5a7fe97675ff1c1e1b36d9d107a43917b7396981095dd9c006dd",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 2
+          },
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/59ea13a26b49700949270e82c6ea8b8034253ad9b70368c235c8afb7bfe3e458",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 4
+          },
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/f175756c81c4c7347554dcbeab09b2145363df72c444181c5e56b3f082e87d73",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 8
+          },
+          "reply": {
+            "status": 404
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/21c9c3f1b10ef3d5a259e17e8e8146855587671c451c9143958f9bea72e7ba50",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 6
+          },
+          "reply": {
+            "status": 404
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/be0c1abde952d989c48ba12b8bed5bd0d73489253ee8118a246a56a0e8125236",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 5
+          },
+          "reply": {
+            "status": 404
+          }
+        }
+      ]
+    },
+    {
+      "id": "swarm.feed-read-node-500",
+      "row": "swarm.feed:read",
+      "from": "publish-service.js / feed-service.js at the swarm reference",
+      "params": {
+        "op": "read",
+        "key": {
+          "kind": "bee_wallet"
+        },
+        "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
+      },
+      "calls": [
+        {
+          "form": "feed_head",
+          "method": "GET",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-only-root-chunk",
+              "true"
+            ]
+          ],
+          "reply": {
+            "status": 500
+          }
+        }
+      ]
+    },
+    {
       "id": "swarm.stamps-list",
       "row": "swarm.stamps",
       "from": "publish-service.js / feed-service.js at the swarm reference",
@@ -44424,6 +44774,392 @@
           "body": {
             "bytes": 9,
             "base64": "AAAAAAAAAAAA"
+          }
+        }
+      ]
+    },
+    {
+      "id": "swarm.feed-read-whole-latest",
+      "row": "swarm.feed:read",
+      "from": "honest/swarm.feed-read-latest",
+      "params": {
+        "op": "read",
+        "key": {
+          "kind": "bee_wallet"
+        },
+        "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
+      },
+      "rule": "form",
+      "note": "a whole feed_latest for the read's lookup",
+      "calls": [
+        {
+          "form": "feed_latest",
+          "method": "GET",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "swarm.feed-read-probe-after-found",
+      "row": "swarm.feed:read",
+      "from": "honest/swarm.feed-read-latest",
+      "params": {
+        "op": "read",
+        "key": {
+          "kind": "bee_wallet"
+        },
+        "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
+      },
+      "rule": "order",
+      "note": "a probe chunk after feed_head found the index",
+      "calls": [
+        {
+          "form": "feed_head",
+          "method": "GET",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-only-root-chunk",
+              "true"
+            ]
+          ],
+          "reply": {
+            "status": 200,
+            "headers": {
+              "swarm-feed-index": "0000000000000002",
+              "swarm-feed-index-next": "0000000000000003"
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/cb9ed24947351b4806f9444fbe6ac90ac1892a618951193ecceb320d59e1b7c2",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "swarm.feed-read-probe-after-500",
+      "row": "swarm.feed:read",
+      "from": "honest/swarm.feed-read-node-500",
+      "params": {
+        "op": "read",
+        "key": {
+          "kind": "bee_wallet"
+        },
+        "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
+      },
+      "rule": "order",
+      "note": "a probe chunk after feed_head's 500 (the read throws it)",
+      "calls": [
+        {
+          "form": "feed_head",
+          "method": "GET",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-only-root-chunk",
+              "true"
+            ]
+          ],
+          "reply": {
+            "status": 500
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/cb9ed24947351b4806f9444fbe6ac90ac1892a618951193ecceb320d59e1b7c2",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "swarm.feed-read-probe-other-index",
+      "row": "swarm.feed:read",
+      "from": "honest/swarm.feed-read-probe",
+      "params": {
+        "op": "read",
+        "key": {
+          "kind": "bee_wallet"
+        },
+        "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
+      },
+      "rule": "value",
+      "note": "a probe chunk at another index than the probe asks next",
+      "calls": [
+        {
+          "form": "feed_head",
+          "method": "GET",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-only-root-chunk",
+              "true"
+            ]
+          ],
+          "reply": {
+            "status": 404
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/cb9ed24947351b4806f9444fbe6ac90ac1892a618951193ecceb320d59e1b7c2",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 0
+          },
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/9244652ae16c85c7f2348e529a837cff740bb56f40b192d184bd28460e4d9a5c",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 1
+          },
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/659017a14fc36284023530885d9f173c60f8845db1e8f15f52b380ae1586486d",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 3
+          }
+        }
+      ]
+    },
+    {
+      "id": "swarm.feed-read-second-head",
+      "row": "swarm.feed:read",
+      "from": "honest/swarm.feed-read-latest",
+      "params": {
+        "op": "read",
+        "key": {
+          "kind": "bee_wallet"
+        },
+        "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
+      },
+      "rule": "count",
+      "note": "a second feed_head",
+      "calls": [
+        {
+          "form": "feed_head",
+          "method": "GET",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-only-root-chunk",
+              "true"
+            ]
+          ],
+          "reply": {
+            "status": 200,
+            "headers": {
+              "swarm-feed-index": "0000000000000002",
+              "swarm-feed-index-next": "0000000000000003"
+            }
+          }
+        },
+        {
+          "form": "feed_head",
+          "method": "GET",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-only-root-chunk",
+              "true"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "swarm.feed-read-write",
+      "row": "swarm.feed:read",
+      "from": "honest/swarm.feed-read-latest",
+      "params": {
+        "op": "read",
+        "key": {
+          "kind": "bee_wallet"
+        },
+        "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
+      },
+      "rule": "form",
+      "note": "a soc_up under swarm.feed's read",
+      "calls": [
+        {
+          "form": "feed_head",
+          "method": "GET",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-only-root-chunk",
+              "true"
+            ]
+          ],
+          "reply": {
+            "status": 200,
+            "headers": {
+              "swarm-feed-index": "0000000000000002",
+              "swarm-feed-index-next": "0000000000000003"
+            }
+          }
+        },
+        {
+          "form": "soc_up",
+          "method": "POST",
+          "path": "/soc/6fac4d18c912343bf86fa7049364dd4e424ab9c0/abababababababababababababababababababababababababababababababab",
+          "query": [
+            [
+              "sig",
+              "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ]
+          ],
+          "body": {
+            "bytes": 48,
+            "base64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           }
         }
       ]
