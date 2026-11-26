@@ -2229,7 +2229,7 @@ fn answers_waiting_for_the_writer_hold_new_requests() {
         };
         assert_eq!(sites.len(), SITES);
     }
-    let held = main.world(json!({}));
+    let held = main.world(json!({ "answers": true }));
     let most = held["answers_waiting_most"].as_u64().unwrap() as usize;
     // The answers are over twice the writer's 32 MiB allowance: unbounded,
     // over 32 MiB of them would wait at once.
@@ -2273,13 +2273,8 @@ fn a_cancel_before_a_queued_signature_signs_nothing() {
         "reference": "ef".repeat(32), "batch": "a1".repeat(32),
     });
     let request = main.own_request("swarm.feed", &update, "shell");
-    let call = loop {
-        let message = main.recv();
-        if message["type"] == "request" && message["method"] == "shell.swarm_api" {
-            break message;
-        }
-        panic!("{message}");
-    };
+    let call = main.recv();
+    assert_eq!(call["method"], "shell.swarm_api", "{call}");
     assert_eq!(call["params"]["form"], "feed_head");
     main.answer(
         call["id"].as_u64().unwrap(),

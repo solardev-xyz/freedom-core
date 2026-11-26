@@ -757,7 +757,7 @@ impl Thread {
     }
 
     /// `test.swarm_world { reset?, clock?, grants?, tags?, feeds?, reload?,
-    /// mining? }` (D11): one core plays every case, its world set between
+    /// mining?, answers? }` (D11): one core plays every case, its world set between
     /// them. `reset` starts the read budgets, the tags' owners and the
     /// mining lane's cache and budgets afresh (the lane's only while it is
     /// idle, and never once mining is off), and the stores: once they have
@@ -775,9 +775,9 @@ impl Thread {
     /// store again from their files and opens the history again, as a start
     /// does. It answers `{ memory,
     /// requests, streams }`: the pool's charges, the requests the thread
-    /// holds and the incoming streams' slots taken, as they stand, and
-    /// `answers_waiting_most`, the most bytes of answers that have waited
-    /// for the writer at once; with
+    /// holds and the incoming streams' slots taken, as they stand; with
+    /// `answers: true`, also `answers_waiting_most`, the most bytes of
+    /// answers that have waited for the writer at once; with
     /// `mining: true`, also `mining: { waiting, running, off, lane, batches
     /// }`, the lane's.
     #[cfg(feature = "testhooks")]
@@ -799,6 +799,8 @@ impl Thread {
             reload: bool,
             #[serde(default)]
             mining: bool,
+            #[serde(default)]
+            answers: bool,
         }
         let parsed = params.and_then(|p| serde_json::from_str::<WorldParams>(p).ok());
         let Some(world) = parsed else {
@@ -867,8 +869,10 @@ impl Thread {
             "memory": self.engine.memory_used(),
             "requests": self.engine.requests(),
             "streams": self.engine.streams_held(),
-            "answers_waiting_most": self.wire.most_waiting,
         });
+        if world.answers {
+            held["answers_waiting_most"] = serde_json::json!(self.wire.most_waiting);
+        }
         if world.mining {
             held["mining"] = self.engine.mining_mut().state();
         }
