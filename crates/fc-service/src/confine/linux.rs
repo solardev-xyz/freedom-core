@@ -1,8 +1,9 @@
 //! Confinement on Linux (design 0010, "The recommendation", step 2):
-//! no-new-privileges, Landlock at the kernel's ABI with every right that
-//! ABI knows handled, then the seccomp filters. Each status is derived from
-//! what was installed: the ABI the kernel reports, the rights handled at
-//! it, and the filters installed.
+//! no-new-privileges, the memory cap (`RLIMIT_DATA`), Landlock at the
+//! kernel's ABI with every right that ABI knows handled, then the seccomp
+//! filters. Each status is derived from what was installed: the ABI the
+//! kernel reports, the rights handled at it, and the filters installed; the
+//! memory cap is what reads back.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -45,6 +46,12 @@ pub(super) fn confine(policy: &Policy, options: &Options) -> Result<Report, Inva
         .then(resolver::resolution);
     // Both mechanisms need it, and it is wanted whatever they do.
     let _ = rustix::thread::set_no_new_privs(true);
+    // Process-wide, so the thread order doesn't touch it; before the rules,
+    // so a limit that doesn't read back installs nothing else.
+    let memory_cap = policy
+        .memory_cap
+        .map(|cap| memory_cap(cap, options.rlimit_errno))
+        .transpose()?;
     let landlock = landlock(policy, options)?;
     let seccomp = match seccomp::target() {
         None => Installed::Unavailable("no seccomp filter for this architecture".into()),
@@ -64,6 +71,13 @@ pub(super) fn confine(policy: &Policy, options: &Options) -> Result<Report, Inva
         }
     };
     let mut report = derive(policy, &landlock, &seccomp);
+    report.memory_cap = memory_cap.map(|outcome| match outcome {
+        Ok(bytes) => Some(bytes),
+        Err(why) => {
+            report.reasons.insert("memory_cap", why);
+            None
+        }
+    });
     if let Some((resolution, why)) = resolution {
         report.resolution = Some(resolution);
         if let (Resolution::FilesOnly, Some(why)) = (resolution, why) {
@@ -71,6 +85,58 @@ pub(super) fn confine(policy: &Policy, options: &Options) -> Result<Report, Inva
         }
     }
     Ok(report)
+}
+
+/// Sets `RLIMIT_DATA`'s soft and hard limit both to `cap` (design 0010,
+/// "The memory cap"), or to the inherited soft limit if that is lower: an
+/// inherited limit already lower is kept. Lowering needs no privilege, and
+/// an unprivileged process can't raise a hard limit again.
+///
+/// `Ok(Ok(bytes))`: the limit as read back. `Ok(Err(why))`: something
+/// outside refused the call (a container's seccomp filter, say, or
+/// `forced`, a test seam), so no cap is in place and the service runs
+/// (D2). [`Invalid`]: the call succeeded, but the limit reads back
+/// otherwise.
+///
+/// Before Linux 4.7 the limit counts only the heap (`brk`), not `mmap`; it
+/// is set and reported all the same.
+fn memory_cap(cap: u64, forced: Option<i32>) -> Result<Result<u64, String>, Invalid> {
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+
+    let bytes = capped(cap, getrlimit(Resource::Data));
+    let set = match forced {
+        Some(errno) => Err(rustix::io::Errno::from_raw_os_error(errno)),
+        None => setrlimit(
+            Resource::Data,
+            Rlimit {
+                current: Some(bytes),
+                maximum: Some(bytes),
+            },
+        ),
+    };
+    if let Err(error) = set {
+        return Ok(Err(format!("setting RLIMIT_DATA is refused: {error}")));
+    }
+    read_back(bytes, &getrlimit(Resource::Data)).map(Ok)
+}
+
+/// The limit [`memory_cap`] sets: `cap`, or an inherited soft limit already
+/// lower (`None` is unlimited). The hard limit is never below the soft.
+fn capped(cap: u64, inherited: rustix::process::Rlimit) -> u64 {
+    inherited.current.map_or(cap, |soft| soft.min(cap))
+}
+
+/// `bytes` if `read` holds it as both the soft and the hard limit: else the
+/// limit set doesn't read back, an invalid policy (exit 77).
+fn read_back(bytes: u64, read: &rustix::process::Rlimit) -> Result<u64, Invalid> {
+    if read.current == Some(bytes) && read.maximum == Some(bytes) {
+        Ok(bytes)
+    } else {
+        Err(Invalid::Rules(format!(
+            "RLIMIT_DATA was set to {bytes}, but reads back soft {:?}, hard {:?}",
+            read.current, read.maximum
+        )))
+    }
 }
 
 /// The process's threads, from `/proc/self/task`. A list that can't be
@@ -544,6 +610,7 @@ fn derive(policy: &Policy, landlock: &Landlock, seccomp: &Installed) -> Report {
         reasons,
         resolution: None,
         mitigations: BTreeMap::new(),
+        memory_cap: None,
     }
 }
 
@@ -565,6 +632,34 @@ mod tests {
             times: false,
             symlinks: false,
             modes: false,
+            memory_cap: None,
+        }
+    }
+
+    /// The cap, or an inherited soft limit already lower; and a limit that
+    /// reads back otherwise, soft or hard, is invalid (design 0010, "The
+    /// memory cap"). The process's own limit is set in a child: the
+    /// confinement test's.
+    #[test]
+    fn the_memory_cap_keeps_a_lower_inherited_limit_and_must_read_back() {
+        use rustix::process::Rlimit;
+        let limit = |current, maximum| Rlimit { current, maximum };
+        let cap = super::super::MEMORY_CAP;
+        assert_eq!(capped(cap, limit(None, None)), cap);
+        assert_eq!(capped(cap, limit(Some(cap + 1), None)), cap);
+        assert_eq!(capped(cap, limit(Some(1 << 30), None)), 1 << 30);
+        assert_eq!(capped(cap, limit(Some(1 << 30), Some(1 << 30))), 1 << 30);
+        assert_eq!(read_back(cap, &limit(Some(cap), Some(cap))), Ok(cap));
+        for read in [
+            limit(Some(cap), None),
+            limit(None, Some(cap)),
+            limit(Some(cap - 4096), Some(cap)),
+            limit(Some(cap), Some(cap + 4096)),
+        ] {
+            assert!(
+                matches!(read_back(cap, &read), Err(Invalid::Rules(_))),
+                "{read:?}"
+            );
         }
     }
 

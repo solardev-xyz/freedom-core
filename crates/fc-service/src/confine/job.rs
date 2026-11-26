@@ -16,6 +16,9 @@
 //!   port. The service's own gate enforces the policy (0007).
 //! - **The mitigations** are reported by name, each `set` only when it read
 //!   back with every flag asked for.
+//! - **`memory_cap`:** the job's memory limit as read back, where the policy
+//!   asks for one; null, with the job's reason, where something outside
+//!   refused the job (design 0010, "The memory cap").
 
 use std::collections::BTreeMap;
 
@@ -36,8 +39,9 @@ pub const NO_NETWORK_RULE: &str = "no per-process network rule on Windows withou
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobOutcome {
     /// Assigned to the process, and read back: the process is in it, and
-    /// its immediate job allows one active process and no breakaway.
-    Limited,
+    /// its immediate job allows one active process and no breakaway, and
+    /// commits at most `job_memory` bytes where the policy has a memory cap.
+    Limited { job_memory: Option<u64> },
     /// Something outside refused it: creating the job, or nesting it in the
     /// process's own (an outer job with UI restrictions). Why.
     Blocked(String),
@@ -51,16 +55,18 @@ pub enum MitigationOutcome {
     Missing(String),
 }
 
-/// The report for `network`, from the job's and each mitigation's outcome.
+/// The report for `network` and the policy's `memory_cap`, from the job's
+/// and each mitigation's outcome.
 pub fn report(
     network: Network,
+    memory_cap: Option<u64>,
     job: &JobOutcome,
     mitigations: &[(&'static str, MitigationOutcome)],
 ) -> Report {
     let mut gaps = Vec::new();
     let mut reasons = BTreeMap::new();
     let exec = match job {
-        JobOutcome::Limited => {
+        JobOutcome::Limited { .. } => {
             gaps.push(PARENT_PROCESS);
             Status::Partial
         }
@@ -69,6 +75,13 @@ pub fn report(
             Status::Blocked
         }
     };
+    let memory_cap = memory_cap.map(|_| match job {
+        JobOutcome::Limited { job_memory } => *job_memory,
+        JobOutcome::Blocked(why) => {
+            reasons.insert("memory_cap", why.clone());
+            None
+        }
+    });
     for property in ["files", "ipc"] {
         reasons.insert(property, LATER_STEP.to_owned());
     }
@@ -92,7 +105,7 @@ pub fn report(
     }
     Report {
         mechanism: match job {
-            JobOutcome::Limited => "job",
+            JobOutcome::Limited { .. } => "job",
             JobOutcome::Blocked(_) => "none",
         }
         .into(),
@@ -104,6 +117,7 @@ pub fn report(
         reasons,
         resolution: None,
         mitigations: applied,
+        memory_cap,
     }
 }
 
@@ -120,9 +134,12 @@ mod tests {
             .collect()
     }
 
+    /// The job in place, without a memory limit: `freedom-cored`'s.
+    const LIMITED: JobOutcome = JobOutcome::Limited { job_memory: None };
+
     #[test]
     fn the_job_in_place_is_named_with_its_gap_and_every_mitigation() {
-        let report = report(Network::Direct, &JobOutcome::Limited, &all_set());
+        let report = report(Network::Direct, None, &LIMITED, &all_set());
         assert_eq!(
             report.to_json(),
             json!({
@@ -142,6 +159,25 @@ mod tests {
         );
     }
 
+    /// The memory cap as the job's limit read back (design 0010, "The
+    /// memory cap"); null with the job's reason where something outside
+    /// refused the job.
+    #[test]
+    fn the_memory_cap_is_the_job_s_limit_read_back() {
+        let cap = crate::confine::MEMORY_CAP;
+        let limited = JobOutcome::Limited {
+            job_memory: Some(cap),
+        };
+        let json = report(Network::Direct, Some(cap), &limited, &all_set()).to_json();
+        assert_eq!(json["memory_cap"], json!(2_147_483_648_u64));
+        assert!(json["reasons"].get("memory_cap").is_none());
+        let refused = JobOutcome::Blocked("nesting refused".into());
+        let blocked = report(Network::Direct, Some(cap), &refused, &all_set());
+        assert_eq!(blocked.memory_cap, Some(None));
+        assert_eq!(blocked.reasons["memory_cap"], "nesting refused");
+        assert_eq!(blocked.to_json()["memory_cap"], serde_json::Value::Null);
+    }
+
     #[test]
     fn socks5_has_no_rule_here() {
         let port = Network::Socks5 {
@@ -149,7 +185,7 @@ mod tests {
             loopback: true,
         };
         for network in [port, Network::Offline] {
-            let report = report(network, &JobOutcome::Limited, &all_set());
+            let report = report(network, None, &LIMITED, &all_set());
             assert_eq!(report.network, Status::Unavailable);
             assert_eq!(report.reasons["network"], NO_NETWORK_RULE);
         }
@@ -158,7 +194,7 @@ mod tests {
     #[test]
     fn a_refused_job_is_blocked_and_names_no_mechanism() {
         let job = JobOutcome::Blocked("nesting refused".into());
-        let report = report(Network::Direct, &job, &all_set());
+        let report = report(Network::Direct, None, &job, &all_set());
         assert_eq!(report.mechanism, "none");
         assert_eq!(report.exec, Status::Blocked);
         assert_eq!(report.reasons["exec"], "nesting refused");
@@ -171,7 +207,7 @@ mod tests {
     fn a_missing_mitigation_says_why_alone() {
         let mut mitigations = all_set();
         mitigations[1].1 = MitigationOutcome::Missing("unknown policy".into());
-        let report = report(Network::Direct, &JobOutcome::Limited, &mitigations);
+        let report = report(Network::Direct, None, &LIMITED, &mitigations);
         assert_eq!(report.mitigations["image_load"], Mitigation::Missing);
         assert_eq!(report.reasons["image_load"], "unknown policy");
         for name in ["dynamic_code", "extension_points"] {

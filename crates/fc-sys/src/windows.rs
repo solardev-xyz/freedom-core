@@ -1090,16 +1090,22 @@ pub mod limit {
     pub const KILL_ON_JOB_CLOSE: u32 = job::JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     /// An unhandled exception ends the process, with no dialog.
     pub const DIE_ON_UNHANDLED_EXCEPTION: u32 = job::JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+    /// At most `job_memory` bytes committed by all the job's processes
+    /// together: a commit past it fails (design 0010, "The memory cap").
+    pub const JOB_MEMORY: u32 = job::JOB_OBJECT_LIMIT_JOB_MEMORY;
 }
 
-/// A job's limits, as `JOBOBJECT_BASIC_LIMIT_INFORMATION` holds them: the
-/// flags ([`limit`]), and the active-process limit, which counts only with
-/// [`limit::ACTIVE_PROCESS`]. Nothing else is set: no UI restrictions,
-/// which a job nested in another may not have.
+/// A job's limits, as `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` holds them:
+/// the flags ([`limit`]); the active-process limit, which counts only with
+/// [`limit::ACTIVE_PROCESS`]; and the job's memory limit in bytes
+/// (`JobMemoryLimit`), which counts only with [`limit::JOB_MEMORY`].
+/// Nothing else is set: no UI restrictions, which a job nested in another
+/// may not have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     pub flags: u32,
     pub active_processes: u32,
+    pub job_memory: usize,
 }
 
 /// An unnamed job object this process created (`CreateJobObjectW`), its
@@ -1142,6 +1148,7 @@ impl Job {
                 ActiveProcessLimit: limits.active_processes,
                 ..Default::default()
             },
+            JobMemoryLimit: limits.job_memory,
             ..Default::default()
         };
         // SAFETY: `info` is a whole JOBOBJECT_EXTENDED_LIMIT_INFORMATION of
@@ -1237,6 +1244,7 @@ fn query_limits(job: HANDLE) -> io::Result<Limits> {
     Ok(Limits {
         flags: info.BasicLimitInformation.LimitFlags,
         active_processes: info.BasicLimitInformation.ActiveProcessLimit,
+        job_memory: info.JobMemoryLimit,
     })
 }
 
@@ -1686,15 +1694,26 @@ mod tests {
             job.limits().unwrap(),
             Limits {
                 flags: 0,
-                active_processes: 0
+                active_processes: 0,
+                job_memory: 0,
             }
         );
         let limits = Limits {
             flags: limit::ACTIVE_PROCESS,
             active_processes: 1,
+            job_memory: 0,
         };
         job.set_limits(limits).unwrap();
         assert_eq!(job.limits().unwrap(), limits);
+        // With the services' memory cap (design 0010, "The memory cap"),
+        // read back beside the active-process limit.
+        let capped = Limits {
+            flags: limit::ACTIVE_PROCESS | limit::JOB_MEMORY,
+            active_processes: 1,
+            job_memory: 1 << 31,
+        };
+        job.set_limits(capped).unwrap();
+        assert_eq!(job.limits().unwrap(), capped);
         // Not assigned: this test's process isn't in it.
         assert!(!job.holds_current_process().unwrap());
     }

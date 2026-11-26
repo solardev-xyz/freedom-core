@@ -120,6 +120,7 @@ impl Grant {
             // No mode is set once confined: the gates are taken, and
             // tightened, before.
             modes: false,
+            memory_cap: None,
         }
     }
 }

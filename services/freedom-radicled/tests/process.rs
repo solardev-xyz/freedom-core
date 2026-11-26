@@ -59,6 +59,7 @@ fn hello_names_this_starts_recipient_and_the_libradicle_it_links() {
         );
     }
     assert!(confinement.is_object(), "{confinement}");
+    assert_memory_capped(confinement);
     a.close_stdin();
     assert_eq!(a.exit_code(EXIT_TIMEOUT), Some(0));
     // A new start, a new key.
