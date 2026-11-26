@@ -46,7 +46,7 @@
 //! - **A stall ends the core:** once frames have waited [`STALL`] with the
 //!   writer writing nothing, main has stopped reading, and the core exits.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -581,6 +581,9 @@ pub fn run(options: &Options) -> Exit {
             events: events_tx,
         }),
         swarm: None,
+        swarm_cancels: BTreeMap::new(),
+        #[cfg(feature = "testhooks")]
+        parked_asks: VecDeque::new(),
         #[cfg(feature = "testhooks")]
         test,
     };
@@ -607,6 +610,13 @@ pub fn run(options: &Options) -> Exit {
         } else {
             hello_deadline.saturating_duration_since(Instant::now())
         };
+        // A held signature ask is polled for its release (test hooks).
+        #[cfg(feature = "testhooks")]
+        let timeout = if core.parked_asks.is_empty() {
+            timeout
+        } else {
+            timeout.min(Duration::from_millis(10))
+        };
         // While a request that waited can go, the loop doesn't wait: it
         // takes an event if one is there, then that request (`resume`).
         let received = if core.resumable() {
@@ -617,6 +627,17 @@ pub fn run(options: &Options) -> Exit {
         } else {
             events.recv_timeout(timeout)
         };
+        // The test hooks' held signature asks, once released.
+        #[cfg(feature = "testhooks")]
+        if !core.parked_asks.is_empty() && crate::testhooks::swarm_hold_released() {
+            let mut gone = false;
+            while let Some((tag, ask)) = core.parked_asks.pop_front() {
+                gone |= !core.swarm_vault(tag, &ask);
+            }
+            if gone {
+                break Exit::Internal;
+            }
+        }
         // Whatever arrived, first apply what is due (auto-lock, deadlines):
         // a busy queue must not postpone either, nor a writer without room.
         if core.hello_done {
@@ -790,14 +811,12 @@ pub fn run(options: &Options) -> Exit {
                     break exit;
                 }
             }
-            // The vault answers at once, on this thread, which holds it.
+            // The vault answers at once, on this thread, which holds it;
+            // with the test hooks, a signature's ask may wait for their
+            // release first (`FREEDOM_CORED_TEST_SWARM_HOLD=ask=…`), as one
+            // behind a cancel waits on this loop's queue.
             Ok(Event::SwarmVault { tag, ask }) => {
-                let answer = Box::new(core.vault.swarm_vault(&ask));
-                let sent = core
-                    .swarm
-                    .as_ref()
-                    .is_some_and(|thread| thread.send(swarm::In::Vault { tag, answer }, None));
-                if !sent {
+                if !core.swarm_ask(tag, ask) {
                     break Exit::Internal;
                 }
             }
@@ -1069,6 +1088,13 @@ struct Core {
     dweb_start: Option<DwebStart>,
     /// The swarm thread, once the hello has settled (design 0015).
     swarm: Option<swarm::Handle>,
+    /// The Swarm requests' cancellations (design 0015), which a cancel from
+    /// main sets: held weakly, each going with its request.
+    swarm_cancels: BTreeMap<u64, crate::swarm::engine::CancelWatch>,
+    /// The swarm thread's signature asks the test hooks hold before the
+    /// vault runs them (`FREEDOM_CORED_TEST_SWARM_HOLD=ask=…`), in order.
+    #[cfg(feature = "testhooks")]
+    parked_asks: VecDeque<(u64, Box<crate::swarm::engine::VaultAsk>)>,
     /// The `test.*` methods' thread, when the test hooks enable it (debug
     /// builds only).
     #[cfg(feature = "testhooks")]
@@ -1435,6 +1461,42 @@ impl Ahead {
 }
 
 impl Core {
+    /// The swarm thread's ask of the vault under `tag`: answered now, or,
+    /// with the test hooks, a signature's held until their release. False
+    /// once the thread has gone.
+    fn swarm_ask(&mut self, tag: u64, ask: Box<crate::swarm::engine::VaultAsk>) -> bool {
+        #[cfg(feature = "testhooks")]
+        if matches!(
+            *ask,
+            crate::swarm::engine::VaultAsk::Sign(_) | crate::swarm::engine::VaultAsk::OwnSign(_)
+        ) && (!self.parked_asks.is_empty() || crate::testhooks::swarm_hold_parks("ask"))
+        {
+            self.parked_asks.push_back((tag, ask));
+            return true;
+        }
+        self.swarm_vault(tag, &ask)
+    }
+
+    /// The vault's answer to the swarm thread's ask under `tag`, sent to
+    /// it: false once the thread has gone.
+    fn swarm_vault(&mut self, tag: u64, ask: &crate::swarm::engine::VaultAsk) -> bool {
+        let answer = Box::new(self.vault.swarm_vault(ask));
+        self.swarm
+            .as_ref()
+            .is_some_and(|thread| thread.send(swarm::In::Vault { tag, answer }, None))
+    }
+
+    /// A new Swarm request's cancellation, kept (weakly) for main's cancel
+    /// of it; those whose request has gone are let go of as more come.
+    fn swarm_cancellable(&mut self, id: u64) -> crate::swarm::engine::Cancelled {
+        let cancelled = crate::swarm::engine::Cancelled::default();
+        if self.swarm_cancels.len() >= 1024 {
+            self.swarm_cancels.retain(|_, watch| !watch.gone());
+        }
+        self.swarm_cancels.insert(id, cancelled.watch());
+        cancelled
+    }
+
     /// A frame from main. While requests wait (the loop's frames have no
     /// room in the writer), requests wait too, in order, and keep their
     /// credits: once those are spent, the reader stops reading stdin.
@@ -1593,6 +1655,12 @@ impl Core {
             // A cancel names a vault request, a naming one, a chain one, a
             // dweb one or a swarm one; each ignores IDs it doesn't hold.
             Message::Cancel { id } => {
+                // A Swarm request's vault asks still on this loop's queue,
+                // behind this cancel, sign nothing (design 0015, "Deadlines
+                // and cancel").
+                if let Some(cancelled) = self.swarm_cancels.remove(&id) {
+                    cancelled.set();
+                }
                 if !self.chain.send(chain::In::Cancel { id }, None)
                     || self
                         .dweb
@@ -1883,6 +1951,7 @@ impl Core {
                         id,
                         params,
                         page: context.page.clone(),
+                        cancelled: self.swarm_cancellable(id),
                     },
                     // Main's own Swarm methods, and the chrome's (D5).
                     _ => swarm::In::Own {
@@ -1890,6 +1959,7 @@ impl Core {
                         method: loggable(method),
                         params,
                         caller: context.caller,
+                        cancelled: self.swarm_cancellable(id),
                     },
                 };
                 let sent = self

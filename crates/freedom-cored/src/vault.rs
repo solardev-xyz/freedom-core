@@ -1374,8 +1374,18 @@ impl Vault {
         use fc_swarm_provider::machine::Event;
         match ask {
             VaultAsk::Owner(key) => VaultAnswer::Event(Event::Owner(self.swarm_owner(*key))),
+            // Its request cancelled (main's cancel read before this ask, or
+            // the request answered): nothing is signed after the cancel.
+            VaultAsk::Sign(sign) if sign.cancelled.is_set() => {
+                VaultAnswer::Event(Event::Signed(Err(fc_json::JsString::from("Cancelled"))))
+            }
+            VaultAsk::OwnSign(own) if own.cancelled.is_set() => {
+                VaultAnswer::Event(Event::Signed(Err(fc_json::JsString::from("Cancelled"))))
+            }
             VaultAsk::Sign(sign) => VaultAnswer::Event(Event::Signed(self.swarm_sign(sign))),
-            VaultAsk::OwnSign(soc) => VaultAnswer::Event(Event::Signed(self.swarm_own_sign(soc))),
+            VaultAsk::OwnSign(own) => {
+                VaultAnswer::Event(Event::Signed(self.swarm_own_sign(&own.soc)))
+            }
             VaultAsk::Accounts => VaultAnswer::Accounts(self.swarm_accounts()),
         }
     }

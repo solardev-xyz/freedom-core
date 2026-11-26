@@ -611,8 +611,9 @@ fn swarm_hold() -> Option<(String, std::path::PathBuf, std::path::PathBuf)> {
 }
 
 /// Whether the swarm thread parks a vault answer of `kind` (`owner` or
-/// `sign`) now: the hook names it and its release isn't there. Each parked
-/// answer appends a line to the marker.
+/// `sign`), or the event loop a signature's ask before the vault runs it
+/// (`ask`), now: the hook names it and its release isn't there. Each parked
+/// answer or ask appends a line to the marker.
 #[cfg(feature = "testhooks")]
 pub fn swarm_hold_parks(kind: &str) -> bool {
     use std::io::Write as _;

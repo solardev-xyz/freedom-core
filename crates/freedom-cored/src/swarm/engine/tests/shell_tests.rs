@@ -125,7 +125,7 @@ fn the_shell_door_reads_strictly_and_waits_for_the_stores() {
     engine
         .shell(&mut io, 0, 5, ShellMethod::Stamps, Some(&long))
         .unwrap();
-    assert!(error_of(io.answer_of(5)).message.len() <= 260);
+    assert!(error_of(io.answer_of(5)).message.len() <= MOST_INVALID_TEXT);
     // A publish that keeps a history row needs the stores; one that keeps
     // none doesn't.
     let mut unmoved = Engine::new(
@@ -390,9 +390,10 @@ fn a_feed_reads_its_owner_from_the_vault() {
         )
         .unwrap();
     let (_, ask) = io.vaults.pop().unwrap();
-    let VaultAsk::OwnSign(soc) = ask else {
+    let VaultAsk::OwnSign(ask) = ask else {
         panic!("main's own SOC: {ask:?}")
     };
+    let soc = &ask.soc;
     assert_eq!(soc.key, SignKey::BeeWallet);
     assert_eq!(soc.hold, None);
 }
@@ -974,4 +975,44 @@ fn a_detach_waits_for_a_hold_on_its_site() {
     );
     engine.written(&mut io, 0, 1).unwrap();
     assert_eq!((engine.memory_used(), engine.requests()), (0, 0));
+}
+
+/// An `invalid_argument`'s text is at most 256 bytes, its ellipsis within
+/// the bound, cut at a character's boundary.
+#[test]
+fn an_invalid_texts_bound_holds_its_ellipsis() {
+    let most = MOST_INVALID_TEXT;
+    assert_eq!(bounded_text(&"a".repeat(most)), "a".repeat(most));
+    for text in [
+        "a".repeat(most + 1),
+        "a".repeat(300),
+        "é".repeat(200),
+        "€".repeat(100),
+        format!("{}é{}", "a".repeat(252), "b".repeat(10)),
+        format!("{}€{}", "a".repeat(252), "b".repeat(10)),
+        "😀".repeat(80),
+    ] {
+        let cut = bounded_text(&text);
+        assert!(cut.len() <= most, "{} bytes", cut.len());
+        assert!(cut.ends_with('…'));
+        let kept = cut.strip_suffix('…').unwrap();
+        assert!(text.starts_with(kept));
+        // As much as fits: one more character wouldn't.
+        let next = text[kept.len()..].chars().next().unwrap();
+        assert!(
+            kept.len() + next.len_utf8() + '…'.len_utf8() > most,
+            "{text:?}"
+        );
+    }
+    assert_eq!(bounded_text(&"a".repeat(300)).len(), most);
+    // Through the door: an unknown 300-character member's text.
+    let mut engine = moved(Bounds::default());
+    let mut io = Fake::default();
+    let long = format!(r#"{{"{}":1}}"#, "k".repeat(300));
+    engine
+        .shell(&mut io, 0, 1, ShellMethod::Stamps, Some(&long))
+        .unwrap();
+    let error = error_of(io.answer_of(1));
+    assert_eq!(error.code, ErrorCode::InvalidArgument);
+    assert!(error.message.len() <= most, "{}", error.message.len());
 }
