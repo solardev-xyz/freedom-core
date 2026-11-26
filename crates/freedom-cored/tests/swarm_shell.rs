@@ -1946,7 +1946,8 @@ struct WantCall {
 
 /// The calls the core makes for a step's recorded requests: the
 /// reference's own, its second `/stamps` dropped (`stamps-one-read`) and
-/// its whole `GET /feeds` index lookup asked as `feed_head` (`index-probe`).
+/// its whole `GET /feeds` index lookup (an update's and a read's) asked as
+/// `feed_head` (`index-probe`).
 fn want_calls(step: &JsValue) -> Vec<WantCall> {
     let mut out = Vec::new();
     for r in field(step, "requests").as_array().unwrap() {
@@ -1964,19 +1965,6 @@ fn want_calls(step: &JsValue) -> Vec<WantCall> {
                 reply: recorded_reply(reply, &["swarm-feed-index", "swarm-feed-index-next"]),
             }),
             Some(other) => panic!("a shell request of deviation {other}"),
-            // swarm.feed's read learns the latest index by bee-js's whole
-            // download (`feed_latest`, unmarked while the read has no
-            // grammar row): the core asks feed_head, as for the update.
-            None if r.get("form").map(str_of) == Some("feed_latest") => out.push(WantCall {
-                form: "feed_head".to_owned(),
-                method: "GET".to_owned(),
-                path: str_of(field(r, "path")).to_owned(),
-                query: Vec::new(),
-                headers: vec![("swarm-only-root-chunk".to_owned(), "true".to_owned())],
-                body: None,
-                feed: None,
-                reply: recorded_reply(reply, &["swarm-feed-index", "swarm-feed-index-next"]),
-            }),
             None => out.push(WantCall {
                 form: str_of(field(r, "form")).to_owned(),
                 method: str_of(field(r, "method")).to_owned(),

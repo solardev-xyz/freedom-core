@@ -2778,30 +2778,15 @@ fn recorded_reply(reply: V<'_, '_>, keep: &[&str]) -> Reply {
 
 /// The calls the core makes for a step's recorded requests: the reference's
 /// own, but its second `/stamps` dropped (`stamps-one-read`) and its whole
-/// `GET /feeds` index lookup asked as `feed_head` (`index-probe`).
-/// `swarm.feed`'s read (readFeedState) learns the latest index by the same
-/// whole download (bee-js's `downloadPayload`, recorded as `feed_latest`,
-/// unmarked while the read has no grammar row): the core asks `feed_head`
-/// for it too, as for the update.
+/// `GET /feeds` index lookup (an update's and a read's) asked as
+/// `feed_head` (`index-probe`).
 fn want_calls(step: V<'_, '_>) -> Vec<WantCall> {
     let mut out = Vec::new();
     for r in get(step, "requests").children() {
         let reply = get(r, "reply");
         let deviation = r.get("deviation").map(string);
-        let read_lookup =
-            deviation.is_none() && r.get("form").map(string).as_deref() == Some("feed_latest");
         match deviation.as_deref() {
             Some("stamps-one-read") => continue,
-            _ if read_lookup => out.push(WantCall {
-                form: "feed_head".to_owned(),
-                method: "GET".to_owned(),
-                path: string(get(r, "path")),
-                query: Vec::new(),
-                headers: vec![("swarm-only-root-chunk".to_owned(), "true".to_owned())],
-                body: None,
-                feed: None,
-                reply: recorded_reply(reply, &["swarm-feed-index", "swarm-feed-index-next"]),
-            }),
             Some("index-probe") => out.push(WantCall {
                 form: "feed_head".to_owned(),
                 method: "GET".to_owned(),
@@ -2914,8 +2899,8 @@ fn every_shell_case_through_the_machines() {
             left_out.push(id);
             continue;
         }
-        // A feed update's index lookup is feed_head (`index-probe`), which
-        // want_calls asks for. A picked file whose read fails once its
+        // A feed update's and a read's index lookup is feed_head
+        // (`index-probe`), which want_calls asks for. A picked file whose read fails once its
         // upload started (`picked-read-text`): the reference's fetch fails
         // before any request reaches the node; the core makes its upload
         // call, main ends the part with the errno's name, and the core
