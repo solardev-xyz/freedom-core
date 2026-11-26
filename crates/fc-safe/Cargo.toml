@@ -1,0 +1,27 @@
+[package]
+name = "fc-safe"
+description = "Freedom's Safes in the core (design 0016, SAFE-1): Safe 1.4.1 on Gnosis, its address and deployment, the SafeTx and SafeMessage, owner signatures and execTransaction"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# EIP-712 hashing with ethers' semantics (0002), keccak256, EIP-191,
+# signature recovery and EIP-55: the core's one implementation of each.
+fc-evm = { path = "../fc-evm" }
+# setup's, createProxyWithNonce's and execTransaction's ABI encoding
+# (design 0016, "Built and hashed in the core"): the core's encoder.
+fc-naming = { path = "../fc-naming" }
+# The SafeTx's fields and typed data in the reference's property order,
+# which safe-pending.json keeps.
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+
+[dev-dependencies]
+# The unit tests' own signatures, as fc-evm makes them.
+k256 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdsa"] }
