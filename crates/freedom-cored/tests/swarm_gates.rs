@@ -16,8 +16,10 @@
 //!   active identity switched to a shared one through `swarm.identities`,
 //!   and a manifest projection's revoke (`swarm.manifest`'s disconnect),
 //!   each with the change winning and waiting.
-//! - **`vault.lock`** answered within 0009's gate while two uploads and a
-//!   mining job run.
+//! - **`vault.lock`** answered while two uploads and a mining job run,
+//!   each shown running through the window: within a debug build's slack
+//!   (1,000 ms at p99, as `dweb_gates.rs` allows its debug run) in CI, and
+//!   within 0009's gate (50 ms at p99) over a 10 s `#[ignore]`d run.
 //! - **Malformed replies** from main, one of each kind, each ending the
 //!   connection; **a stalled node** ending an upload at the idle bound.
 //! - **Coverage:** every `methods`, `stores` and `shell` case of
@@ -30,7 +32,8 @@
 //! Where that file can't be written, `VmRSS` is sampled as the load runs.
 //!
 //! **Heavy, `#[ignore]`d:** a stalled upload at D13's real 60 s idle
-//! bound, no hook shortening it:
+//! bound, no hook shortening it; and `vault.lock` for 10 s against 0009's
+//! 50 ms, best on a quiet machine:
 //!
 //! ```sh
 //! cargo test -p freedom-cored --features testhooks --test swarm_gates -- --ignored --nocapture
@@ -2705,7 +2708,7 @@ fn every_malformed_reply_from_main_ends_the_connection() {
                     stream_frame(KIND_DATA, id, b"more"),
                 ]
             }),
-            "stream_not_open",
+            "stream_not_open|stream_unknown",
         ),
         (
             "a node body's abort that isn't JSON",
@@ -2869,7 +2872,12 @@ fn every_malformed_reply_from_main_ends_the_connection() {
             .unwrap_or("")
             .to_owned();
         assert!(!category.is_empty(), "{what}: {stderr}");
-        assert_eq!(category, want, "{what}");
+        // `a|b`: either, as timing decides (data after a stream's end
+        // finds its route closed, or already forgotten).
+        assert!(
+            want.split('|').any(|w| w == category),
+            "{what}: {category}, not {want}"
+        );
         report.push(format!("{what} ({target}): {category}"));
     }
     eprintln!(
