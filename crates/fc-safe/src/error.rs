@@ -1,5 +1,7 @@
 //! What fc-safe refuses.
 
+use crate::reads::Read;
+
 /// A Safe, SafeTx or SafeMessage fc-safe won't build, or signatures it
 /// won't join.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -98,6 +100,47 @@ impl SignatureError {
             SignatureError::V => "v",
             SignatureError::Recovery => "recovery",
             SignatureError::Mismatch => "mismatch",
+        }
+    }
+}
+
+/// A read's answer [`crate::check_setup`] can't decode: not the encoding
+/// Safe 1.4.1's function or storage word has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the Safe's {read} read answered {problem}")]
+pub struct ReadError {
+    pub read: Read,
+    pub problem: ReadProblem,
+}
+
+/// What is wrong with a read's answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ReadProblem {
+    /// Not a length its encoding has: 32 bytes for a word, and for a list
+    /// its head, its count and exactly that many addresses.
+    #[error("a length its encoding doesn't have")]
+    Length,
+    /// A list's offset other than Solidity's (`0x20` for `getOwners`,
+    /// `0x40` for `getModulesPaginated`).
+    #[error("another offset than Solidity's")]
+    Offset,
+    /// An address word with any of its high 12 bytes set.
+    #[error("an address with its high bytes set")]
+    Address,
+}
+
+impl ReadError {
+    pub(crate) fn new(read: Read, problem: ReadProblem) -> Self {
+        ReadError { read, problem }
+    }
+}
+
+impl ReadProblem {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ReadProblem::Length => "length",
+            ReadProblem::Offset => "offset",
+            ReadProblem::Address => "address",
         }
     }
 }

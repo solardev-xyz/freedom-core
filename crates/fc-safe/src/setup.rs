@@ -6,16 +6,10 @@
 use fc_evm::{U256, checksum_address, keccak256};
 use fc_naming::abi::Token;
 
-use crate::constants::{CHAIN_ID, FALLBACK_HANDLER, PROXY_CREATION_CODE, PROXY_FACTORY, SINGLETON};
-use crate::{Error, address_word, call};
-
-/// The owners' list sentinel of Safe's `OwnerManager`, which `setup`
-/// refuses as an owner.
-const SENTINEL: [u8; 20] = {
-    let mut sentinel = [0u8; 20];
-    sentinel[19] = 1;
-    sentinel
+use crate::constants::{
+    CHAIN_ID, FALLBACK_HANDLER, PROXY_CREATION_CODE, PROXY_FACTORY, SENTINEL, SINGLETON,
 };
+use crate::{Error, address_word, call};
 
 /// A Safe's owners, in the record's order, and its threshold: 1 of 2 or 2
 /// of 3, as Freedom creates them (Q24; the record's own check is

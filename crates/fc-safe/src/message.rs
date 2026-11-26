@@ -2,12 +2,12 @@
 //! under the Safe's domain, as `safe-messages.js` builds it, the digest
 //! being the one a verifier computes for the page's request.
 
-use fc_evm::{checksum_address, eip191_digest, to_hex, typed_data_hash};
+use fc_evm::{U256, checksum_address, eip191_digest, to_hex, typed_data_hash};
 use serde_json::{Map, Value, json};
 
 use crate::Error;
 use crate::constants::CHAIN_ID;
-use crate::tx::{domain_type, type_of};
+use crate::tx::{domain_type, type_of, uint_json};
 
 /// A SafeMessage over a request's digest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,26 +46,46 @@ impl SafeMessage {
     /// reference builds it: the domain `{ chainId: 100, verifyingContract:
     /// safe }`, the message `{ message: digest }`.
     pub fn typed_data(&self, safe: &[u8; 20]) -> Value {
-        json!({
-            "types": {
-                "EIP712Domain": domain_type(),
-                "SafeMessage": message_type(),
-            },
-            "domain": { "chainId": CHAIN_ID, "verifyingContract": checksum_address(safe) },
-            "primaryType": "SafeMessage",
-            "message": { "message": to_hex(&self.digest) },
-        })
+        safe_message_typed_data(CHAIN_ID, safe, &self.digest)
     }
 
     /// The SafeMessage's hash: `TypedDataEncoder.hash` of
     /// [`SafeMessage::typed_data`], through `fc-evm`.
     pub fn hash(&self, safe: &[u8; 20]) -> Result<[u8; 32], Error> {
-        let typed = self.typed_data(safe);
-        let mut types = Map::new();
-        types.insert("SafeMessage".into(), message_type());
-        typed_data_hash(&typed["domain"], &Value::Object(types), &typed["message"])
-            .map_err(|error| Error::TypedData(error.to_string()))
+        safe_message_hash(CHAIN_ID, safe, &self.digest)
     }
+}
+
+/// A SafeMessage's typed data on `chain_id`, in [`SafeMessage::typed_data`]'s
+/// form: for fc-approval's Safe approvals (design 0012, APR-3), which bind a
+/// `safe-message` on any chain its token allows (design 0016, SAFE-2's D5).
+pub fn safe_message_typed_data(chain_id: u64, safe: &[u8; 20], digest: &[u8; 32]) -> Value {
+    json!({
+        "types": {
+            "EIP712Domain": domain_type(),
+            "SafeMessage": message_type(),
+        },
+        "domain": {
+            "chainId": uint_json(&U256::from_u64(chain_id)),
+            "verifyingContract": checksum_address(safe),
+        },
+        "primaryType": "SafeMessage",
+        "message": { "message": to_hex(digest) },
+    })
+}
+
+/// The hash of [`safe_message_typed_data`]: `TypedDataEncoder.hash`,
+/// through `fc-evm`.
+pub fn safe_message_hash(
+    chain_id: u64,
+    safe: &[u8; 20],
+    digest: &[u8; 32],
+) -> Result<[u8; 32], Error> {
+    let typed = safe_message_typed_data(chain_id, safe, digest);
+    let mut types = Map::new();
+    types.insert("SafeMessage".into(), message_type());
+    typed_data_hash(&typed["domain"], &Value::Object(types), &typed["message"])
+        .map_err(|error| Error::TypedData(error.to_string()))
 }
 
 /// protocol-kit's `getEip712MessageTypes`' `SafeMessage`.
