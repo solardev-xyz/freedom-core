@@ -77,6 +77,16 @@
 //!     `stats`: `ipfs.stats`'s store figures do (`CoreError::OutOfMemory`
 //!     in a `StoreError`), as an out-of-memory SQLite reports without its
 //!     allocator failing would.
+//!   - `exhaust`: as `open`, with the heap exhausted first, under a lowered
+//!     cap: the error is built, then Rust allocations are taken until none
+//!     of 16 bytes or more is left (`try_reserve_exact`, which fails
+//!     without aborting), and kept. A static line says whether a 64-byte
+//!     one then fails (`test hook: the heap is exhausted`), and the error
+//!     goes the open error's way, which must then allocate nothing.
+//!
+//!   In `fill`, `allocate` and `exhaust` nothing else in the process should
+//!   allocate meanwhile: the tests run them under `socks5`, where no NAT64
+//!   discovery runs.
 //! - `FREEDOM_IPFSD_TEST_SQLITE_FIRST=1` opens and closes a memory store on
 //!   the main thread before `main` installs the out-of-memory hook, so the
 //!   hook comes too late and is refused (exit 77).
@@ -570,6 +580,20 @@ pub fn store_opened(store: SqliteBlockStore) -> Result<SqliteBlockStore, StoreEr
         if out_of_memory("open") {
             return Err(injected());
         }
+        if out_of_memory("exhaust") {
+            // Built while there is memory: nothing after the fill may
+            // allocate.
+            let error = injected();
+            fc_service::log::info("test hook: exhausting the heap", serde_json::json!({}));
+            let exhausted = exhaust_heap();
+            let line: &[u8] = if exhausted {
+                b"test hook: the heap is exhausted\n"
+            } else {
+                b"test hook: the heap is not exhausted\n"
+            };
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), line);
+            return Err(error);
+        }
         if out_of_memory("allocate") {
             drop(std::hint::black_box(vec![0u8; 1 << 30]));
         }
@@ -595,6 +619,26 @@ pub fn store_opened(store: SqliteBlockStore) -> Result<SqliteBlockStore, StoreEr
         }
     }
     Ok(store)
+}
+
+/// Takes Rust allocations, halving their size from 64 MiB to 16 bytes, until
+/// none is left, and leaks them: `try_reserve_exact` fails without aborting.
+/// Whether a 64-byte allocation then fails too. Under a lowered cap only:
+/// without one it would take the address space.
+#[cfg(feature = "testhooks")]
+fn exhaust_heap() -> bool {
+    let mut size = 64usize << 20;
+    while size >= 16 {
+        loop {
+            let mut hoard = Vec::<u8>::new();
+            if hoard.try_reserve_exact(size).is_err() {
+                break;
+            }
+            std::mem::forget(hoard);
+        }
+        size /= 2;
+    }
+    Vec::<u8>::new().try_reserve_exact(64).is_err()
 }
 
 /// `ipfs.stats`'s store figures: `figures`, or an out-of-memory error, as

@@ -386,8 +386,9 @@ impl Stats {
                         json!({ "block_count": block_count, "total_bytes": total_bytes })
                     }
                     Err(error) => {
-                        // Never a reply: exit 71 (0007, "Errors"; `oom.rs`).
-                        oom::exit_on(&error, "stats");
+                        // Never a reply: exit 71 (0007, "Errors"; `oom.rs`),
+                        // before anything allocates.
+                        oom::exit_on(&error, oom::At::Stats);
                         Value::Null
                     }
                 };

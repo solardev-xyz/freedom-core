@@ -12,7 +12,9 @@
 //!   process, and the start is never answered.
 //! - **An out-of-memory error reaching the service,** as SQLite reports one
 //!   its allocator didn't fail (a test hook's): at the store's open, and in
-//!   `ipfs.stats`, it ends the process with 71 too, never a reply.
+//!   `ipfs.stats`, it ends the process with 71 too, with a static line,
+//!   never a reply. At the store's open it does so with the heap exhausted
+//!   too (Linux, under a lowered cap): the way out allocates nothing.
 //! - **A late hook:** with SQLite used before `main` installs the hook, the
 //!   hook is refused, and the process exits 77 before `ipfs.hello`.
 
@@ -44,8 +46,11 @@ fn logged(stderr: &str, msg: &str) -> Vec<Value> {
         .collect()
 }
 
-/// The service's own out-of-memory exit's line.
-const EXITS: &str = "out of memory: the process ends";
+/// The service's own out-of-memory exits' lines (src/oom.rs), and part of
+/// both.
+const AT_OPEN: &str = "freedom-ipfsd: out of memory at the store's open; exiting 71\n";
+const IN_STATS: &str = "freedom-ipfsd: out of memory in ipfs.stats; exiting 71\n";
+const EXITS: &str = "freedom-ipfsd: out of memory";
 
 /// Waits for the process to exit, then checks that no reply to `id` was
 /// written, and returns its stderr.
@@ -57,6 +62,19 @@ fn unanswered(ipfsd: &mut Ipfsd, id: u64) -> String {
         "a reply to {id}: {left:?}"
     );
     ipfsd.stderr()
+}
+
+/// The ephemeral process with its cap lowered, and the out-of-memory hook
+/// `mode`. Under `socks5`, so that no NAT64 discovery runs beside the hook
+/// and allocates as memory runs out: in these cases nothing else in the
+/// process works meanwhile. The proxy is never asked: routing is offline,
+/// and the start ends in its build.
+#[cfg(target_os = "linux")]
+fn capped(mode: &str, env: &[(&str, &str)]) -> Ipfsd {
+    let proxy = std::net::SocketAddr::from(([127, 0, 0, 1], 9));
+    let mut env = env.to_vec();
+    env.extend([(HEADROOM, ROOM), (OUT_OF_MEMORY, mode)]);
+    Ipfsd::ephemeral_on(&socks5(proxy), &env)
 }
 
 /// The cap `hello` reports, lowered below 0010's 2 GiB.
@@ -73,13 +91,12 @@ fn lowered_cap(ipfsd: &mut Ipfsd) -> u64 {
 #[cfg(target_os = "linux")]
 #[test]
 fn an_sqlite_allocation_past_the_cap_exits_71_and_answers_nothing() {
-    let mut ipfsd = Ipfsd::ephemeral(&[
-        (HEADROOM, ROOM),
-        (OUT_OF_MEMORY, "fill"),
-        // The fill runs in the start's build: its deadline never answers
-        // first on a loaded machine.
-        ("FREEDOM_IPFSD_TEST_START_DEADLINE_MS", "120000"),
-    ]);
+    // The fill runs in the start's build: its deadline never answers first
+    // on a loaded machine.
+    let mut ipfsd = capped(
+        "fill",
+        &[("FREEDOM_IPFSD_TEST_START_DEADLINE_MS", "120000")],
+    );
     let cap = lowered_cap(&mut ipfsd);
     let id = ipfsd.request("ipfs.start", memory("e-1"));
     // A few seconds of puts in a debug build: the hang guard, not a bound.
@@ -90,7 +107,7 @@ fn an_sqlite_allocation_past_the_cap_exits_71_and_answers_nothing() {
     // not the service's own exit, which a returned error would reach.
     let line = String::from_utf8_lossy(freedom_ipfs_store::OUT_OF_MEMORY_LINE);
     assert!(stderr.contains(line.as_ref()), "{stderr}");
-    assert!(logged(&stderr, EXITS).is_empty(), "{stderr}");
+    assert!(!stderr.contains(EXITS), "{stderr}");
     let filling = logged(&stderr, "test hook: filling the store");
     assert_eq!(filling.len(), 1, "{stderr}");
     let used = filling[0]["vm_data"].as_u64().unwrap();
@@ -106,7 +123,7 @@ fn an_sqlite_allocation_past_the_cap_exits_71_and_answers_nothing() {
 fn a_rust_allocation_past_the_cap_aborts_and_answers_nothing() {
     use std::os::unix::process::ExitStatusExt;
 
-    let mut ipfsd = Ipfsd::ephemeral(&[(HEADROOM, ROOM), (OUT_OF_MEMORY, "allocate")]);
+    let mut ipfsd = capped("allocate", &[]);
     lowered_cap(&mut ipfsd);
     let id = ipfsd.request("ipfs.start", memory("e-1"));
     let status = ipfsd.exit_status(EXIT_TIMEOUT);
@@ -127,14 +144,32 @@ fn an_out_of_memory_error_at_the_stores_open_exits_71_and_answers_nothing() {
     let code = ipfsd.exit_code(EXIT_TIMEOUT);
     let stderr = unanswered(&mut ipfsd, id);
     assert_eq!(code, Some(71), "{stderr}");
-    let exits = logged(&stderr, EXITS);
-    assert_eq!(exits.len(), 1, "{stderr}");
-    assert_eq!(exits[0]["at"], "store_open", "{stderr}");
-    assert_eq!(exits[0]["exit"], 71, "{stderr}");
+    assert_eq!(stderr.matches(EXITS).count(), 1, "{stderr}");
+    assert!(stderr.contains(AT_OPEN), "{stderr}");
     assert!(
         logged(&stderr, "the store won't open").is_empty(),
         "{stderr}"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn with_the_heap_exhausted_an_out_of_memory_error_still_exits_71() {
+    let mut ipfsd = capped("exhaust", &[]);
+    lowered_cap(&mut ipfsd);
+    let id = ipfsd.request("ipfs.start", memory("e-1"));
+    let status = ipfsd.exit_status(READ_TIMEOUT);
+    let stderr = unanswered(&mut ipfsd, id);
+    // Not Rust's abort: the way out allocated nothing.
+    assert_eq!(status.code(), Some(71), "{status}: {stderr}");
+    assert!(
+        stderr.contains("test hook: the heap is exhausted\n"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(AT_OPEN), "{stderr}");
+    assert!(!stderr.contains("memory allocation of"), "{stderr}");
+    let line = String::from_utf8_lossy(freedom_ipfs_store::OUT_OF_MEMORY_LINE);
+    assert!(!stderr.contains(line.as_ref()), "{stderr}");
 }
 
 #[test]
@@ -147,9 +182,8 @@ fn an_out_of_memory_error_in_stats_exits_71_and_answers_nothing() {
     let code = ipfsd.exit_code(EXIT_TIMEOUT);
     let stderr = unanswered(&mut ipfsd, id);
     assert_eq!(code, Some(71), "{stderr}");
-    let exits = logged(&stderr, EXITS);
-    assert_eq!(exits.len(), 1, "{stderr}");
-    assert_eq!(exits[0]["at"], "stats", "{stderr}");
+    assert_eq!(stderr.matches(EXITS).count(), 1, "{stderr}");
+    assert!(stderr.contains(IN_STATS), "{stderr}");
 }
 
 #[test]

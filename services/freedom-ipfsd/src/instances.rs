@@ -575,8 +575,9 @@ impl Instances {
             }
         };
         let store = store.and_then(testhooks::store_opened).map_err(|error| {
-            // Never a reply: exit 71 (0007, "Errors"; `oom.rs`).
-            oom::exit_on(&error, "store_open");
+            // Never a reply: exit 71 (0007, "Errors"; `oom.rs`). First,
+            // before anything here allocates.
+            oom::exit_on(&error, oom::At::StoreOpen);
             log::error(
                 "the store won't open",
                 json!({ "instance": start.instance, "error": store_error_kind(&error) }),
@@ -978,9 +979,9 @@ fn stopped() -> ErrorBody {
 }
 
 /// A fixed name for a store error: its text can carry a path. Out of memory
-/// is never a reply's: the process ends with exit 71 for it, and logs this
-/// name (`oom.rs`).
-pub(crate) fn store_error_kind(error: &StoreError) -> &'static str {
+/// never gets this far: the process ends with exit 71 for it first
+/// (`oom.rs`).
+fn store_error_kind(error: &StoreError) -> &'static str {
     match error {
         StoreError::OutOfMemory(_) => "out_of_memory",
         StoreError::Sqlite(_) => "sqlite",

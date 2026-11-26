@@ -18,36 +18,53 @@
 //!   body's failure is text. The hook is what covers them.
 //! - **Rust's allocator** aborts the process on a failed allocation, as it
 //!   does by default.
+//!
+//! **Nothing on the way out allocates,** since the heap may be exhausted:
+//! the error is classified borrowed, by a `match`, and the exit writes a
+//! static line with std's unbuffered stderr, then calls
+//! `std::process::exit`. No line is formatted, no JSON is built, and the log
+//! queue isn't used.
 
-use std::time::Duration;
+use std::io::Write;
 
-use fc_service::{Exit, log};
+use fc_service::Exit;
 use freedom_ipfs_store::StoreError;
-use serde_json::json;
 
-use crate::instances::store_error_kind;
+/// Where an out-of-memory error reached the service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum At {
+    /// The store's open, in `ipfs.start`'s build.
+    StoreOpen,
+    /// `ipfs.stats`' store figures.
+    Stats,
+}
 
-/// How long the exit's line gets to reach stderr.
-const REPORT: Duration = Duration::from_millis(150);
-
-/// Ends the process with exit 71 if `error` is out of memory, from where
-/// `at` names; returns otherwise.
-pub fn exit_on(error: &StoreError, at: &'static str) {
-    if error.is_out_of_memory() {
-        exit(at, store_error_kind(error));
+impl At {
+    /// The exit's line for here: static, so nothing is formatted.
+    pub fn line(self) -> &'static [u8] {
+        match self {
+            At::StoreOpen => b"freedom-ipfsd: out of memory at the store's open; exiting 71\n",
+            At::Stats => b"freedom-ipfsd: out of memory in ipfs.stats; exiting 71\n",
+        }
     }
 }
 
-/// Ends the process with exit 71, logging where (`at`) and the error's
-/// fixed name. The first exit to begin wins ([`fc_service::exit::claim`]):
-/// if another has, it ends the process, and this thread waits for it.
-fn exit(at: &'static str, error: &'static str) -> ! {
+/// Ends the process with exit 71 if `error` is out of memory, from where
+/// `at` names; returns otherwise. Allocates nothing either way.
+pub fn exit_on(error: &StoreError, at: At) {
+    if error.is_out_of_memory() {
+        exit(at);
+    }
+}
+
+/// Ends the process with exit 71, after `at`'s line. The first exit to
+/// begin wins ([`fc_service::exit::claim`]): if another has, it ends the
+/// process, and this thread waits for it.
+fn exit(at: At) -> ! {
     fc_service::exit::claim();
-    log::error(
-        "out of memory: the process ends",
-        json!({ "at": at, "error": error, "exit": Exit::OutOfMemory.code() }),
-    );
-    log::finish(REPORT);
+    // Unbuffered, and its lock is a static one: a short or failed write is
+    // ignored, since the exit code is what main reads.
+    let _ = std::io::stderr().write_all(at.line());
     std::process::exit(i32::from(Exit::OutOfMemory.code()))
 }
 
