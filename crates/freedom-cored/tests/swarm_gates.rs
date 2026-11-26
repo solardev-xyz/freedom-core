@@ -994,22 +994,32 @@ fn rig_with(env: &[(&str, &str)], sites: &[&str]) -> Rig {
     rig
 }
 
-/// How many publishes the warm core makes after the first.
-const WARM_PUBLISHES: usize = 6;
+/// How many publishes the warm core makes after the first (`N`).
+const WARM_PUBLISHES: usize = 10;
+/// How far the warm core's settled resident memory may grow over them, in
+/// KiB (`B`): the gate passes only below it.
+const SETTLED_GROWTH_KIB: u64 = 1024;
+/// The smallest leak a publish the gate claims to catch, in KiB (`L`):
+/// `N × L` = 1,920 KiB is past `B` and the largest drift the allocator
+/// showed on its own over four to ten warm publishes (456 KiB) together
+/// (1,480 KiB), by 440 KiB.
+const LEAK_CAUGHT_KIB: u64 = 192;
 
 /// The publish gate, the vectors' 50 MiB of 100 files, its tar byte for
 /// byte the reference's each time:
 ///
 /// - on a core that has published nothing yet, its peak counting the
 ///   upload path's one-time allocations: up less than 4 MiB;
-/// - then [`WARM_PUBLISHES`] more on the same core, settled between them,
-///   against the warm core's settled resident memory with its peak started
-///   again once before them: the peak over all of them up less than 4 MiB
-///   (each one's, and whatever they left behind together), and the settled
-///   resident memory after the last within 1.5 MiB of the warm core's, so
-///   it doesn't grow with the count (a leak of a quarter MiB a publish
-///   fails it; the allocator's own drift measured 0.1 to 0.5 MiB over
-///   four).
+/// - then [`WARM_PUBLISHES`] (10) more on the same core, settled between
+///   them, against the warm core's settled resident memory with its peak
+///   started again once before them: the peak over all of them up less
+///   than 4 MiB (each one's, and whatever they left behind together), and
+///   the settled resident memory after the last grown by less than
+///   [`SETTLED_GROWTH_KIB`] (1 MiB), so it doesn't grow with the count. A
+///   leak of [`LEAK_CAUGHT_KIB`] (192 KiB) a publish or more fails it: ten
+///   of them are 1,920 KiB, past the bound with the most the allocator
+///   drifted on its own (+176 to +456 KiB over four to ten publishes,
+///   measured) to spare.
 #[test]
 fn a_50_mib_publish_of_100_files_streams_with_resident_memory_up_under_4_mib() {
     let (request, parts, reference) = fifty_mib_case();
@@ -1078,9 +1088,14 @@ fn a_50_mib_publish_of_100_files_streams_with_resident_memory_up_under_4_mib() {
         up < 4 * 1024,
         "resident memory up {up} KiB over the warm publishes, not under 4 MiB"
     );
+    const _: () = assert!(
+        WARM_PUBLISHES as u64 * LEAK_CAUGHT_KIB > SETTLED_GROWTH_KIB + 456,
+        "N × L must pass B and the drift measured"
+    );
     assert!(
-        last <= warm + 1536,
-        "settled resident memory grew from {warm} KiB to {last} KiB over {WARM_PUBLISHES} publishes"
+        last < warm + SETTLED_GROWTH_KIB,
+        "settled resident memory grew from {warm} KiB to {last} KiB over {WARM_PUBLISHES} \
+         publishes, not under {SETTLED_GROWTH_KIB} KiB"
     );
 }
 
