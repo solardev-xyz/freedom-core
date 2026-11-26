@@ -112,18 +112,12 @@ impl SafeTx {
     /// checksummed, `value` in decimal, `data` in lowercase hex, `operation`
     /// and `nonce` as numbers, the gas fields as `"0"`, both addresses zero.
     pub fn fields(&self) -> Value {
-        json!({
-            "to": checksum_address(&self.to),
-            "value": self.value.to_decimal(),
-            "data": to_hex(&self.data),
-            "operation": 0,
-            "baseGas": "0",
-            "gasPrice": "0",
-            "gasToken": ZERO_ADDRESS,
-            "refundReceiver": ZERO_ADDRESS,
-            "nonce": self.nonce,
-            "safeTxGas": "0",
-        })
+        fields_of(
+            &self.to,
+            &self.value,
+            &self.data,
+            &U256::from_u64(self.nonce),
+        )
     }
 
     /// The SafeTx's fields read back, as [`SafeTx::fields`] writes them and
@@ -172,25 +166,27 @@ impl SafeTx {
     /// reference keeps it with the pending SafeTx: the domain
     /// `{ verifyingContract: safe, chainId: 100 }`, then the fields.
     pub fn typed_data(&self, safe: &[u8; 20]) -> Value {
-        json!({
-            "types": {
-                "EIP712Domain": domain_type(),
-                "SafeTx": type_of(&SAFE_TX_TYPE),
-            },
-            "domain": { "verifyingContract": checksum_address(safe), "chainId": CHAIN_ID },
-            "primaryType": "SafeTx",
-            "message": self.fields(),
-        })
+        safe_tx_typed_data(
+            CHAIN_ID,
+            safe,
+            &self.to,
+            &self.value,
+            &self.data,
+            &U256::from_u64(self.nonce),
+        )
     }
 
     /// The SafeTx's hash (`safeTxHash`): `TypedDataEncoder.hash` of
     /// [`SafeTx::typed_data`], through `fc-evm`.
     pub fn hash(&self, safe: &[u8; 20]) -> Result<[u8; 32], Error> {
-        let typed = self.typed_data(safe);
-        let mut types = Map::new();
-        types.insert("SafeTx".into(), type_of(&SAFE_TX_TYPE));
-        typed_data_hash(&typed["domain"], &Value::Object(types), &typed["message"])
-            .map_err(|error| Error::TypedData(error.to_string()))
+        safe_tx_hash(
+            CHAIN_ID,
+            safe,
+            &self.to,
+            &self.value,
+            &self.data,
+            &U256::from_u64(self.nonce),
+        )
     }
 
     /// The SafeTx against the Safe's nonce on chain.
@@ -206,16 +202,75 @@ impl SafeTx {
     }
 }
 
+/// A SafeTx's typed data on `chain_id`, EIP712Domain included, in
+/// [`SafeTx::typed_data`]'s form: one CALL with no refund, `to`, `value`,
+/// `data` and `nonce` as given, unbounded. [`SafeTx`] is Freedom's own, on
+/// Gnosis; this is for fc-approval's Safe approvals (design 0012, APR-3),
+/// which bind the SafeTx main builds on any chain a `safe-send` token
+/// allows, and hash it here (design 0016, SAFE-2's D5). A number is a JSON
+/// number where JavaScript holds it exactly (up to 2^53 − 1), as the
+/// reference writes it, and decimal text past that; fc-evm hashes both
+/// alike.
+pub fn safe_tx_typed_data(
+    chain_id: u64,
+    safe: &[u8; 20],
+    to: &[u8; 20],
+    value: &U256,
+    data: &[u8],
+    nonce: &U256,
+) -> Value {
+    json!({
+        "types": {
+            "EIP712Domain": domain_type(),
+            "SafeTx": type_of(&SAFE_TX_TYPE),
+        },
+        "domain": {
+            "verifyingContract": checksum_address(safe),
+            "chainId": uint_json(&U256::from_u64(chain_id)),
+        },
+        "primaryType": "SafeTx",
+        "message": fields_of(to, value, data, nonce),
+    })
+}
+
+/// The hash of [`safe_tx_typed_data`]: `TypedDataEncoder.hash`, through
+/// `fc-evm`.
+pub fn safe_tx_hash(
+    chain_id: u64,
+    safe: &[u8; 20],
+    to: &[u8; 20],
+    value: &U256,
+    data: &[u8],
+    nonce: &U256,
+) -> Result<[u8; 32], Error> {
+    let typed = safe_tx_typed_data(chain_id, safe, to, value, data, nonce);
+    let mut types = Map::new();
+    types.insert("SafeTx".into(), type_of(&SAFE_TX_TYPE));
+    typed_data_hash(&typed["domain"], &Value::Object(types), &typed["message"])
+        .map_err(|error| Error::TypedData(error.to_string()))
+}
+
+/// The selector of `execTransaction(address,uint256,bytes,uint8,uint256,
+/// uint256,uint256,address,address,bytes)`.
+pub const EXEC_TRANSACTION_SELECTOR: [u8; 4] = [0x6a, 0x76, 0x12, 0x02];
+
 /// `execTransaction(to, value, data, 0, 0, 0, 0, 0x0, 0x0, signatures)`:
 /// the executor's calldata, to the Safe, with the joined signatures
 /// ([`crate::Signatures::joined`]).
 pub fn exec_transaction(tx: &SafeTx, signatures: &[u8]) -> Vec<u8> {
+    exec_call(&tx.to, &tx.value, &tx.data, signatures)
+}
+
+/// [`exec_transaction`]'s calldata for a SafeTx's `to`, `value` and `data`,
+/// unbounded: what fc-approval compares the executor's transaction with
+/// (design 0016, SAFE-2's D5).
+pub fn exec_call(to: &[u8; 20], value: &U256, data: &[u8], signatures: &[u8]) -> Vec<u8> {
     call(
         "execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)",
         &[
-            Token::Word(address_word(&tx.to)),
-            Token::Word(tx.value.to_be_bytes()),
-            Token::Dynamic(&tx.data),
+            Token::Word(address_word(to)),
+            Token::Word(value.to_be_bytes()),
+            Token::Dynamic(data),
             Token::Word([0; 32]),
             Token::Word([0; 32]),
             Token::Word([0; 32]),
@@ -225,6 +280,32 @@ pub fn exec_transaction(tx: &SafeTx, signatures: &[u8]) -> Vec<u8> {
             Token::Dynamic(signatures),
         ],
     )
+}
+
+/// The ten fields in the reference's property order ([`SafeTx::fields`]).
+fn fields_of(to: &[u8; 20], value: &U256, data: &[u8], nonce: &U256) -> Value {
+    json!({
+        "to": checksum_address(to),
+        "value": value.to_decimal(),
+        "data": to_hex(data),
+        "operation": 0,
+        "baseGas": "0",
+        "gasPrice": "0",
+        "gasToken": ZERO_ADDRESS,
+        "refundReceiver": ZERO_ADDRESS,
+        "nonce": uint_json(nonce),
+        "safeTxGas": "0",
+    })
+}
+
+/// A uint as typed data carries it: a JSON number up to 2^53 − 1, which
+/// JavaScript (and fc-evm, as ethers) reads exactly, and decimal text past
+/// it.
+pub(crate) fn uint_json(n: &U256) -> Value {
+    match n.to_u64().filter(|n| *n <= MAX_NONCE) {
+        Some(n) => json!(n),
+        None => json!(n.to_decimal()),
+    }
 }
 
 /// A uint field as the reference writes one: a JSON integer, or quantity
