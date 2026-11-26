@@ -42,6 +42,7 @@ FILES.push('generator/approval-rules.js', 'generator/approval-decisions.js');
 FILES.push('eip1193.json', 'generator/eip1193.js');
 FILES.push('stores.json', 'generator/stores.js', 'generator/stores-intents.js', 'generator/stores-safe-pending.js', 'generator/stores-rpc-keys.js');
 FILES.push('generator/tx-decode.js');
+FILES.push('safe.json', 'generator/safe.js');
 FILES.push('journal.json', 'generator/journal.js');
 FILES.push('sqlite.json', 'generator/sqlite.js', 'generator/sqlite-payments.js');
 FILES.push('colibri.json', 'generator/colibri.js', 'generator/colibri-cases.js', 'generator/colibri-contract.js',
@@ -51,7 +52,6 @@ FILES.push('colibri.json', 'generator/colibri.js', 'generator/colibri-cases.js',
 FILES.push('swarm.json', 'swarm-grammar.json', 'dweb-verify.json', 'generator/swarm.js', 'generator/swarm-cases.js', 'generator/swarm-run.js',
   'generator/swarm-node.js', 'generator/swarm-world.js', 'generator/swarm-typed.js', 'generator/swarm-sections.js', 'generator/swarm-grammar.js',
   'generator/swarm-grammar-file.js', 'generator/swarm-worker.js', 'generator/swarm-gsoc-worker.js', 'generator/swarm-shell.js');
-FILES.push('safe.json', 'generator/safe.js');
 
 function checkArgs(generator, overrides = {}) {
   const refs = { freedom: REFERENCE, radicle: RADICLE_REFERENCE, approvals: APPROVALS_REFERENCE, stores: STORES_REFERENCE,
@@ -1072,6 +1072,68 @@ test('check takes the Colibri vectors from their own reference, at its pinned co
   assert.equal(JSON.parse(fs.readFileSync(path.join(SOURCE, 'colibri.json'), 'utf8')).meta.freedomBrowserCommit, commit);
 });
 
+// Each damaged copy changes one thing the Safe vectors pin.
+const SAFE_DAMAGES = [
+  ['a changed Safe address', (contents) => {
+    contents.addresses.find((item) => item.id === 'ABC-salt-1').address = contents.safes.S2.address;
+  }],
+  ['a changed SafeTx hash', (contents) => {
+    contents.safeTxs.find((item) => item.id === 'value-max').safeTxHash = '0x' + '00'.repeat(32);
+  }],
+  ['a changed execTransaction call', (contents) => {
+    const send = contents.executions.find((item) => item.id === 'S3-CBA').send;
+    send.data = send.data.slice(0, -2) + '01';
+  }],
+  ['a changed joined SafeMessage signature', (contents) => {
+    const message = contents.messages.find((item) => item.id === 'S3-typed-mail');
+    message.signature = '0x' + message.signature.slice(132) + message.signature.slice(2, 132);
+  }],
+  ['a changed Safe deviation mark', (contents) => {
+    delete contents.ownerSignatures.find((item) => item.deviation === 'owner-signatures').deviation;
+  }],
+];
+for (const [what, corrupt] of SAFE_DAMAGES) {
+  test(`check rejects ${what}`, () => {
+    const stderr = corruptedCheck('safe.json', corrupt);
+    assert.match(stderr, /Byte mismatch: safe\.json/);
+  });
+}
+
+test('the Safe vectors come from the swarm reference, at protocol-kit 8.0.11 and safe-deployments 1.37.66', () => {
+  const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: SWARM_REFERENCE, encoding: 'utf8' }).stdout.trim();
+  const { meta } = JSON.parse(fs.readFileSync(path.join(SOURCE, 'safe.json'), 'utf8'));
+  assert.equal(meta.freedomBrowserCommit, commit);
+  assert.equal(meta.packages['@safe-global/protocol-kit'], '8.0.11');
+  assert.equal(meta.packages['@safe-global/safe-deployments'], '1.37.66');
+  assert.equal(meta.packages.ethers, '6.17.0');
+});
+
+test('the Safe vectors refuse any protocol-kit, safe-deployments or ethers but the pinned ones', () => {
+  const { loadPackages } = require('./safe');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-safe-versions-'));
+  try {
+    const install = (name, version) => {
+      const dir = path.join(root, 'node_modules', ...name.split('/'));
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name, version, main: 'index.js' }));
+      fs.writeFileSync(path.join(dir, 'index.js'), 'module.exports = {};\n');
+    };
+    fs.writeFileSync(path.join(root, 'package.json'), '{"name":"versions"}');
+    install('@safe-global/protocol-kit', '8.0.7');
+    install('@safe-global/safe-deployments', '1.37.66');
+    install('ethers', '6.17.0');
+    assert.throws(() => loadPackages(root), /has @safe-global\/protocol-kit 8\.0\.7$/);
+    install('@safe-global/protocol-kit', '8.0.11');
+    install('@safe-global/safe-deployments', '1.37.65');
+    assert.throws(() => loadPackages(root), /has @safe-global\/safe-deployments 1\.37\.65$/);
+    install('@safe-global/safe-deployments', '1.37.66');
+    install('ethers', '6.16.0');
+    assert.throws(() => loadPackages(root), /has ethers 6\.16\.0$/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // Each damaged copy changes one thing, so each check the swarm vectors
 // advertise fails on its own.
 const SWARM_DAMAGES = [
@@ -1241,64 +1303,3 @@ test('the swarm vectors refuse any bee-js or core-sdk but 13.2.0 and 0.2.2', () 
   }
 });
 
-// Each damaged copy changes one thing the Safe vectors pin.
-const SAFE_DAMAGES = [
-  ['a changed Safe address', (contents) => {
-    contents.addresses.find((item) => item.id === 'ABC-salt-1').address = contents.safes.S2.address;
-  }],
-  ['a changed SafeTx hash', (contents) => {
-    contents.safeTxs.find((item) => item.id === 'value-max').safeTxHash = '0x' + '00'.repeat(32);
-  }],
-  ['a changed execTransaction call', (contents) => {
-    const send = contents.executions.find((item) => item.id === 'S3-CBA').send;
-    send.data = send.data.slice(0, -2) + '01';
-  }],
-  ['a changed joined SafeMessage signature', (contents) => {
-    const message = contents.messages.find((item) => item.id === 'S3-typed-mail');
-    message.signature = '0x' + message.signature.slice(132) + message.signature.slice(2, 132);
-  }],
-  ['a changed Safe deviation mark', (contents) => {
-    delete contents.ownerSignatures.find((item) => item.deviation === 'owner-signatures').deviation;
-  }],
-];
-for (const [what, corrupt] of SAFE_DAMAGES) {
-  test(`check rejects ${what}`, () => {
-    const stderr = corruptedCheck('safe.json', corrupt);
-    assert.match(stderr, /Byte mismatch: safe\.json/);
-  });
-}
-
-test('the Safe vectors come from the swarm reference, at protocol-kit 8.0.11 and safe-deployments 1.37.66', () => {
-  const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: SWARM_REFERENCE, encoding: 'utf8' }).stdout.trim();
-  const { meta } = JSON.parse(fs.readFileSync(path.join(SOURCE, 'safe.json'), 'utf8'));
-  assert.equal(meta.freedomBrowserCommit, commit);
-  assert.equal(meta.packages['@safe-global/protocol-kit'], '8.0.11');
-  assert.equal(meta.packages['@safe-global/safe-deployments'], '1.37.66');
-  assert.equal(meta.packages.ethers, '6.17.0');
-});
-
-test('the Safe vectors refuse any protocol-kit, safe-deployments or ethers but the pinned ones', () => {
-  const { loadPackages } = require('./safe');
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-safe-versions-'));
-  try {
-    const install = (name, version) => {
-      const dir = path.join(root, 'node_modules', ...name.split('/'));
-      fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name, version, main: 'index.js' }));
-      fs.writeFileSync(path.join(dir, 'index.js'), 'module.exports = {};\n');
-    };
-    fs.writeFileSync(path.join(root, 'package.json'), '{"name":"versions"}');
-    install('@safe-global/protocol-kit', '8.0.7');
-    install('@safe-global/safe-deployments', '1.37.66');
-    install('ethers', '6.17.0');
-    assert.throws(() => loadPackages(root), /has @safe-global\/protocol-kit 8\.0\.7$/);
-    install('@safe-global/protocol-kit', '8.0.11');
-    install('@safe-global/safe-deployments', '1.37.65');
-    assert.throws(() => loadPackages(root), /has @safe-global\/safe-deployments 1\.37\.65$/);
-    install('@safe-global/safe-deployments', '1.37.66');
-    install('ethers', '6.16.0');
-    assert.throws(() => loadPackages(root), /has ethers 6\.16\.0$/);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
