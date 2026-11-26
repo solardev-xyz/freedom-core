@@ -770,8 +770,11 @@ pub fn run(options: &Options) -> Exit {
                         break Exit::Internal;
                     }
                 }
-                // No other owner registers a route.
-                Route::Owner(Owner::Naming | Owner::Chain | Owner::KeyStore | Owner::Eip1193) => {
+                // No other owner registers a route: a Ledger's replies
+                // never stream (design 0016).
+                Route::Owner(
+                    Owner::Naming | Owner::Chain | Owner::KeyStore | Owner::Eip1193 | Owner::Ledger,
+                ) => {
                     break Exit::Internal;
                 }
             },
@@ -1827,6 +1830,9 @@ impl Core {
                     self.credit.take(),
                 )
             }),
+            // No device lane runs yet, so no request is its (0016, LDG-2's
+            // L2).
+            (Owner::Ledger, _) => false,
             // The dweb thread reads its piece's reply where it lies, as the
             // chain thread does.
             (Owner::Dweb, outcome) => self.dweb.as_ref().is_some_and(|thread| {
