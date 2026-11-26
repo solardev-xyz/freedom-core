@@ -1807,3 +1807,320 @@ fn a_cancel_at_each_stage_of_a_subscription_closes_what_it_opened() {
     };
     sweep(&mut rig, &scenario);
 }
+
+// ---------------------------------------------------------------------------
+// The interleaving gate's variants (design 0015, "SW-1 in the core"):
+// `tests/swarm_writes.rs` plays another site taking the index, a revoke
+// through the keeper, a cancel, the deadline and a failed write; here the
+// change comes the way main makes it, through `swarm.identities` and
+// `swarm.manifest`.
+
+/// A core whose vault answers of `kind` park until the test releases them,
+/// its vault the test mnemonic's, its signatures counted.
+struct Gate {
+    rig: Rig,
+    _dir: tempfile::TempDir,
+    marker: PathBuf,
+    parked: PathBuf,
+    release: PathBuf,
+    case: SocCase,
+}
+
+impl Gate {
+    fn new(kind: &str) -> Gate {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("signed");
+        let parked = dir.path().join("parked");
+        let release = dir.path().join("release");
+        let hold = format!("{kind}={}={}", parked.display(), release.display());
+        let main = swarm_world::main_with(
+            &["swarm"],
+            &[
+                (
+                    "FREEDOM_CORED_TEST_SWARM_SIGN_MARKER",
+                    marker.to_str().unwrap(),
+                ),
+                ("FREEDOM_CORED_TEST_SWARM_HOLD", &hold),
+            ],
+        );
+        let mut rig = Rig::new(main, soc_node());
+        rig.main.import_vault();
+        Gate {
+            rig,
+            _dir: dir,
+            marker,
+            parked,
+            release,
+            case: soc_case(),
+        }
+    }
+
+    /// The case's world afresh, the hold armed, and `app.example` given a
+    /// Bee wallet identity beside its exclusive one (not active): a shared
+    /// identity to switch to.
+    fn arm(&mut self) {
+        self.rig.fresh();
+        let _ = std::fs::remove_file(&self.parked);
+        let _ = std::fs::remove_file(&self.release);
+        self.rig.world(json!({
+            "reset": true, "clock": CLOCK, "grants": self.case.grants, "feeds": self.case.feeds,
+        }));
+        let made = self.op(
+            "swarm.identities",
+            json!({ "op": "ensureAntWalletIdentity", "key": { "string": SITE } }),
+            "shell",
+        );
+        let made = self.rig.answer(made).clone();
+        assert!(made["result"]["result_typed"].is_object(), "{made}");
+        let feeds = self.feeds();
+        assert!(feeds.contains("\"bee-wallet\""), "{feeds}");
+        assert!(
+            feeds.contains("\"activeIdentityId\": \"app-scoped:0\""),
+            "{feeds}"
+        );
+    }
+
+    /// One of main's (or the chrome's) store ops, sent: its ID, answered
+    /// or not.
+    fn op(&mut self, method: &str, params: Value, caller: &str) -> u64 {
+        let id = self.rig.own(method, &params, caller);
+        self.rig
+            .until(Duration::from_millis(300), "", |rig| rig.answered(id));
+        id
+    }
+
+    /// Sends an op and gives it 300 ms: its ID, and whether it was answered.
+    fn op_waits(&mut self, method: &str, params: Value, caller: &str) -> (u64, bool) {
+        let id = self.rig.own(method, &params, caller);
+        let until = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < until && !self.rig.answered(id) {
+            self.rig.step(Duration::from_millis(20));
+        }
+        (id, self.rig.answered(id))
+    }
+
+    fn feeds(&self) -> String {
+        std::fs::read_to_string(self.rig.main.core.grant_root.join("swarm-feeds.json")).unwrap()
+    }
+
+    fn grants_file(&self) -> Option<String> {
+        std::fs::read_to_string(self.rig.main.core.grant_root.join("swarm-permissions.json")).ok()
+    }
+
+    fn signed(&self) -> usize {
+        lines(&self.marker)
+    }
+
+    /// The raw SOC, sent; main serves it until its vault answer parks.
+    fn soc_parked(&mut self) -> u64 {
+        let id = self.rig.request(SITE, &self.case.request.clone());
+        let parked = self.parked.clone();
+        self.rig
+            .until(Duration::from_secs(10), "the vault's answer parked", |_| {
+                parked.exists()
+            });
+        id
+    }
+
+    fn release(&mut self) {
+        std::fs::write(&self.release, "").unwrap();
+    }
+
+    /// Request `id`'s outcome, once answered and every ask ended: its
+    /// reason (empty for a result) and how many SOCs went to the node.
+    fn outcome(&mut self, id: u64) -> (String, usize) {
+        self.rig
+            .until(Duration::from_secs(30), "the raw SOC", |rig| {
+                rig.answered(id) && rig.open.is_empty()
+            });
+        let posts = self
+            .rig
+            .asked
+            .iter()
+            .filter(|(a, _)| a.parent() == Some(id) && a.form() == "soc_up")
+            .count();
+        (reason_of(self.rig.answer(id)), posts)
+    }
+
+    /// The site's next raw SOC, the hold released: its reason and uploads.
+    fn next_soc(&mut self) -> (String, usize) {
+        self.release();
+        let id = self.rig.request(SITE, &self.case.request.clone());
+        self.outcome(id)
+    }
+}
+
+/// A `swarm.request`'s error reason (`data.reason`), or "" for a result.
+fn reason_of(answer: &Value) -> String {
+    match swarm_world::outcome(answer) {
+        fc_swarm_provider::machine::Outcome::Result(_) => String::new(),
+        fc_swarm_provider::machine::Outcome::Error(failure) => {
+            match failure.data.as_ref().map(|d| d.get("reason")) {
+                Some(fc_swarm_provider::value::Value::String(reason)) => reason.as_str().to_owned(),
+                _ => format!("{} {}", failure.code, failure.message.as_str()),
+            }
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// main's `activateIdentity` of the Bee wallet, a shared identity, for the
+/// site.
+fn switch_to_shared() -> Value {
+    json!({ "op": "activateIdentity", "key": { "string": SITE }, "identity_id": { "string": "bee-wallet" } })
+}
+
+/// The chrome's `activate-feed-identity` of the same.
+fn chrome_switch_to_shared() -> Value {
+    json!({ "op": "activate-feed-identity", "origin": { "string": SITE }, "identity_id": { "string": "bee-wallet" } })
+}
+
+/// A manifest's disconnect of the site (`swarm:manifest-disconnect`): its
+/// projections revoke the feed grant and the connection.
+fn disconnect() -> Value {
+    json!({ "op": "disconnect", "origin": { "string": SITE } })
+}
+
+/// The change wins: the raw SOC paused after its first SW-1 check (the
+/// vault's owner parked), main switches the site's active identity to the
+/// shared Bee wallet through `swarm.identities`, or a manifest's
+/// disconnect revokes its feed grant, at once; resumed, the re-check
+/// refuses: no signature, no upload.
+#[test]
+fn gate_the_change_wins_through_swarm_identities_and_swarm_manifest() {
+    let mut gate = Gate::new("owner");
+    for (what, method, params, want) in [
+        (
+            "a switch to a shared identity",
+            "swarm.identities",
+            switch_to_shared(),
+            "shared_identity",
+        ),
+        (
+            "a manifest's disconnect",
+            "swarm.manifest",
+            disconnect(),
+            "feed_not_granted",
+        ),
+    ] {
+        gate.arm();
+        let soc = gate.soc_parked();
+        // No hold yet: made at once.
+        let id = gate.op(method, params, "shell");
+        let made = gate.rig.answer(id).clone();
+        assert!(made["result"]["result_typed"].is_object(), "{what}: {made}");
+        gate.release();
+        let (reason, posts) = gate.outcome(soc);
+        eprintln!(
+            "[gate] the change wins, {what}: {reason}, {} signed, {posts} uploaded",
+            gate.signed()
+        );
+        assert_eq!(reason, want, "{what}");
+        assert_eq!(
+            (gate.signed(), posts),
+            (0, 0),
+            "{what}: nothing signed or uploaded"
+        );
+        gate.rig.settled();
+    }
+}
+
+/// The change waits: the raw SOC paused with its signature parked, the
+/// chrome's switch of the site's identity to the shared Bee wallet, or a
+/// manifest's disconnect, waits: no answer, and nothing written. Released,
+/// the change lands as the signature ends the hold, before the SOC's batch
+/// and upload: the switch leaves the signed SOC to be uploaded and refuses
+/// the site's next one `shared_identity`; the disconnect makes the
+/// upload's guard refuse the signed SOC, as it refuses one signed just
+/// before a revoke.
+#[test]
+fn gate_the_change_waits_through_swarm_identities_and_swarm_manifest() {
+    let mut gate = Gate::new("sign");
+    // The switch.
+    gate.arm();
+    let feeds = gate.feeds();
+    let soc = gate.soc_parked();
+    let (switch, answered) = gate.op_waits("swarm.identities", chrome_switch_to_shared(), "chrome");
+    assert!(!answered, "the switch waits for the hold");
+    assert_eq!(gate.feeds(), feeds, "and writes nothing");
+    gate.release();
+    let (reason, posts) = gate.outcome(soc);
+    gate.rig
+        .until(Duration::from_secs(10), "the switch's answer", |rig| {
+            rig.answered(switch)
+        });
+    let made = gate.rig.answer(switch).clone();
+    assert!(made["result"]["result_typed"].is_object(), "{made}");
+    assert!(
+        gate.feeds()
+            .contains("\"activeIdentityId\": \"bee-wallet\"")
+    );
+    eprintln!(
+        "[gate] the change waits, a switch to a shared identity: the SOC {}, {} signed, {posts} uploaded",
+        if reason.is_empty() {
+            "published"
+        } else {
+            &reason
+        },
+        gate.signed()
+    );
+    assert_eq!(reason, "", "the signed SOC is uploaded");
+    assert_eq!((gate.signed(), posts), (1, 1));
+    let (reason, posts) = gate.next_soc();
+    assert_eq!(reason, "shared_identity", "the site's next raw SOC");
+    assert_eq!((gate.signed(), posts), (1, 0));
+    gate.rig.settled();
+
+    // The disconnect.
+    gate.arm();
+    let feeds = gate.feeds();
+    let grants = gate.grants_file();
+    let signed = gate.signed();
+    let soc = gate.soc_parked();
+    let (disconnect, answered) = gate.op_waits("swarm.manifest", disconnect(), "shell");
+    assert!(!answered, "the disconnect waits for the hold");
+    assert_eq!(gate.feeds(), feeds, "and writes no feed store");
+    assert_eq!(gate.grants_file(), grants, "nor the grants");
+    gate.release();
+    let (reason, posts) = gate.outcome(soc);
+    gate.rig
+        .until(Duration::from_secs(10), "the disconnect's answer", |rig| {
+            rig.answered(disconnect)
+        });
+    let made = gate.rig.answer(disconnect).clone();
+    assert_eq!(
+        made["result"]["result_typed"],
+        json!({ "boolean": true }),
+        "{made}"
+    );
+    assert!(
+        gate.feeds().contains("\"feedGranted\": false"),
+        "{}",
+        gate.feeds()
+    );
+    eprintln!(
+        "[gate] the change waits, a manifest's disconnect: the SOC {reason}, {} signed, {posts} uploaded",
+        gate.signed() - signed
+    );
+    // The guard reads the site's rule before its connection (the
+    // reference's order), and the SOC came under the signing rule, which
+    // went with the grant.
+    assert_eq!(
+        reason, "not_auto_approved",
+        "the upload's guard refuses the signed SOC"
+    );
+    assert_eq!(
+        (gate.signed() - signed, posts),
+        (1, 0),
+        "signed, not uploaded"
+    );
+    let (next, posts) = gate.next_soc();
+    eprintln!("[gate] the site's next raw SOC after the disconnect: {next}");
+    assert_eq!(
+        (next.as_str(), posts),
+        ("not_connected", 0),
+        "the site's next raw SOC"
+    );
+    assert_eq!(gate.signed() - signed, 1);
+    gate.rig.settled();
+}
