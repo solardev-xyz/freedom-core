@@ -621,6 +621,38 @@ impl SafeApprovals {
         }
     }
 
+    /// An owner signed what [`SafeApprovals::check_owner`] checked, on a
+    /// device whose signature came back after the check (design 0016,
+    /// "Approvals: enforced"), where [`SafeApprovals::owner_signed`]
+    /// follows its check in the same turn. The approval must still be open
+    /// (`Unknown` if it ended since), and a SafeTx's fixed to none or this
+    /// one (`Mismatch` if another owner fixed another since); the first
+    /// fixes it. On a refusal the signature isn't used, so one approval
+    /// never has two SafeTxs signed.
+    pub fn owner_signed_later(&mut self, check: OwnerCheck) -> Result<(), SafeRefusal> {
+        let index = self.position(&check.id).ok_or(SafeRefusal::Unknown)?;
+        let entry = &mut self.entries[index];
+        if matches!(entry.approved, Approved::Send { .. }) {
+            match entry.fixed {
+                Some(fixed) if fixed != check.hash => return Err(SafeRefusal::Mismatch),
+                Some(_) => {}
+                None => entry.fixed = Some(check.hash),
+            }
+        }
+        Ok(())
+    }
+
+    /// The executor signed, on a device whose signature came back after
+    /// [`SafeApprovals::check_executor`] (design 0016): the approval must
+    /// still be open (`Unknown` if it ended since, another executor's
+    /// signature among the ways), and then ends, as
+    /// [`SafeApprovals::executor_signed`] ends it.
+    pub fn executor_signed_later(&mut self, check: ExecutorCheck) -> Result<(), SafeRefusal> {
+        let index = self.position(&check.id).ok_or(SafeRefusal::Unknown)?;
+        self.entries.remove(index);
+        Ok(())
+    }
+
     /// Whether the executor's `sign.transaction` is one the approval
     /// covers: `execTransaction` to the Safe on its chain, `value` 0, the
     /// approved SafeTx field for field (any signatures), and fees the check
@@ -984,6 +1016,64 @@ mod tests {
         );
     }
 
+    /// A device's signature, which comes back after its check (design
+    /// 0016): the first fixes the SafeTx; one checked before another owner
+    /// fixed another SafeTx is refused, so one approval never has two
+    /// SafeTxs signed; and one whose approval ended since is refused too.
+    #[test]
+    fn a_device_owner_is_checked_again_when_it_signs() {
+        let mut safes = SafeApprovals::new();
+        let mut rng = Counter(0);
+        let approved = Approved::send(&send_payload(SAFE)).unwrap();
+        let id = safes.record(page(1), approved, &mut rng).unwrap().to_text();
+        let nonce7 = safe_tx(SAFE, json!("7"), "0");
+        let nonce8 = safe_tx(SAFE, json!("8"), "0");
+        let check = |safes: &SafeApprovals, typed: &Value| {
+            safes
+                .check_owner(&id, Some(&page(1)), typed, &hash_of(typed))
+                .unwrap()
+        };
+        // Both checked while nothing is fixed; nonce 8's owner signs first.
+        let device7 = check(&safes, &nonce7);
+        let vault8 = check(&safes, &nonce8);
+        safes.owner_signed(vault8);
+        assert_eq!(
+            safes.owner_signed_later(device7).unwrap_err(),
+            SafeRefusal::Mismatch
+        );
+        // The fixed SafeTx's own device signature is used.
+        let device8 = check(&safes, &nonce8);
+        safes.owner_signed_later(device8).unwrap();
+        // The first device signature fixes it.
+        let other = safes
+            .record(
+                page(1),
+                Approved::send(&send_payload(OTHER_SAFE)).unwrap(),
+                &mut rng,
+            )
+            .unwrap()
+            .to_text();
+        let other7 = safe_tx(OTHER_SAFE, json!("7"), "0");
+        let other8 = safe_tx(OTHER_SAFE, json!("8"), "0");
+        let first = safes
+            .check_owner(&other, Some(&page(1)), &other7, &hash_of(&other7))
+            .unwrap();
+        safes.owner_signed_later(first).unwrap();
+        assert_eq!(
+            safes
+                .check_owner(&other, Some(&page(1)), &other8, &hash_of(&other8))
+                .unwrap_err(),
+            SafeRefusal::Mismatch
+        );
+        // Ended while the device waited.
+        let late = check(&safes, &nonce8);
+        assert!(safes.end(&id));
+        assert_eq!(
+            safes.owner_signed_later(late).unwrap_err(),
+            SafeRefusal::Unknown
+        );
+    }
+
     /// A Safe message for [`SAFE`] on chain 100.
     fn safe_message_of(digest: u8) -> Approved {
         Approved::Message {
@@ -1288,10 +1378,36 @@ mod tests {
             at(&safes, &dear, Some(&good)).unwrap_err(),
             SafeRefusal::FeeCheck
         );
+        // Two checked; a device's signature that comes back after the
+        // other executor's ended the approval isn't used.
+        let device = at(&safes, &tx, Some(&good)).unwrap();
         let check = at(&safes, &tx, Some(&good)).unwrap();
         safes.executor_signed(check);
         assert_eq!(
             at(&safes, &tx, Some(&good)).unwrap_err(),
+            SafeRefusal::Unknown
+        );
+        assert_eq!(
+            safes.executor_signed_later(device).unwrap_err(),
+            SafeRefusal::Unknown
+        );
+        // One that comes back first ends it.
+        let again = safes
+            .record(
+                Holder::Wallet,
+                Approved::send(&send_payload(SAFE)).unwrap(),
+                &mut rng,
+            )
+            .unwrap()
+            .to_text();
+        let device = safes
+            .check_executor(&again, Some(&Holder::Wallet), &tx, Some(&good), 0, 2_000)
+            .unwrap();
+        safes.executor_signed_later(device).unwrap();
+        assert_eq!(
+            safes
+                .check_executor(&again, Some(&Holder::Wallet), &tx, Some(&good), 0, 2_000)
+                .unwrap_err(),
             SafeRefusal::Unknown
         );
     }
