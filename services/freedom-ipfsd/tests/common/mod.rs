@@ -412,6 +412,16 @@ impl Ipfsd {
         }
     }
 
+    /// The exit status, once it exits within `timeout`: a signal's too.
+    /// Past `timeout`, a lifecycle failure.
+    #[track_caller]
+    pub fn exit_status(&mut self, timeout: Duration) -> ExitStatus {
+        match wait(&mut self.child, timeout) {
+            Some(status) => status,
+            None => self.lifecycle_failure(&format!("no exit within {timeout:?}")),
+        }
+    }
+
     /// Waits until the service logs a line whose message is `msg` (a test
     /// hook's, say): a hang guard of [`READ_TIMEOUT`], never a timing
     /// bound. Fails at once if stderr closes without it.

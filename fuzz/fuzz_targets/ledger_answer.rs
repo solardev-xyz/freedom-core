@@ -128,7 +128,7 @@ fuzz_target!(|data: &[u8]| {
             };
             assert_eq!(recover_address(&digest, &signature), Ok(address));
         }
-        Ok(Signed::Accounts(accounts)) => assert!(kind % 6 == 0 && accounts.len() == 2),
+        Ok(Signed::Accounts(found)) => assert!(kind % 6 == 0 && found.accounts.len() == 2),
         Ok(Signed::Added(_)) => assert_eq!(kind % 6, 1),
         Err(_) => {}
     }

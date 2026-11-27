@@ -4,10 +4,13 @@
 
 /// The libradicle version the pinned commit carries.
 pub const LIBRADICLE_VERSION: &str = "0.8.0";
-/// The pinned commit: `integration/rust-core` at libradicle#40's merge
-/// (`seeders`, a COB change's announcement and `remove_quarantined`'s unseed
-/// waited for within a bound: `seeders_within`, the COB writes' `_within`
-/// forms, `remove_quarantined_within`, `Error::is_announce`), with #38
+/// The pinned commit: `integration/rust-core` at libradicle#41's merge
+/// (`process_init`: out of memory in libgit2 or SQLite ends the process with
+/// exit 71, and `Error::is_out_of_memory`, its backstop), with #42 (its
+/// dependencies' advisories), #40 (`seeders`, a COB change's announcement
+/// and `remove_quarantined`'s unseed waited for within a bound:
+/// `seeders_within`, the COB writes' `_within` forms,
+/// `remove_quarantined_within`, `Error::is_announce`), #38
 /// (heartwood at bef1fc97: a stale seed session redialed), #39 (the node's
 /// reactor waited for within a bound: `connected_peers_within`,
 /// `unseed_repo_within`, `waiting_on_node`), #35 (the licence files),
@@ -18,7 +21,7 @@ pub const LIBRADICLE_VERSION: &str = "0.8.0";
 /// non-UTF-8 diff decoded lossily, never a panic), #30 (the stop's
 /// `Shutdown` outcome), #22 (the host's repository gate), #23 (the hermetic
 /// test guard) and #28 (`Options::seeding_policy`).
-pub const LIBRADICLE_COMMIT: &str = "36b176bc3e2667c8c1500bf0eb6fc80407bd9d84";
+pub const LIBRADICLE_COMMIT: &str = "6a991c4d28e3e1c92ceb006ac208c02de990031e";
 
 #[cfg(test)]
 mod tests {

@@ -43,6 +43,10 @@
 //!   its confinement on macOS, through Seatbelt's private calls;
 //! - [`macos::resident_bytes`] and [`windows::resident_bytes`]: the Colibri
 //!   service's resident memory after each step (design 0014, Budgets);
+//! - [`unix::fail_stop`] and [`windows::fail_stop`]: a static line to
+//!   standard error, then the process ended at once, allocating nothing:
+//!   `fc-service`'s fail-stop, which a service's out-of-memory backstop
+//!   ends the process with (design 0010, "The memory cap");
 //! - [`macos::set_times`]: the profile lock's mtime in `freedom-cored`,
 //!   through the one call a confined process's `file-write-times` covers
 //!   (design 0013, "The lock").

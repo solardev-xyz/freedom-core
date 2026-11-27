@@ -125,15 +125,20 @@ impl Online {
 
     /// Step 2 of the module's doc: `rid`'s repair, its progress and its
     /// record; what failed otherwise, never a path.
+    /// Out of memory ends the process ([`crate::oom`]).
     fn begin(&self, rid: RepoId, handle: &Handle) -> Result<Active, String> {
         let state = State::open(
             self.home
                 .join("cobs")
                 .join(radicle::cob::cache::COBS_DB_FILE),
         )
-        .map_err(|e| format!("the reconcile state: {}", crate::reconcile::state_error(&e)))?;
+        .map_err(|e| {
+            crate::oom::check_heartwood(&e);
+            format!("the reconcile state: {}", crate::reconcile::state_error(&e))
+        })?;
         let record = Quarantine::open(self.home.join("node").join(quarantine::QUARANTINE_DB_FILE))
             .map_err(|e| {
+                crate::oom::check_heartwood(&e);
                 format!(
                     "the quarantine record: {}",
                     crate::reconcile::record_error(&e)
@@ -236,6 +241,12 @@ impl Repairer for Online {
             &*self.watch,
         );
         drop(node);
+        // Out of memory ends the process, before anything is copied or
+        // logged: the repository stays closed, and the marker stays, for the
+        // next start ([`crate::oom`]).
+        if let Err(e) = &stepped {
+            crate::oom::check(e);
+        }
         let did = entry.repair.did().clone();
         match stepped {
             Ok(Progress::More) => return Turn::More,

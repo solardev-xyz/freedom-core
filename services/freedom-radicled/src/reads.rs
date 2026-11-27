@@ -638,8 +638,10 @@ const FAILED: &str = "the read failed";
 
 /// libradicle's error, as a network operation answers it
 /// ([`crate::network`]): `not_found` or `failed` by today's message test,
-/// with libradicle's message. A read's goes through [`read_error`].
+/// with libradicle's message. A read's goes through [`read_error`]. Out of
+/// memory is never answered: it ends the process ([`crate::oom`]).
 pub(crate) fn radicle_error(e: libradicle::Error) -> ErrorBody {
+    crate::oom::check(&e);
     let message = e.to_string();
     let code = if not_found(&message) {
         ErrorCode::NotFound
@@ -654,8 +656,10 @@ pub(crate) fn radicle_error(e: libradicle::Error) -> ErrorBody {
 /// it can't name a filesystem path ([`pathless`]). A repository the node
 /// doesn't have is [`MISSING`]; any other error that could name a path is
 /// [`NOT_FOUND`] or [`FAILED`], by its code, so main's 404 and 500 stay
-/// what they are today.
+/// what they are today. Out of memory is never answered: it ends the
+/// process ([`crate::oom`]).
 fn read_error(e: libradicle::Error) -> ErrorBody {
+    crate::oom::check(&e);
     if missing(&e) {
         return ErrorBody::new(ErrorCode::NotFound, MISSING);
     }
@@ -825,6 +829,9 @@ fn body(
     until: &Until,
     op: Op,
 ) -> Result<Body, Failure> {
+    if let Some(error) = testhooks::read_error() {
+        return Err(error.into());
+    }
     match op {
         Op::RepoInfo { rid } => json_read(
             budget,

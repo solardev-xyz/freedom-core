@@ -57,6 +57,40 @@
 //!     names a path: as a fault inside freedom-ipfs on a request's task
 //!     would.
 //!
+//! Out of memory (design 0010, Tests, "The memory cap"; 0007, Testing):
+//! - `FREEDOM_IPFSD_TEST_MEMORY_CAP_HEADROOM=<bytes>` lowers the memory cap
+//!   the process confines itself with to that much above the private
+//!   writable memory it uses then (`VmData`, what `RLIMIT_DATA` counts), on
+//!   Linux. `confinement.memory_cap` reports it as read back. Elsewhere it
+//!   changes nothing.
+//! - `FREEDOM_IPFSD_TEST_OUT_OF_MEMORY` acts in each `ipfs.start`'s build,
+//!   once its store has opened, or in `ipfs.stats`:
+//!   - `fill`: a memory store opens with its page cap lifted and its hot
+//!     cache off, and is filled with distinct 64 KiB blocks, at most 1 GiB,
+//!     before the instance is built, until SQLite can't allocate. It logs
+//!     `test hook: filling the store` first, and `test hook: the store never
+//!     ran out` if it didn't. A put's error goes where the store's open
+//!     error goes.
+//!   - `allocate`: one Rust allocation of 1 GiB, which past a lowered cap
+//!     aborts the process.
+//!   - `open`: the store's open fails with an out-of-memory error, and
+//!     `stats`: `ipfs.stats`'s store figures do (`CoreError::OutOfMemory`
+//!     in a `StoreError`), as an out-of-memory SQLite reports without its
+//!     allocator failing would.
+//!   - `exhaust`: as `open`, with the heap exhausted first, under a lowered
+//!     cap: the error is built, then Rust allocations are taken until none
+//!     of 16 bytes or more is left (`try_reserve_exact`, which fails
+//!     without aborting), and kept. A static line says whether a 64-byte
+//!     one then fails (`test hook: the heap is exhausted`), and the error
+//!     goes the open error's way, which must then allocate nothing.
+//!
+//!   In `fill`, `allocate` and `exhaust` nothing else in the process should
+//!   allocate meanwhile: the tests run them under `socks5`, where no NAT64
+//!   discovery runs.
+//! - `FREEDOM_IPFSD_TEST_SQLITE_FIRST=1` opens and closes a memory store on
+//!   the main thread before `main` installs the out-of-memory hook, so the
+//!   hook comes too late and is refused (exit 77).
+//!
 //! Confinement (design 0010, Tests):
 //! - `FREEDOM_IPFSD_TEST_CONFINEMENT_POINT=1` logs, at the confinement
 //!   point, the process's thread count and what each descriptor above stderr
@@ -85,6 +119,7 @@
 use std::time::Duration;
 
 use freedom_ipfs_gateway::{GatewayCoreRequest, Instance};
+use freedom_ipfs_store::{SqliteBlockStore, StoreError, StoreOptions};
 
 #[cfg(feature = "testhooks")]
 fn millis(name: &str) -> Option<u64> {
@@ -459,4 +494,159 @@ pub fn panic_at(point: &str) {
         }
     }
     let _ = point;
+}
+
+/// Before `main` installs the out-of-memory hook: SQLite used first, if a
+/// test asks (`FREEDOM_IPFSD_TEST_SQLITE_FIRST`), so the hook is refused.
+/// On the main thread, which is still the only one: the store opens and
+/// closes, and starts no thread.
+pub fn sqlite_first() {
+    #[cfg(feature = "testhooks")]
+    if std::env::var_os("FREEDOM_IPFSD_TEST_SQLITE_FIRST").is_some()
+        && let Ok(store) = SqliteBlockStore::in_memory(1 << 20)
+    {
+        let _ = store.close(Duration::from_secs(1));
+    }
+}
+
+/// The process's private writable memory now, in bytes: `VmData` in
+/// `/proc/self/status`, what `RLIMIT_DATA` counts.
+#[cfg(all(feature = "testhooks", target_os = "linux"))]
+fn vm_data() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kib: u64 = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmData:"))?
+        .trim()
+        .strip_suffix("kB")?
+        .trim()
+        .parse()
+        .ok()?;
+    kib.checked_mul(1024)
+}
+
+/// The confinement policy, with its memory cap lowered to a headroom above
+/// what the process uses now, if a test asks
+/// (`FREEDOM_IPFSD_TEST_MEMORY_CAP_HEADROOM`; Linux).
+pub fn memory_cap(policy: &mut fc_service::confine::Policy) {
+    #[cfg(all(feature = "testhooks", target_os = "linux"))]
+    if let Some(headroom) = millis("FREEDOM_IPFSD_TEST_MEMORY_CAP_HEADROOM")
+        && let Some(used) = vm_data()
+    {
+        policy.memory_cap = Some(used.saturating_add(headroom));
+    }
+    let _ = policy;
+}
+
+/// What `FREEDOM_IPFSD_TEST_OUT_OF_MEMORY` asks for, if it is `mode`.
+#[cfg(feature = "testhooks")]
+fn out_of_memory(mode: &str) -> bool {
+    std::env::var("FREEDOM_IPFSD_TEST_OUT_OF_MEMORY").is_ok_and(|wanted| wanted == mode)
+}
+
+/// The out-of-memory error the hooks inject: one the store's
+/// `is_out_of_memory` recognizes, as an `SQLITE_NOMEM` it reports.
+#[cfg(feature = "testhooks")]
+fn injected() -> StoreError {
+    StoreError::Core(freedom_ipfs_core::CoreError::OutOfMemory(
+        "test hook".to_owned(),
+    ))
+}
+
+/// A memory store's options: `options`, or, for the `fill` hook, its page
+/// cap lifted and its hot cache off, so that SQLite's pages hold the
+/// blocks' only copies.
+pub fn memory_store(options: StoreOptions) -> StoreOptions {
+    #[cfg(feature = "testhooks")]
+    if out_of_memory("fill") {
+        return StoreOptions {
+            max_bytes: u64::MAX,
+            hot_cache_bytes: Some(0),
+            max_page_count: None,
+            ..options
+        };
+    }
+    options
+}
+
+/// A start's store, once opened: as it is, or filled, or an out-of-memory
+/// error, as `FREEDOM_IPFSD_TEST_OUT_OF_MEMORY` asks.
+pub fn store_opened(store: SqliteBlockStore) -> Result<SqliteBlockStore, StoreError> {
+    #[cfg(feature = "testhooks")]
+    {
+        /// The fill's blocks, and the most of them: 1 GiB.
+        const BLOCK: usize = 64 << 10;
+        const MAX_BLOCKS: u64 = 1 << 14;
+        if out_of_memory("open") {
+            return Err(injected());
+        }
+        if out_of_memory("exhaust") {
+            // Built while there is memory: nothing after the fill may
+            // allocate.
+            let error = injected();
+            fc_service::log::info("test hook: exhausting the heap", serde_json::json!({}));
+            let exhausted = exhaust_heap();
+            let line: &[u8] = if exhausted {
+                b"test hook: the heap is exhausted\n"
+            } else {
+                b"test hook: the heap is not exhausted\n"
+            };
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), line);
+            return Err(error);
+        }
+        if out_of_memory("allocate") {
+            drop(std::hint::black_box(vec![0u8; 1 << 30]));
+        }
+        if out_of_memory("fill") {
+            #[cfg(target_os = "linux")]
+            let used = vm_data();
+            #[cfg(not(target_os = "linux"))]
+            let used: Option<u64> = None;
+            fc_service::log::info(
+                "test hook: filling the store",
+                serde_json::json!({ "vm_data": used }),
+            );
+            // One buffer for every block, its first bytes making each
+            // distinct: the store's own allocations are a few small ones
+            // per put, so SQLite's meet the cap first.
+            let mut data = vec![0u8; BLOCK];
+            for i in 0..MAX_BLOCKS {
+                data[..8].copy_from_slice(&i.to_be_bytes());
+                let cid = freedom_ipfs_core::cid_from_data(freedom_ipfs_core::CODEC_RAW, &data);
+                store.put_block(&cid, &data)?;
+            }
+            fc_service::log::info("test hook: the store never ran out", serde_json::json!({}));
+        }
+    }
+    Ok(store)
+}
+
+/// Takes Rust allocations, halving their size from 64 MiB to 16 bytes, until
+/// none is left, and leaks them: `try_reserve_exact` fails without aborting.
+/// Whether a 64-byte allocation then fails too. Under a lowered cap only:
+/// without one it would take the address space.
+#[cfg(feature = "testhooks")]
+fn exhaust_heap() -> bool {
+    let mut size = 64usize << 20;
+    while size >= 16 {
+        loop {
+            let mut hoard = Vec::<u8>::new();
+            if hoard.try_reserve_exact(size).is_err() {
+                break;
+            }
+            std::mem::forget(hoard);
+        }
+        size /= 2;
+    }
+    Vec::<u8>::new().try_reserve_exact(64).is_err()
+}
+
+/// `ipfs.stats`'s store figures: `figures`, or an out-of-memory error, as
+/// `FREEDOM_IPFSD_TEST_OUT_OF_MEMORY=stats` asks.
+pub fn store_figures(figures: Result<(u64, u64), StoreError>) -> Result<(u64, u64), StoreError> {
+    #[cfg(feature = "testhooks")]
+    if out_of_memory("stats") {
+        return Err(injected());
+    }
+    figures
 }
