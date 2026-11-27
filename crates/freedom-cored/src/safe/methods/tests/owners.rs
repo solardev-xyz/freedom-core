@@ -7,9 +7,12 @@
 //! clock, and the `S4-device-owner` message); the vault owners' sweep after
 //! a proposal made while the vault was locked; a named owner past the
 //! threshold (the `three-signatures` flow); every refusal before the
-//! reads and after them, with nothing signed or written; and the Safe's
-//! hold, a cancel and a failure while the device waits, and a SafeTx or a
-//! session ended meanwhile.
+//! reads and after them, with nothing signed or written; the core's
+//! proposal mark (an entry main's `safe_pending.set` wrote is never
+//! signed, a mark for another Safe or SafeTx is refused, a proposal's
+//! survives a restart, and main's set keeps it only for the same SafeTx);
+//! and the Safe's hold, a cancel and a failure while the device waits, and
+//! a SafeTx or a session ended meanwhile.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -18,10 +21,12 @@ use fc_keys::{Mnemonic, derive_secp256k1};
 use fc_ledger::{Account, LedgerCode, LedgerPath, Operation, Reply, Signed, Step};
 use fc_vault::state::VaultState;
 
-use super::super::owners::{DISCARDED_WHILE_TEXT, message_operation, tx_operation};
+use super::super::owners::{
+    DISCARDED_WHILE_TEXT, NOT_PROPOSED_TEXT, message_operation, tx_operation,
+};
 use super::messages::{message, session_of, vector_signatures};
 use super::propose::{
-    Flows, OA, OB, OD, S2, S3, S4, SIGNING_READS, flow, unlocked, without_clock, world,
+    Flows, OA, OB, OD, S2, S3, S4, SIGNING_READS, flow, mark_of, unlocked, without_clock, world,
 };
 use super::*;
 
@@ -548,6 +553,224 @@ fn sign_owner_refuses_after_the_reads() {
         }
         assert_eq!(std::fs::read(h.path()).unwrap(), before, "{name}");
     }
+}
+
+// --- The core's proposal mark ------------------------------------------------
+
+/// A transfer of the Safe's xDAI to someone no prompt showed.
+fn transfer() -> Value {
+    json!({ "to": checksum_address(&[0x77; 20]), "value": "1000000000000000000", "data": "0x" })
+}
+
+/// The entry main's `safe_pending.set` would write for the SafeTx
+/// `safe.prepare` answered with: the members the codec reads.
+fn main_entry(index: u64, answer: &Value) -> Value {
+    json!({
+        "chainId": 100,
+        "safeAddress": checksum_address(&Flows::address(index)),
+        "safeTxData": answer["safe_tx"],
+        "safeTxHash": answer["safe_tx_hash"],
+        "signatures": [],
+    })
+}
+
+impl Harness {
+    /// Main's `safe_pending.set { index, entry }`, as the request reaches
+    /// the store.
+    fn main_sets(&mut self, index: u64, entry: &Value) {
+        let params = json!({ "index": index, "entry": entry });
+        self.pending
+            .request("safe_pending.set", Some(&params.to_string()))
+            .unwrap();
+    }
+
+    /// The file's entry at `index` written as given, as no request writes
+    /// it: a mark the core didn't write for it.
+    fn plant(&mut self, index: u64, entry: &Value) {
+        let entry = fc_json::parse(&entry.to_string()).unwrap();
+        self.pending.set_where(index, entry, |_| true).unwrap();
+    }
+
+    /// The sweep and each vault owner named are `not_proposed`, before any
+    /// read, the file unchanged.
+    fn never_signed(&mut self, index: u64, owners: &[u64], what: &str) {
+        self.asked.clear();
+        let before = std::fs::read(self.path()).unwrap();
+        let named = owners.iter().copied().map(Some);
+        for owner in std::iter::once(None).chain(named) {
+            let reply = self.sign_owner(index, owner);
+            assert_eq!(
+                refusal(&reply),
+                "not_proposed",
+                "{what}, {owner:?}: {reply}"
+            );
+            assert_eq!(reply["error"]["message"], NOT_PROPOSED_TEXT);
+        }
+        assert!(self.asked.is_empty(), "{what}");
+        assert_eq!(std::fs::read(self.path()).unwrap(), before, "{what}");
+    }
+}
+
+/// Codex's round 1 on #538: main's `safe_pending.set` writes the SafeTx
+/// `safe.prepare` built for a transfer, as a minimal entry, with no mark or
+/// with the mark the core would write for it. The set drops the mark, and
+/// neither the board's sweep (which would sign two of the 2-of-3's vault
+/// owners, an executable transfer) nor a named vault owner signs it, the
+/// vault unlocked: `not_proposed`, before any read. Nor does a Ledger
+/// owner, which never reaches the lane.
+#[test]
+fn an_entry_main_wrote_is_never_signed() {
+    for forged in [false, true] {
+        let mut h = world(S3, 4);
+        let answer = result(&h.prepare(S3, transfer())).clone();
+        let mut entry = main_entry(S3, &answer);
+        if forged {
+            entry[entry::PROPOSAL] = mark_of(S3, &bytes32(&answer["safe_tx_hash"]));
+        }
+        h.main_sets(S3, &entry);
+        let written = h.entry_at(S3).unwrap();
+        assert!(written.get(entry::PROPOSAL).is_none(), "{written}");
+        // The board shows it: it reads.
+        let pending = h.call("safe.pending", json!({}));
+        assert_eq!(
+            result(&pending)["states"][0]["safeTxHash"],
+            answer["safe_tx_hash"]
+        );
+        h.never_signed(S3, &[0, 1, 2], "main's entry");
+        assert_eq!(h.entry_at(S3).unwrap()["signatures"], json!([]));
+    }
+    let mut h = world(S4, 2);
+    let answer = result(&h.prepare(S4, transfer())).clone();
+    h.main_sets(S4, &main_entry(S4, &answer));
+    let sent = h.with_ledger(bytes32(&answer["safe_tx_hash"]), true);
+    h.state = VaultState::new();
+    h.never_signed(S4, &[LEDGER_D], "a Ledger owner");
+    assert!(sent.borrow().is_empty(), "nothing reached the device");
+}
+
+/// Marks the core didn't write for exactly this Safe and SafeTx, planted in
+/// the file as no request can: one copied from the Safe's earlier proposal,
+/// one for another Safe, one for another chain, and forged ones. None
+/// signs. The exact mark, planted the same way, does: what decides is the
+/// mark, and only the core writes it.
+#[test]
+fn a_mark_for_another_safe_or_safe_tx_is_refused() {
+    let mut h = world(S3, 4);
+    let proposed = h.flow_proposed(S3, &flow("two-of-three-vault-owners"));
+    let earlier = h.entry_at(S3).unwrap()[entry::PROPOSAL].clone();
+    assert_eq!(earlier, mark_of(S3, &proposed));
+    let discarded = h.call("safe.discard", json!({ "safe": S3 }));
+    assert_eq!(result(&discarded), &json!({}));
+    let answer = result(&h.prepare(S3, transfer())).clone();
+    let hash = bytes32(&answer["safe_tx_hash"]);
+    let exact = mark_of(S3, &hash);
+    let with = |key: &str, value: Value| {
+        let mut mark = exact.clone();
+        mark[key] = value;
+        mark
+    };
+    let mut reordered = serde_json::Map::new();
+    for key in ["safeTxHash", "safeAddress", "chainId"] {
+        reordered.insert(key.to_owned(), exact[key].clone());
+    }
+    for (what, mark) in [
+        ("the earlier SafeTx's, copied", earlier),
+        ("another Safe's", mark_of(S2, &hash)),
+        ("another chain's", with("chainId", json!(1))),
+        (
+            "another hash",
+            with("safeTxHash", json!(to_hex(&[0x11; 32]))),
+        ),
+        (
+            "an address in lower case",
+            with("safeAddress", json!(to_hex(&Flows::address(S3)))),
+        ),
+        ("an extra member", with("by", json!("safe.propose"))),
+        ("reordered", Value::Object(reordered)),
+        ("true", json!(true)),
+        ("the hash alone", answer["safe_tx_hash"].clone()),
+        ("empty", json!({})),
+    ] {
+        let mut entry = main_entry(S3, &answer);
+        entry[entry::PROPOSAL] = mark;
+        h.plant(S3, &entry);
+        h.never_signed(S3, &[0, 1], what);
+    }
+    let mut entry = main_entry(S3, &answer);
+    entry[entry::PROPOSAL] = exact;
+    h.plant(S3, &entry);
+    let reply = h.sign_owner(S3, None);
+    assert_eq!(result(&reply)["collected"], 2, "{reply}");
+}
+
+/// A proposal made while the vault was locked keeps its mark through a
+/// restart (a fresh store, a fresh core's methods and approvals): unlocked,
+/// the sweep signs it, the reference's entry but its clock and the mark,
+/// as 0016 has it (the vault owners aren't affected by a restart).
+#[test]
+fn a_proposed_entry_signs_after_a_restart() {
+    let flow = flow("two-of-three-vault-owners");
+    let start = &flow["steps"][0];
+    let mut h = world(S3, 4);
+    h.state = VaultState::new();
+    let hash = h.flow_proposed(S3, &flow);
+    let reloaded = SafePending::new();
+    reloaded.configure(h._dir.path().to_owned(), true);
+    h.pending = reloaded;
+    h.safes = Safes::new();
+    h.approvals = Approvals::new();
+    h.records();
+    h.state = unlocked();
+    h.asked.clear();
+    let reply = h.sign_owner(S3, None);
+    same_state(result(&reply), &start["state"]);
+    assert_eq!(h.asked, SIGNING_READS);
+    let entry = h.entry_at(S3).unwrap();
+    assert_eq!(without_clock(entry.clone()), start["pending"]);
+    assert_eq!(entry[entry::PROPOSAL], mark_of(S3, &hash));
+}
+
+/// Main's `safe_pending.set` of a proposed entry for the same SafeTx (its
+/// `display` changed, the mark sent back as the reference's `{ ...current
+/// }` would, or left out) keeps the core's mark, and the sweep signs it.
+/// One whose SafeTx changed (another value, its hash recomputed, the mark
+/// sent back) loses it: `not_proposed`. Setting the first SafeTx again,
+/// its mark sent back, doesn't bring the mark back.
+#[test]
+fn main_keeps_the_mark_only_while_the_safe_tx_is_the_same() {
+    let mut h = world(S3, 4);
+    h.state = VaultState::new();
+    let hash = h.flow_proposed(S3, &flow("two-of-three-vault-owners"));
+    let proposed = h.entry_at(S3).unwrap();
+    for sent_back in [true, false] {
+        let mut same = proposed.clone();
+        same["display"] = json!({ "note": sent_back });
+        if !sent_back {
+            same.as_object_mut().unwrap().shift_remove(entry::PROPOSAL);
+        }
+        h.main_sets(S3, &same);
+        let entry = h.entry_at(S3).unwrap();
+        assert_eq!(entry[entry::PROPOSAL], mark_of(S3, &hash), "{sent_back}");
+        assert_eq!(entry["display"], same["display"]);
+    }
+    h.state = unlocked();
+    let reply = h.sign_owner(S3, None);
+    assert_eq!(result(&reply)["collected"], 2, "{reply}");
+    let signed = h.entry_at(S3).unwrap();
+    assert_eq!(signed[entry::PROPOSAL], mark_of(S3, &hash));
+    // Another SafeTx in its place.
+    let mut changed = signed.clone();
+    changed["safeTxData"]["value"] = json!("1");
+    changed["signatures"] = json!([]);
+    let tx = fc_safe::SafeTx::from_fields(&changed["safeTxData"]).unwrap();
+    changed["safeTxHash"] = json!(to_hex(&tx.hash(&Flows::address(S3)).unwrap()));
+    h.main_sets(S3, &changed);
+    assert!(h.entry_at(S3).unwrap().get(entry::PROPOSAL).is_none());
+    h.never_signed(S3, &[0, 1], "another SafeTx");
+    // The first SafeTx again, its mark sent back: still not the core's.
+    h.main_sets(S3, &proposed);
+    assert!(h.entry_at(S3).unwrap().get(entry::PROPOSAL).is_none());
+    h.never_signed(S3, &[0, 1], "set again");
 }
 
 // --- The device's wait ------------------------------------------------------

@@ -230,9 +230,19 @@ impl Harness {
     }
 }
 
+/// The entry as the reference writes it: without its clock reading, and
+/// without the core's proposal mark, which [`mark_of`] checks.
 pub(super) fn without_clock(mut entry: Value) -> Value {
-    entry.as_object_mut().unwrap().shift_remove("createdAt");
+    let members = entry.as_object_mut().unwrap();
+    members.shift_remove("createdAt");
+    members.shift_remove(entry::PROPOSAL);
     entry
+}
+
+/// The core's proposal mark for the SafeTx `hash` of the Safe at `index`,
+/// as the file holds it.
+pub(super) fn mark_of(index: u64, hash: &[u8; 32]) -> Value {
+    serde_json::from_str(&entry::proposal(&Flows::address(index), hash).stringify()).unwrap()
 }
 
 // --- The entry the reference writes ------------------------------------
@@ -273,6 +283,17 @@ fn propose_writes_the_entry_the_reference_writes() {
         let entry = h.entry_at(index).unwrap();
         assert_eq!(without_clock(entry.clone()), *pending, "{id}");
         assert_eq!(entry["createdAt"], CLOCKS.wall_ms, "{id}");
+        // The core's mark, after the reference's members: this Safe on
+        // Gnosis and this SafeTx.
+        let hash: [u8; 32] = parse_bytes(pending["safeTxHash"].as_str().unwrap(), "")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(entry[entry::PROPOSAL], mark_of(index, &hash), "{id}");
+        assert_eq!(
+            entry.as_object().unwrap().keys().next_back().unwrap(),
+            entry::PROPOSAL
+        );
         // The board's state, as `getSafeSendState` gives it.
         let reference = &start["state"];
         for key in [

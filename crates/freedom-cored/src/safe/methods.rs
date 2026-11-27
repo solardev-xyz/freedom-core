@@ -80,9 +80,9 @@
 //!   are read again, each verified, and the nonce must still be the
 //!   SafeTx's; then, where no vault job is running, the vault owners sign
 //!   at once while the vault is unlocked, and the entry is written
-//!   ([`super::entry`]) unless another is pending meanwhile. It needs
-//!   `safe_pending` moved too. A presented token is burnt however the
-//!   request ends.
+//!   ([`super::entry`]), with the core's proposal mark, unless another is
+//!   pending meanwhile. It needs `safe_pending` moved too. A presented
+//!   token is burnt however the request ends.
 //! - **`safe.execute { safe, fee_ack?, safe_tx_hash? }`** → `{ send }`,
 //!   `{ fee_check }` or `{ superseded }` (S4): the pending SafeTx as the
 //!   codec reads it (`safe_tx_hash`, when given, must name it), of a Safe
@@ -129,7 +129,9 @@
 //!   state (S6): the pending SafeTx signed by the vault owners that haven't
 //!   signed (the board's sweep after a proposal made while the vault was
 //!   locked), or by the owner named, a vault owner or a Ledger owner on the
-//!   device lane, after the eight reads ([`owners`]).
+//!   device lane, after the eight reads ([`owners`]); only an entry that
+//!   carries the core's proposal mark, which `safe.propose` writes and
+//!   main's `safe_pending.set` can't (`not_proposed` otherwise).
 //! - **The Safe's hold:** from a `safe.propose`'s spend to its answer, and
 //!   from a `safe.execute`'s start to its answer, the Safe is held: another
 //!   `safe.propose` for it is `SAFE_PENDING_EXISTS`, as the reference's
@@ -146,7 +148,7 @@
 //! - **Refusals** are `invalid_argument` with `data.safe`: `unsupported`,
 //!   `unverified` (a deployment or activation no read answered, or a read
 //!   a step that signs rests on), `changed`, `not_deployed`, `self_call`,
-//!   `nonce_behind`, `store_full`, or today's `SAFE_*` codes
+//!   `nonce_behind`, `store_full`, `not_proposed`, or today's `SAFE_*` codes
 //!   (`SAFE_ADDRESS_MISMATCH`, `SAFE_NEEDS_FUNDS`, `SAFE_DISCARDED`,
 //!   `SAFE_PENDING_EXISTS`, `SAFE_BUSY`, and a message's
 //!   `SAFE_MESSAGE_EXISTS` and `SAFE_APPROVAL_NEEDED`). `safe.status` reports `changed`,
@@ -2502,10 +2504,11 @@ fn executed(
 /// `safe.propose`'s signing and write, where no vault job is running: the
 /// Safe's record as it stands now, which must still be the one the reads
 /// checked; the vault owners' signatures (`collectFreeSignatures`); the
-/// entry written, unless an entry that reads is pending meanwhile; then the
-/// Safe's older `safe-send` approvals ended, as a new one ends them, since
-/// a Safe has one pending SafeTx. The board's state, with `durable: false`
-/// when the write's flush failed.
+/// entry written with the core's proposal mark ([`entry::mark`]), unless an
+/// entry that reads is pending meanwhile; then the Safe's older `safe-send`
+/// approvals ended, as a new one ends them, since a Safe has one pending
+/// SafeTx. The board's state, with `durable: false` when the write's flush
+/// failed.
 fn proposed(
     checked: &Safe,
     prepared: &Prepared,
@@ -2534,7 +2537,7 @@ fn proposed(
         &prepared.hash,
         threshold,
     );
-    let written = entry::written(&entry::New {
+    let mut written = entry::written(&entry::New {
         safe: &safe.address,
         tx: &prepared.tx,
         hash: &prepared.hash,
@@ -2543,6 +2546,9 @@ fn proposed(
         signatures: &signatures,
         created_at_ms: ctx.clocks.wall_ms,
     })?;
+    // The core's mark: the spent `safe-send` authorized this SafeTx, for
+    // `safe.sign_owner` to sign it later (design 0016, "Owner signatures").
+    entry::mark(&mut written, &safe.address, &prepared.hash);
     let durable = ctx
         .pending
         .set_where(safe.index, written.clone(), |current| match current {

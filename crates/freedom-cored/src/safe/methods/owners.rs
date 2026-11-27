@@ -11,7 +11,13 @@
 //!   else `SAFE_DISCARDED`: the board's step acts only on the SafeTx it
 //!   showed); none is "No pending transaction for this account", and one
 //!   marked superseded "This transaction can no longer be signed — discard
-//!   it". Without `owner`, the vault owners that haven't signed, in the
+//!   it". An entry without the core's proposal mark for the record's Safe
+//!   and that SafeTx ([`entry::PROPOSAL`]) is `not_proposed`, before any
+//!   read: only `safe.propose`, which spent the `safe-send` that authorized
+//!   every local owner's signature over it, marks one, and main's
+//!   `safe_pending.set` can't (design 0016, "Owner signatures"; 0012: a
+//!   Safe owner's signature under `shell` needs the Safe's authorization).
+//!   Without `owner`, the vault owners that haven't signed, in the
 //!   record's order, until the record's threshold (`collectFreeSignatures`);
 //!   with one, that owner, once: one not the Safe's is "That account is not
 //!   an owner of this Safe", and one that signed is answered the state,
@@ -24,10 +30,11 @@
 //! - **Then the eight reads,** each verified, the nonce last, as before
 //!   every owner's signature (`safe_changed`, `safe_unverified`,
 //!   `not_deployed`, nothing signed). The record and the entry must still be
-//!   the ones read (`SAFE_DISCARDED`), and the SafeTx must be the one the
-//!   Safe's verified nonce executes next: a nonce past it is the superseded
-//!   refusal, one below it `nonce_behind`, each with nothing signed or
-//!   written (conservative: a signature that can't execute is never made).
+//!   the ones read (`SAFE_DISCARDED`), the entry still marked
+//!   (`not_proposed`), and the SafeTx must be the one the Safe's verified
+//!   nonce executes next: a nonce past it is the superseded refusal, one
+//!   below it `nonce_behind`, each with nothing signed or written
+//!   (conservative: a signature that can't execute is never made).
 //! - **The vault owners** then sign where no vault job is running, with the
 //!   vault's state as it stands ([`Safes::owner_signed`]).
 //! - **A Ledger owner** (D9's record: a Ledger's, at a scheme's path) signs
@@ -40,7 +47,8 @@
 //!   while the record and the pending entry are still the ones checked, as
 //!   L4's rule has an owner's signature used only while its SafeTx is the
 //!   one fixed: otherwise `SAFE_DISCARDED`, "The request was discarded while
-//!   the signature was being made", and nothing of it is kept. A cancel
+//!   the signature was being made", and nothing of it is kept; an entry
+//!   that lost its mark meanwhile is `not_proposed`, nothing kept. A cancel
 //!   ends it on the lane (`cancelled`, nothing kept).
 //! - **The entry** keeps every signature it held, byte for byte; the new
 //!   ones are appended, `{ signer, data }`, as the reference appends them,
@@ -63,6 +71,11 @@ use super::*;
 /// `signSafePending`'s refusal of a SafeTx marked superseded, and the
 /// core's of one the Safe's verified nonce has passed.
 const SUPERSEDED_TEXT: &str = "This transaction can no longer be signed \u{2014} discard it";
+
+/// An entry `safe.propose` didn't write (`not_proposed`): no `safe-send`
+/// was spent through the core for it.
+pub(super) const NOT_PROPOSED_TEXT: &str = "This transaction wasn't confirmed in Freedom, so its \
+     owners can't sign it here \u{2014} discard it and send it again";
 
 /// A phone owner's signature (`unsupported`): 0012's phone jobs.
 pub(super) const PHONE_OWNER_TEXT: &str = "A phone owner can't sign for a Safe here yet";
@@ -191,7 +204,15 @@ fn current(
         .ok()
         .filter(|read| read.hash == *hash)
         .ok_or_else(&refusal)?;
+    if !read.proposed {
+        return Err(not_proposed());
+    }
     Ok((safe, raw, read))
+}
+
+/// `not_proposed`: an entry without the core's proposal mark.
+fn not_proposed() -> ErrorBody {
+    refused("not_proposed", NOT_PROPOSED_TEXT)
 }
 
 /// Whether `signatures` holds one from `owner`.
@@ -235,6 +256,11 @@ impl Safes {
         };
         if entry.superseded {
             return Err(plain(SUPERSEDED_TEXT));
+        }
+        // Only an entry `safe.propose` wrote: its spent `safe-send` is what
+        // authorizes the owners' signatures over it.
+        if !entry.proposed {
+            return Err(not_proposed());
         }
         // `signEntryOwner`'s, for a chosen owner: one of the Safe's, and
         // not signed already (the state, idempotent).
@@ -295,6 +321,9 @@ impl Safes {
             Ok(still) => still,
             Err(error) => return vec![failed(id, &error)],
         };
+        if !entry.proposed {
+            return vec![failed(id, &not_proposed())];
+        }
         if entry.superseded {
             return vec![failed(id, &plain(SUPERSEDED_TEXT))];
         }

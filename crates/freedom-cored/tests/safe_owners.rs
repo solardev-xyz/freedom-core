@@ -7,6 +7,8 @@
 //! relays to a scripted device; then, unlocked, the board's sweep has the
 //! vault owner sign until the threshold. A page's Safe message the same
 //! way, through `safe.message_sign`, completed with the reference's join.
+//! An entry shell wrote through `safe_pending.set` is never signed
+//! (`not_proposed`), and a proposal's mark survives a restart of the core.
 //! The test plays main and Gnosis.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -220,23 +222,60 @@ fn hash_of(text: &Value) -> [u8; 32] {
         .unwrap()
 }
 
-#[test]
-fn a_ledger_owner_signs_later_on_the_lane_and_the_sweep_after_unlock() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(root.path().join("identity")).unwrap();
+/// The core on the profile at `root`, both stores moved, its hello done.
+fn started(root: &std::path::Path) -> Core {
     let mut core = spawn_env(
         "serve",
-        &root.path().join("identity"),
-        &root.path().join("locks"),
+        &root.join("identity"),
+        &root.join("locks"),
         &[],
         &[MAINS_WORD],
     );
     std::fs::create_dir_all(&core.grant_root).unwrap();
     core.store_moved = vec!["vault_meta", "safe_pending"];
     assert!(core.hello()["result"].is_object());
+    core
+}
+
+/// Gnosis, read through two endpoints that must agree.
+fn gnosis(core: &mut Core, id: u64) {
+    call(
+        core,
+        id,
+        "shell",
+        "chain.configure",
+        json!({ "chains": [{
+            "chain_id": 100, "display_name": "Gnosis Chain",
+            "read_order": ["quorum", "direct"], "broadcast_order": ["direct"],
+            "quorum": { "k": 2, "m": 2, "timeout_ms": 5000 },
+            "rpc": [
+                { "endpoint": "https://a.example", "user_configured": false },
+                { "endpoint": "https://b.example", "user_configured": false },
+            ],
+            "prover": null, "myotis": false, "blockscout": null,
+        }] }),
+    );
+}
+
+/// The profile's Safe: its wallet index and address, its owners (the
+/// vault's accounts A and B, then the Ledger) and setup, and the Ledger
+/// owner's index.
+struct World {
+    index: u64,
+    safe_address: String,
+    owners: [[u8; 20]; 3],
+    setup: Setup,
+    ledger_index: u64,
+    password: String,
+}
+
+/// The vault imported (A, at index 0), a second vault account B, a Ledger,
+/// and the 2-of-3 Safe of the three, marked deployed; Gnosis configured;
+/// the vault locked. Requests 2 to 8.
+fn world(core: &mut Core) -> World {
     let password = STANDARD.encode("testpass1");
     call(
-        &mut core,
+        core,
         2,
         "shell",
         "vault.import",
@@ -246,7 +285,7 @@ fn a_ledger_owner_signs_later_on_the_lane_and_the_sweep_after_unlock() {
         }),
     );
     let b = call(
-        &mut core,
+        core,
         3,
         "shell",
         "accounts.add_mnemonic",
@@ -255,7 +294,7 @@ fn a_ledger_owner_signs_later_on_the_lane_and_the_sweep_after_unlock() {
     assert_eq!(b["wallet"]["index"], 1);
     let ledger_address = device::account_at(LEDGER_PATH).address;
     let added = call(
-        &mut core,
+        core,
         4,
         "shell",
         "accounts.add_ledger",
@@ -270,7 +309,7 @@ fn a_ledger_owner_signs_later_on_the_lane_and_the_sweep_after_unlock() {
     let setup = Setup::new(owners.to_vec(), 2).unwrap();
     let safe_address = checksum_address(&setup.address(&U256::from_u64(7)));
     let safe = call(
-        &mut core,
+        core,
         5,
         "shell",
         "accounts.add_safe",
@@ -279,29 +318,46 @@ fn a_ledger_owner_signs_later_on_the_lane_and_the_sweep_after_unlock() {
     );
     let index = safe["wallet"]["index"].as_u64().unwrap();
     call(
-        &mut core,
+        core,
         6,
         "shell",
         "accounts.mark_safe_deployed",
         json!({ "index": index, "chain_id": 100 }),
     );
-    call(
-        &mut core,
-        7,
-        "shell",
-        "chain.configure",
-        json!({ "chains": [{
-            "chain_id": 100, "display_name": "Gnosis Chain",
-            "read_order": ["quorum", "direct"], "broadcast_order": ["direct"],
-            "quorum": { "k": 2, "m": 2, "timeout_ms": 5000 },
-            "rpc": [
-                { "endpoint": "https://a.example", "user_configured": false },
-                { "endpoint": "https://b.example", "user_configured": false },
-            ],
-            "prover": null, "myotis": false, "blockscout": null,
-        }] }),
-    );
-    call(&mut core, 8, "shell", "vault.lock", json!({}));
+    gnosis(core, 7);
+    call(core, 8, "shell", "vault.lock", json!({}));
+    World {
+        index,
+        safe_address,
+        owners,
+        setup,
+        ledger_index,
+        password,
+    }
+}
+
+/// The pending store's file, as JSON.
+fn pending_file(core: &Core) -> Value {
+    serde_json::from_str(
+        &std::fs::read_to_string(core.grant_root.join("safe-pending.json")).unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_ledger_owner_signs_later_on_the_lane_and_the_sweep_after_unlock() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("identity")).unwrap();
+    let mut core = started(root.path());
+    let World {
+        index,
+        safe_address,
+        owners,
+        setup,
+        ledger_index,
+        password,
+    } = world(&mut core);
+    let ledger_address = owners[2];
 
     // Proposed while the vault is locked: no owner signs.
     let mut unused = Device::default();
@@ -482,4 +538,131 @@ fn a_ledger_owner_signs_later_on_the_lane_and_the_sweep_after_unlock() {
         joined.add(OwnerSignature::check(&message_hash, &signature, &owner, &owners).unwrap());
     }
     assert_eq!(done["signature"], to_hex(&joined.joined()));
+}
+
+/// Codex's round 1 on #538, through the binary: shell writes the SafeTx
+/// `safe.prepare` built for a transfer through `safe_pending.set`, with a
+/// mark of its own in the core's form. The set drops the mark, and neither
+/// the board's sweep, a named vault owner nor the Ledger owner signs it,
+/// the vault unlocked: `not_proposed`, before any `shell.rpc`, the file
+/// unchanged. Then a proposal made while the vault is locked carries the
+/// core's mark through a restart of the core: unlocked, the sweep signs it,
+/// both vault owners to the threshold.
+#[test]
+fn a_shell_written_entry_is_never_signed_and_a_proposal_survives_a_restart() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("identity")).unwrap();
+    let mut core = started(root.path());
+    let w = world(&mut core);
+    let key = w.index.to_string();
+    let unlock = json!({ "password_b64": w.password });
+    call(&mut core, 9, "shell", "vault.unlock", unlock.clone());
+    let mut unused = Device::default();
+    let tx = json!({ "to": checksum_address(&[0x77; 20]), "value": "1000", "data": "0x" });
+    send(
+        &mut core,
+        10,
+        "chrome",
+        "safe.prepare",
+        json!({ "safe": w.index, "chain_id": 100, "tx": tx }),
+    );
+    let (reply, _, _) = played(&mut core, 10, &w.owners, &mut unused);
+    let prepared = reply["result"].clone();
+    let mark = json!({
+        "chainId": 100, "safeAddress": w.safe_address, "safeTxHash": prepared["safe_tx_hash"],
+    });
+    call(
+        &mut core,
+        11,
+        "shell",
+        "safe_pending.set",
+        json!({ "index": w.index, "entry": {
+            "chainId": 100, "safeAddress": w.safe_address, "safeTxData": prepared["safe_tx"],
+            "safeTxHash": prepared["safe_tx_hash"], "signatures": [], "coreProposal": mark,
+        } }),
+    );
+    let before = pending_file(&core);
+    assert!(before[&key].get("coreProposal").is_none(), "{before}");
+    assert_eq!(before[&key]["safeTxHash"], prepared["safe_tx_hash"]);
+    for (id, owner) in [
+        (12, None),
+        (13, Some(0)),
+        (14, Some(1)),
+        (15, Some(w.ledger_index)),
+    ] {
+        let mut params = json!({ "safe": w.index });
+        if let Some(owner) = owner {
+            params["owner"] = json!(owner);
+        }
+        send(&mut core, id, "shell", "safe.sign_owner", params);
+        // The answer comes first: no `shell.rpc`, no `shell.ledger_apdu`.
+        let reply = core.response(id);
+        assert_eq!(reply["error"]["code"], "invalid_argument", "{reply}");
+        assert_eq!(
+            reply["error"]["data"]["safe"], "not_proposed",
+            "{owner:?}: {reply}"
+        );
+    }
+    assert_eq!(pending_file(&core), before);
+
+    // Discarded; then proposed with the vault locked, and the core restarted.
+    call(
+        &mut core,
+        16,
+        "shell",
+        "safe.discard",
+        json!({ "safe": w.index }),
+    );
+    call(&mut core, 17, "shell", "vault.lock", json!({}));
+    let token = call(
+        &mut core,
+        18,
+        "shell",
+        "approval.issue",
+        json!({
+            "kind": "safe-send", "account": w.index,
+            "payload": {
+                "safe": w.safe_address, "chain_id": "100",
+                "safe_tx": prepared["safe_tx"], "safe_tx_hash": prepared["safe_tx_hash"],
+            },
+        }),
+    )["token"]
+        .clone();
+    send(
+        &mut core,
+        19,
+        "shell",
+        "safe.propose",
+        json!({ "safe": w.index, "safe_tx_hash": prepared["safe_tx_hash"],
+                "authorization": { "token": token } }),
+    );
+    let (reply, _, _) = played(&mut core, 19, &w.owners, &mut unused);
+    assert_eq!(reply["result"]["collected"], 0, "{reply}");
+    assert_eq!(pending_file(&core)[&key]["coreProposal"], mark);
+    drop(core);
+    let mut core = started(root.path());
+    gnosis(&mut core, 2);
+    call(&mut core, 3, "shell", "vault.unlock", unlock);
+    send(
+        &mut core,
+        4,
+        "shell",
+        "safe.sign_owner",
+        json!({ "safe": w.index, "safe_tx_hash": prepared["safe_tx_hash"] }),
+    );
+    let (reply, methods, apdus) = played(&mut core, 4, &w.owners, &mut unused);
+    assert_eq!(reply["result"]["collected"], 2, "{reply}");
+    assert_eq!(methods.len(), 16);
+    assert!(apdus.is_empty());
+    let entry = &pending_file(&core)[&key];
+    let hash = hash_of(&prepared["safe_tx_hash"]);
+    assert_eq!(
+        entry["signatures"][0],
+        json!({ "signer": checksum_address(&w.owners[0]), "data": signed_at(VAULT_PATH, &hash) })
+    );
+    assert_eq!(
+        entry["signatures"][1]["signer"],
+        checksum_address(&w.owners[1])
+    );
+    assert_eq!(entry["coreProposal"], mark);
 }

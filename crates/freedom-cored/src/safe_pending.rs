@@ -9,7 +9,14 @@
 //!   }` and `.clear { index } → { cleared, durable }` (`cleared`: the
 //!   index had an entry), main's alone. `index` is a
 //!   wallet index, an integer from 0 to `Number.MAX_SAFE_INTEGER`; `entry`
-//!   any JSON value, kept as JS keeps it.
+//!   any JSON value, kept as JS keeps it, but the core's proposal mark.
+//! - **The core's proposal mark** (design 0016, "Owner signatures"; S6):
+//!   `set` drops any `coreProposal` member the entry carries, and keeps
+//!   the one the index's entry already carries only while the new entry
+//!   is for the same Safe and SafeTx ([`crate::safe::entry::from_main`]).
+//!   So only `safe.propose` marks an entry, and `safe.sign_owner` signs no
+//!   entry main wrote. The core's own writes (`safe.propose`'s, an owner's
+//!   signature, `superseded`) go through [`SafePending::set_where`].
 //! - **One writer:** until `core.hello` names `safe_pending` in
 //!   `store_moved`, main writes the file. The reads are served from it,
 //!   and an unreadable file reads as empty and stays where it is; `set`
@@ -218,18 +225,26 @@ impl SafePending {
         }
     }
 
-    /// `setPending(index, entry)`: whether the write was durable.
+    /// Main's `setPending(index, entry)`, `safe_pending.set`'s: whether
+    /// the write was durable. The entry loses any proposal mark it carries;
+    /// the index's own is kept only while the Safe and the SafeTx are
+    /// unchanged, read and written under one lock
+    /// ([`crate::safe::entry::from_main`]).
     pub fn set(&self, index: u64, entry: JsValue) -> Result<bool, Failure> {
-        self.change(|store| store.set(index, entry).map(|()| true))
-            .map(|(_, durable)| durable)
+        self.change(|store| {
+            let entry = crate::safe::entry::from_main(entry, store.get(index));
+            store.set(index, entry).map(|()| true)
+        })
+        .map(|(_, durable)| durable)
     }
 
     /// `setPending(index, entry)` only where `vacant` takes the index's
     /// entry as it stands (none, or a falsy one, is `None`), read and
     /// written under one lock, so no other write lands between the check
-    /// and the set: `safe.propose`'s (design 0016, SAFE-2's S3). `None`
-    /// when `vacant` refused it, with nothing written; otherwise whether
-    /// the write was durable.
+    /// and the set: the core's own writes, `safe.propose`'s (design 0016,
+    /// SAFE-2's S3) and those of the steps after it, the entry written as
+    /// given, its proposal mark included. `None` when `vacant` refused it,
+    /// with nothing written; otherwise whether the write was durable.
     pub fn set_where(
         &self,
         index: u64,

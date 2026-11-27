@@ -387,6 +387,7 @@ Older builds and cores read none of these names: an older core runs no recovery,
 - **The chrome reads none of it directly:** `wallet:safe-state`, `wallet:safe-sign` and `wallet:safe-pending-list` return main's projections, without the signatures or the typed data. Main builds them from these reads.
 - **Two deviations:** an unreadable file is renamed aside (`safe-pending-unreadable`, with the rule and the reference's behaviour case by case in its row); and a failed write is reported with the store unchanged (`safe-pending-write-reported`), where the reference logs it and keeps the change in memory as if saved.
 - **`accounts.remove`** clears a Safe's entry once both stores are moved.
+- **The core's proposal mark** (0016, *Owner signatures*; SAFE-2's S6): `set` drops a `coreProposal` member the entry carries, and keeps the one the index's entry already has only while the new entry is for the same Safe and SafeTx. So only `safe.propose` marks an entry, and `safe.sign_owner` signs no entry main wrote.
 
 ### RPC API keys
 
