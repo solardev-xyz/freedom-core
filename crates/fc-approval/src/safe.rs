@@ -1094,12 +1094,14 @@ mod tests {
         let send = |safe| Approved::send(&send_payload(safe)).unwrap();
         let message =
             || Approved::message(&message_payload("personal_sign", json!(["hi"]))).unwrap();
-        safes.record(page(1), send(SAFE), &mut rng).unwrap();
         safes.record(Holder::Wallet, send(SAFE), &mut rng).unwrap();
         safes.record(page(2), message(), &mut rng).unwrap();
         safes.record(page(3), send(OTHER_SAFE), &mut rng).unwrap();
+        // A newer send's approval for the Safe ends its older one.
+        safes.record(page(1), send(SAFE), &mut rng).unwrap();
+        assert_eq!(safes.len(), 3);
         let safe = [0x11; 20];
-        assert_eq!(safes.end_sends(&safe), 2);
+        assert_eq!(safes.end_sends(&safe), 1);
         assert_eq!(safes.len(), 2);
         assert_eq!(safes.end_sends(&safe), 0);
         assert_eq!(safes.end_safe(&safe), 1);
