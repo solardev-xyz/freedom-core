@@ -1059,28 +1059,46 @@ impl Harness {
     /// [`Harness::board`], its params written into a buffer wiped when
     /// dropped, `session` in them as given (escapes included).
     fn board_raw(&mut self, method: &str, index: u64, session: &str, owner: Option<u64>) -> Value {
-        let mut params = Zeroizing::new(String::with_capacity(256));
-        params.push_str(&format!("{{\"safe\":{index},"));
-        if let Some(owner) = owner {
-            params.push_str(&format!("\"owner\":{owner},"));
-        }
-        params.push_str("\"session\":\"");
-        params.push_str(session);
-        params.push_str("\"}");
-        assert_eq!(params.capacity(), 256, "no copy left by a reallocation");
+        let index = index.to_string();
+        let owner = owner.map(|owner| format!("\"owner\":{owner},"));
+        let params = wiped(&[
+            "{\"safe\":",
+            &index,
+            ",",
+            owner.as_deref().unwrap_or(""),
+            "\"session\":\"",
+            session,
+            "\"}",
+        ]);
+        self.board_body(method, &params)
+    }
+
+    /// A board call from main with `params` as given.
+    fn board_body(&mut self, method: &str, params: &str) -> Value {
         let context = caller(CallerKind::Shell);
         let outs = self
             .safes
-            .request(9, method, Some(params.as_str()), &context, ctx!(self));
+            .request(9, method, Some(params), &context, ctx!(self));
         self.drive(outs).expect("no reply")
     }
+}
+
+/// `parts` joined in a buffer wiped when dropped, never reallocated.
+fn wiped(parts: &[&str]) -> Zeroizing<String> {
+    let mut text = Zeroizing::new(String::with_capacity(512));
+    for part in parts {
+        text.push_str(part);
+    }
+    assert_eq!(text.capacity(), 512, "no copy left by a reallocation");
+    text
 }
 
 /// A presented session ID leaves no unwiped copy behind: each board call
 /// reads it in the request's own bytes (a frame's in the core, wiped when
 /// it drops; the test's buffer here) straight into a buffer wiped when
-/// dropped, escaped or not, and a session keeps its ID in its own buffer,
-/// wiped when the session drops. A parse into a value left the text in a
+/// dropped, escaped or not (a repeated one's earlier occurrences checked in
+/// place), and a session keeps its ID in its own buffer, wiped when the
+/// session drops. A parse into a value left the text in a
 /// freed string (and an escaped one in serde_json's scratch too), and the
 /// sessions' map the bytes of a session it dropped. Watched in a child
 /// process whose allocator looks in each block it frees, from the first
@@ -1113,6 +1131,17 @@ fn no_unwiped_copy_of_a_presented_session_id() {
     assert_eq!(escaped.len(), 37);
     let again = h.board_raw("safe.message_state", S3, &escaped, None);
     assert_eq!(again, state);
+    // Repeated, each occurrence read in place: twice, then once inside an
+    // array, the last kept; and after a lone surrogate, refused.
+    let head = format!("{{\"safe\":{S3},\"session\":");
+    let twice = wiped(&[&head, "\"", &first, "\",\"session\":\"", &escaped, "\"}"]);
+    assert_eq!(h.board_body("safe.message_state", &twice), state);
+    let inside = wiped(&[&head, "[\"", &first, "\"],\"session\":\"", &first, "\"}"]);
+    assert_eq!(h.board_body("safe.message_state", &inside), state);
+    let lone = format!("\"{}uD800\",\"session\":\"", char::from(0x5c));
+    let refused = wiped(&[&head, &lone, &first, "\"}"]);
+    let reply = h.board_body("safe.message_state", &refused);
+    assert_eq!(reply["error"]["code"], "invalid_argument", "{reply}");
     // C, then the sweep's A, after the eight reads each.
     h.state = unlocked();
     let reply = h.board_raw("safe.message_sign", S3, &first, Some(2));
@@ -1142,59 +1171,103 @@ fn no_unwiped_copy_of_a_presented_session_id() {
     assert!(found().0 > 0, "the watch sees nothing");
 }
 
-/// A presented ID, read from the request's bytes, is the string serde_json
-/// reads there (as `members` read it): escaped digits, in either case, are
-/// the same ID; any other string is none (`null`); a lone surrogate, which
-/// serde_json refuses in a string, is `invalid_argument`.
+/// A presented ID is read as the board's calls read it with a parse into
+/// a value (`members`), the old parse here the reference for each request:
+/// escaped digits, in either case, are the same ID; any other string is
+/// none (`null`); a lone surrogate, which serde_json refuses in a string,
+/// is `invalid_argument`. Every occurrence of a repeated member is read so,
+/// the last kept: an earlier one is refused for a lone surrogate (in a
+/// string or a key), a number out of range or a value nested too deep, as
+/// that parse refuses it.
 #[test]
-fn a_presented_id_reads_as_its_json_string() {
+fn a_presented_id_reads_as_a_value_parse_reads_it() {
     let mut h = world(S2, 3);
     let session = h.session_started(S2, "Hello, Safe");
     let state = h.board_raw("safe.message_state", S2, &session, None);
     assert_eq!(result(&state)["complete"], true);
     let bs = char::from(0x5c);
+    let id = session.as_str();
+    let other = "0".repeat(32);
+    let one = |text: &str| format!("{{\"safe\":{S2},\"session\":\"{text}\"}}");
+    let two = |first: &str, last: &str| {
+        format!("{{\"safe\":{S2},\"session\":{first},\"session\":{last}}}")
+    };
+    let safe_twice =
+        |first: &str| format!("{{\"safe\":{first},\"safe\":{S2},\"session\":\"{id}\"}}");
+    let deep = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
+    let quoted = |text: &str| format!("\"{text}\"");
     let cases: Vec<(String, &str)> = vec![
+        // One occurrence.
         (
-            session.bytes().map(|b| format!("{bs}u{b:04X}")).collect(),
+            one(&id
+                .bytes()
+                .map(|b| format!("{bs}u{b:04X}"))
+                .collect::<String>()),
             "state",
         ),
         (
-            format!("{}{bs}u{:04x}", &session[..31], session.as_bytes()[31]),
+            one(&format!("{}{bs}u{:04x}", &id[..31], id.as_bytes()[31])),
             "state",
         ),
-        (format!("A{}", &session[1..]), "null"),
-        (format!("{bs}n{}", &session[1..]), "null"),
-        (format!("{bs}/{}", &session[1..]), "null"),
-        (format!("{bs}u0130{}", &session[1..]), "null"),
-        (format!("{}0", session.as_str()), "null"),
-        (session[1..].to_owned(), "null"),
-        (format!("{}{bs}uD83D{bs}uDE00", &session[..31]), "null"),
-        (String::new(), "null"),
-        (format!("{bs}uDC00{}", session.as_str()), "invalid"),
-        (format!("{bs}uD800{}", session.as_str()), "invalid"),
-        (format!("{}{bs}uD800", session.as_str()), "invalid"),
-        (format!("{bs}uD800{bs}u0030{}", &session[1..]), "invalid"),
+        (one(&format!("A{}", &id[1..])), "null"),
+        (one(&format!("{bs}n{}", &id[1..])), "null"),
+        (one(&format!("{bs}/{}", &id[1..])), "null"),
+        (one(&format!("{bs}u0130{}", &id[1..])), "null"),
+        (one(&format!("{id}0")), "null"),
+        (one(&id[1..]), "null"),
+        (one(&format!("{}{bs}uD83D{bs}uDE00", &id[..31])), "null"),
+        (one(""), "null"),
+        (one(&format!("{bs}uDC00{id}")), "invalid"),
+        (one(&format!("{bs}uD800{id}")), "invalid"),
+        (one(&format!("{id}{bs}uD800")), "invalid"),
+        (one(&format!("{bs}uD800{bs}u0030{}", &id[1..])), "invalid"),
         (
-            format!("{bs}uD800{bs}uD800{bs}uDC00{}", &session[1..]),
+            one(&format!("{bs}uD800{bs}uD800{bs}uDC00{}", &id[1..])),
             "invalid",
         ),
-        (format!("{bs}uD800{bs}n{}", &session[1..]), "invalid"),
+        (one(&format!("{bs}uD800{bs}n{}", &id[1..])), "invalid"),
+        // Repeated: each occurrence read, the last kept.
+        (two(&quoted(id), &quoted(id)), "state"),
+        (two(&quoted(&other), &quoted(id)), "state"),
+        (two(&quoted(id), &quoted(&other)), "null"),
+        (two("5", &quoted(id)), "state"),
+        (two(&format!("[{}]", quoted(id)), &quoted(id)), "state"),
+        (two(&quoted(id), "5"), "invalid"),
+        (two(&quoted(&format!("{bs}uD800")), &quoted(id)), "invalid"),
+        (two(&quoted(id), &quoted(&format!("{bs}uD800"))), "invalid"),
+        (two(&format!("[\"{bs}uDC00\"]"), &quoted(id)), "invalid"),
+        (two(&format!("{{\"{bs}uD800\":1}}"), &quoted(id)), "invalid"),
+        (two("1e400", &quoted(id)), "invalid"),
+        (two("-0.5e-400", &quoted(id)), "state"),
+        (two(&deep(126), &quoted(id)), "state"),
+        (two(&deep(127), &quoted(id)), "invalid"),
+        (safe_twice(&quoted(&format!("{bs}uD800"))), "invalid"),
+        (safe_twice("1e400"), "invalid"),
+        (safe_twice(&deep(126)), "state"),
+        (safe_twice(&deep(127)), "invalid"),
+        (
+            format!("{{\"{bs}uD800\":1,\"safe\":{S2},\"session\":\"{id}\"}}"),
+            "invalid",
+        ),
     ];
-    for (text, expected) in cases {
-        // serde_json's reading of the string agrees.
-        let reference = match serde_json::from_str::<Value>(&format!("\"{text}\"")) {
+    for (body, expected) in cases {
+        // The old parse's answer.
+        let reference = match serde_json::from_str::<Value>(&body) {
             Err(_) => "invalid",
-            Ok(Value::String(read)) if read == *session => "state",
-            Ok(_) => "null",
+            Ok(params) => match (params["safe"].as_u64(), &params["session"]) {
+                (Some(S2), Value::String(read)) if read == id => "state",
+                (Some(S2), Value::String(_)) => "null",
+                _ => "invalid",
+            },
         };
-        assert_eq!(reference, expected, "{text}");
-        let reply = h.board_raw("safe.message_state", S2, &text, None);
+        assert_eq!(reference, expected, "{body}");
+        let reply = h.board_body("safe.message_state", &body);
         match expected {
-            "state" => assert_eq!(reply, state, "{text}"),
-            "null" => assert_eq!(result(&reply), &Value::Null, "{text}"),
+            "state" => assert_eq!(reply, state, "{body}"),
+            "null" => assert_eq!(result(&reply), &Value::Null, "{body}"),
             _ => assert_eq!(
                 reply["error"]["code"], "invalid_argument",
-                "{text}: {reply}"
+                "{body}: {reply}"
             ),
         }
     }

@@ -187,22 +187,58 @@ struct Board<'a> {
     session: Option<&'a RawValue>,
 }
 
+/// Every member of a JSON object, in the text's order, a repeated name's
+/// each time, each value as its raw JSON in the request's bytes.
+struct Members<'a>(Vec<(String, &'a RawValue)>);
+
+impl<'de> serde::Deserialize<'de> for Members<'de> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Each;
+        impl<'de> serde::de::Visitor<'de> for Each {
+            type Value = Members<'de>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Members<'de>, A::Error> {
+                let mut members = Vec::new();
+                while let Some(member) = map.next_entry()? {
+                    members.push(member);
+                }
+                Ok(Members(members))
+            }
+        }
+        deserializer.deserialize_map(Each)
+    }
+}
+
+/// The containers a member's value may nest: serde_json reads at most 127
+/// nested (its limit, 128, is refused when reached), one of them the
+/// request's object.
+const NESTING: usize = 126;
+
 /// The request's members, an object holding only `allowed`, as
-/// [`super::members`] reads them (the last of a repeated name), but the
-/// `session` member is never parsed into a value: its text would be copied
-/// into a string freed unwiped (and an escaped one into serde_json's
-/// scratch as well). Skipping it as raw JSON copies nothing.
+/// [`super::members`] reads them into a value: every occurrence of each
+/// one read as that parse reads it, the last of a repeated name kept. But
+/// the `session` member is never parsed into a value: its text would be
+/// copied into a string freed unwiped (and an escaped one into
+/// serde_json's scratch as well). Skipped as raw JSON, each occurrence is
+/// checked in place ([`readable`]), and only the last one decoded.
 fn board_members<'a>(raw: Option<&'a str>, allowed: &[&str]) -> Result<Board<'a>, ErrorBody> {
-    let members: BTreeMap<String, &'a RawValue> =
-        serde_json::from_str(raw.unwrap_or("{}")).map_err(|_| invalid())?;
+    let members: Members<'a> = serde_json::from_str(raw.unwrap_or("{}")).map_err(|_| invalid())?;
     let mut board = Board {
         params: serde_json::Map::new(),
         session: None,
     };
-    for (name, value) in members {
+    for (name, value) in members.0 {
         if !allowed.contains(&name.as_str()) {
             return Err(invalid());
         }
+        readable(value)?;
         if name == "session" {
             board.session = Some(value);
         } else {
@@ -213,27 +249,65 @@ fn board_members<'a>(raw: Option<&'a str>, allowed: &[&str]) -> Result<Board<'a>
     Ok(board)
 }
 
-/// A session ID as presented: the `session` member's raw text, in the
-/// request's own bytes (a frame's, wiped when it drops), decoded straight
-/// into a buffer wiped when dropped, with no other copy. `Some` only for a
-/// string of 32 lowercase hex digits, escaped or not; any other string is
-/// an ID no session has. A missing or non-string one is `invalid_argument`,
-/// and so is a lone surrogate, as serde_json refuses one in a string value.
-fn presented(token: Option<&RawValue>) -> Result<Option<Zeroizing<[u8; ID_LEN]>>, ErrorBody> {
-    // A JSON string, as serde_json skipped it: quoted, valid escapes.
-    let mut rest = token
-        .map(RawValue::get)
-        .and_then(|token| token.strip_prefix('"'))
-        .and_then(|token| token.strip_suffix('"'))
-        .ok_or_else(invalid)?
-        .as_bytes();
-    let mut id = Zeroizing::new([0u8; ID_LEN]);
-    // The digits so far, while every character has been one.
-    let mut digits = Some(0usize);
+/// Whether a member's raw JSON (valid syntax: serde_json skipped it) is
+/// one its parse into a value reads in the request's object, which the skip
+/// doesn't check: no lone surrogate in a string or a key, no number out of
+/// range, and no more than [`NESTING`] containers deep. Copies no string.
+fn readable(raw: &RawValue) -> Result<(), ErrorBody> {
+    let text = raw.get();
+    let bytes = text.as_bytes();
+    let (mut at, mut depth) = (0usize, 0usize);
+    while let Some(&byte) = bytes.get(at) {
+        at += 1;
+        match byte {
+            b'[' | b'{' => {
+                depth += 1;
+                if depth > NESTING {
+                    return Err(invalid());
+                }
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            b'"' => {
+                let start = at;
+                // To the closing quote, the first not escaped.
+                while let Some(&byte) = bytes.get(at) {
+                    match byte {
+                        b'"' => break,
+                        b'\\' => at += 2,
+                        _ => at += 1,
+                    }
+                }
+                chars(bytes.get(start..at).ok_or_else(invalid)?, |_| {})?;
+                at += 1;
+            }
+            // A number: serde_json's own reading of it, which holds nothing
+            // secret.
+            b'-' | b'0'..=b'9' => {
+                let start = at - 1;
+                while bytes
+                    .get(at)
+                    .is_some_and(|b| matches!(b, b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9'))
+                {
+                    at += 1;
+                }
+                let number = text.get(start..at).ok_or_else(invalid)?;
+                serde_json::from_str::<Value>(number).map_err(|_| invalid())?;
+            }
+            // Whitespace, `,`, `:` and the literals.
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The characters of a JSON string, from its raw text between the quotes
+/// (valid escapes: serde_json skipped it), as serde_json reads them, each
+/// to `each`: an ASCII one as its byte, any other `None` (each byte of a
+/// multi-byte one, too). A lone surrogate, which serde_json refuses in a
+/// string, is `invalid_argument`.
+fn chars(mut rest: &[u8], mut each: impl FnMut(Option<u8>)) -> Result<(), ErrorBody> {
     while let Some((&first, tail)) = rest.split_first() {
         rest = tail;
-        // The character as an ASCII byte, `None` for any other (each byte
-        // of a multi-byte one is none of the digits either).
         let ascii = if first != b'\\' {
             Some(first)
         } else if let Some(tail) = rest.strip_prefix(b"u") {
@@ -255,6 +329,28 @@ fn presented(token: Option<&RawValue>) -> Result<Option<Zeroizing<[u8; ID_LEN]>>
             rest = rest.get(1..).ok_or_else(invalid)?;
             None
         };
+        each(ascii);
+    }
+    Ok(())
+}
+
+/// A session ID as presented: the `session` member's raw text, in the
+/// request's own bytes (a frame's, wiped when it drops), decoded straight
+/// into a buffer wiped when dropped, with no other copy. `Some` only for a
+/// string of 32 lowercase hex digits, escaped or not; any other string is
+/// an ID no session has. A missing or non-string one is `invalid_argument`,
+/// and so is a lone surrogate, as serde_json refuses one in a string value.
+fn presented(token: Option<&RawValue>) -> Result<Option<Zeroizing<[u8; ID_LEN]>>, ErrorBody> {
+    // A JSON string, as serde_json skipped it: quoted, valid escapes.
+    let text = token
+        .map(RawValue::get)
+        .and_then(|token| token.strip_prefix('"'))
+        .and_then(|token| token.strip_suffix('"'))
+        .ok_or_else(invalid)?;
+    let mut id = Zeroizing::new([0u8; ID_LEN]);
+    // The digits so far, while every character has been one.
+    let mut digits = Some(0usize);
+    chars(text.as_bytes(), |ascii| {
         let digit = ascii.and_then(|b| match b {
             b'0'..=b'9' => Some(b - b'0'),
             b'a'..=b'f' => Some(b - b'a' + 10),
@@ -269,7 +365,7 @@ fn presented(token: Option<&RawValue>) -> Result<Option<Zeroizing<[u8; ID_LEN]>>
             }
             _ => None,
         };
-    }
+    })?;
     Ok((digits == Some(2 * ID_LEN)).then_some(id))
 }
 
