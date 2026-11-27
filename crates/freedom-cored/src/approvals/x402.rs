@@ -51,12 +51,13 @@
 //!   another hold) counts the open holds as spent, so open payments can't
 //!   together pass the cap. The charge is written only once fc-ledger has
 //!   checked the device's signature, and before the signature leaves the
-//!   core; a charge the file lacks releases nothing (`x402-at-sign`). So a
-//!   crash between that write and the reply charges once with nothing
-//!   paid, the safe way round, and a restart before it leaves nothing
-//!   charged and nothing to give back. Every other way through, the vault
-//!   key's inline signature and #392's device payment, writes the charge
-//!   before anything is signed or handed out, as before.
+//!   core; a charge the file lacks, or holds unflushed, releases nothing
+//!   (`x402-at-sign`). So a crash between that write and the reply
+//!   charges once with nothing paid, the safe way round, and a restart
+//!   before it leaves nothing charged and nothing to give back. Every
+//!   other way through, the vault key's inline signature and #392's
+//!   device payment, writes the charge before anything is signed or
+//!   handed out, as before.
 //! - `x402.settle { reservation, typed_data }` (`shell`, D2): main's own
 //!   rebuild of that authorization, `{ domain, types, primaryType, message
 //!   }`, which must equal the reserved one as JSON values (the same members
@@ -75,7 +76,10 @@
 //!   nothing written and spends the reservation, and says in the error's
 //!   `refunded` whether its room is back on its cap, as a refused `{
 //!   signature }` says it of a charge given back (a cancel's error carries
-//!   no data). While the device signs, the reservation is the
+//!   no data). A write renamed into place whose directory flush failed is
+//!   refused too (`storage`, `durable: false`), the reservation spent, but
+//!   its charge stays counted, in memory and in the file (`refunded:
+//!   false`). While the device signs, the reservation is the
 //!   operation's alone: no other settle finds it, and none is dropped for
 //!   room. A Ledger's reservation made with `now_s` is settled only so (or
 //!   `withheld`), and one made without, as a phone's, only with `{
@@ -295,13 +299,20 @@ impl X402State {
     }
 
     fn reserve(&mut self, reservation: Reservation) -> Result<Zeroizing<String>, ErrorBody> {
-        let mut bytes = Zeroizing::new([0u8; 16]);
-        OsRng
-            .try_fill_bytes(&mut *bytes)
-            .map_err(|_| crate::vault::internal())?;
-        let id = Zeroizing::new(fc_evm::to_hex(&*bytes)[2..].to_owned());
+        let id = Self::draw_id()?;
         self.keep(id.clone(), reservation);
         Ok(id)
+    }
+
+    /// A new reservation's ID, drawn from the OS's RNG (which
+    /// `FREEDOM_CORED_TEST_X402_ID_FAILS` fails, in the `testhooks` build).
+    fn draw_id() -> Result<Zeroizing<String>, ErrorBody> {
+        let mut bytes = Zeroizing::new([0u8; 16]);
+        let drawn = OsRng.try_fill_bytes(&mut *bytes).is_ok();
+        if !drawn || crate::testhooks::x402_id_fails() {
+            return Err(crate::vault::internal());
+        }
+        Ok(Zeroizing::new(fc_evm::to_hex(&*bytes)[2..].to_owned()))
     }
 
     /// Keeps reservation `id`, the newest, dropping the oldest for room: a
@@ -756,6 +767,15 @@ impl Approvals {
                 "requirements: too large a payment to hold for a device",
             ));
         }
+        // A device's reservation ID, the second draw from the OS's RNG, and
+        // its typed data's text, before any charge is held or written: what
+        // can fail on the way to its reservation fails with nothing held
+        // (Codex's round 2 on #532). The vault key's ID is drawn once it
+        // has signed, as before.
+        let handed = match key {
+            Some(_) => None,
+            None => Some((X402State::draw_id()?, raw(built.typed_data().to_owned())?)),
+        };
         // A cap's charge is written before anything is signed or handed to
         // a device: one the file lacks is not applied, and nothing is
         // signed (`x402-at-sign`). A Ledger payment made with `now_s` only
@@ -777,42 +797,50 @@ impl Approvals {
             }
         }
         let grant = fields.get("grant").filter(|g| !g.is_null());
-        let Some(key) = key else {
+        if let Some((reservation, typed_data)) = handed {
             // A device's payment: the typed data and its hash, for the
             // device to sign; a token's grant and charge wait for it.
+            // Nothing from the charge to the reservation kept can fail.
             let charged = held.is_some() || hold.is_some();
             let durable = held.as_ref().is_none_or(|held| held.1);
             let mut reply = json!({
                 "device": {
-                    "typed_data": raw(built.typed_data().to_owned())?,
+                    "typed_data": typed_data,
                     "hash": fc_evm::to_hex(&built.digest),
                 },
                 "accept_index": index,
                 "charged": charged,
             });
+            reply["reservation"] = json!(reservation.as_str());
             let token_grant = match authority {
                 Authority::Token(_) => Some(grant.cloned()),
                 Authority::Cap => None,
             };
             let by_cap = matches!(authority, Authority::Cap);
-            let reservation = self.x402.reserve(Reservation {
-                held: held.map(|(held, _)| held),
-                hold,
-                by_cap,
-                device: Some(Box::new(Device {
-                    built,
-                    address: from,
-                    origin,
-                    tuple,
-                    token_grant,
-                    form: now_s.map_or(Form::Signature, |_| Form::Ledger { account }),
-                })),
-            })?;
-            reply["reservation"] = json!(reservation.as_str());
+            self.x402.keep(
+                reservation,
+                Reservation {
+                    held: held.map(|(held, _)| held),
+                    hold,
+                    by_cap,
+                    device: Some(Box::new(Device {
+                        built,
+                        address: from,
+                        origin,
+                        tuple,
+                        token_grant,
+                        form: now_s.map_or(Form::Signature, |_| Form::Ledger { account }),
+                    })),
+                },
+            );
             if !durable {
                 reply["durable"] = json!(false);
             }
             return secret_reply(id, &reply, 0);
+        }
+        // Only a device's payment has no key, and it has gone above.
+        let Some(key) = key else {
+            return Err(crate::vault::internal());
         };
         let signature = sign(&key, &built.digest).map_err(|_| crate::vault::internal())?;
         drop(key);
@@ -950,9 +978,13 @@ impl Approvals {
     /// 0016, D2): only to the cap it was held against, at the clock it was
     /// held at, the other open holds counted; and applied only once
     /// written (`x402-at-sign`), so a charge the file lacks releases
-    /// nothing. The charge and whether its write was flushed; or the
-    /// refusal, with whether the hold's room is back on its cap.
-    fn write_hold(&mut self, hold: Hold) -> Result<(Held, bool), (ErrorBody, bool)> {
+    /// nothing. A write renamed into place whose directory flush failed
+    /// releases nothing either (Codex's round 2 on #532): a power loss
+    /// could bring the old `spentAmount` back while the signature exists.
+    /// The charge stays counted then, in memory and in the renamed file,
+    /// which may well survive, and no room is given back. The charge; or
+    /// the refusal, with whether the hold's room is back on its cap.
+    fn write_hold(&mut self, hold: Hold) -> Result<Held, (ErrorBody, bool)> {
         if !self.x402.stands(&hold) {
             return Err((
                 not_authorized(
@@ -985,7 +1017,17 @@ impl Approvals {
                 true,
             )
         })?;
-        Ok((Held { charge, generation }, written.durable))
+        if !written.durable {
+            let error = ErrorBody::new(
+                ErrorCode::Storage,
+                "The permission file could not be written durably",
+            )
+            .with_data(
+                json!({ "store": StoreKind::X402.name(), "applied": true, "durable": false }),
+            );
+            return Err((error, false));
+        }
+        Ok(Held { charge, generation })
     }
 
     /// The grant a token bound: `{ cap_amount, window_seconds }` for the
@@ -1296,20 +1338,18 @@ impl Approvals {
         let Some(device) = reservation.device.take() else {
             return Err(self.x402_spent(reservation, crate::vault::internal()));
         };
-        // A cap's held charge, written now, before anything of the
-        // signature leaves: one the file lacks releases nothing, and the
-        // reservation is spent. A crash between this write and the reply
-        // charges once with nothing paid, the safe way round.
-        let mut durable = true;
+        // A cap's held charge, written durably now, before anything of the
+        // signature leaves: one the file lacks, or whose write wasn't
+        // flushed, releases nothing, and the reservation is spent. A crash
+        // between this write and the reply charges once with nothing paid,
+        // the safe way round.
         if let Some(hold) = self.x402.release(reservation.hold.take()) {
             match self.write_hold(hold) {
-                Ok((held, flushed)) => {
-                    reservation.held = Some(held);
-                    durable &= flushed;
-                }
+                Ok(held) => reservation.held = Some(held),
                 Err((error, refunded)) => return Err(with_refunded(error, refunded)),
             }
         }
+        let mut durable = true;
         let payload = device.built.payload(&signature);
         let mut grant_reply = None;
         if let Some(grant) = &device.token_grant {

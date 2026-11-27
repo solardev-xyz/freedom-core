@@ -30,8 +30,11 @@
 //!   `refunded` as it should be; a token's payment that fails writes no
 //!   grant and charges nothing.
 //! - **The charge before the signature:** a signed payment's charge is in
-//!   the file when its payload arrives; with the write failing, or the cap
-//!   revoked while the device signs, no signature leaves the core.
+//!   the file when its payload arrives; with the write failing, its
+//!   directory flush failing (the charge kept), or the cap revoked while
+//!   the device signs, no signature leaves the core.
+//! - **A failed reservation draw** (Codex's round 2 on #532): the ID drawn
+//!   after the nonce failing holds nothing, however often it fails.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -1084,8 +1087,10 @@ fn open_holds_count_against_the_cap() {
 /// signature: the file has it when the payload arrives; with the cap file's
 /// write failing, the reply carries no payload and no signature, the
 /// reservation is spent, nothing is written, and `refunded` says the room
-/// is back; with the cap revoked while the device signs, `cap_changed`,
-/// nothing released, and `refunded: false`.
+/// is back; with its directory flush failing after the rename, no payload
+/// and no signature either, the reservation spent and the charge kept,
+/// `refunded: false`; with the cap revoked while the device signs,
+/// `cap_changed`, nothing released, and `refunded: false`.
 #[test]
 fn the_charge_is_written_before_the_signature_leaves() {
     let root = tempfile::tempdir().unwrap();
@@ -1140,6 +1145,50 @@ fn the_charge_is_written_before_the_signature_leaves() {
         &settle(&mut core, &mut id, &reservation, "withheld"),
         "invalid_argument",
         None,
+    );
+    // Codex's round 2: the write renamed into place, and its directory
+    // flush failing, once the device has signed. No signature or payload
+    // leaves, the reservation is spent, and the charge stays counted, in
+    // the file and in memory, with no room given back.
+    let (reservation, _) = handed(&pay_cap(&mut core, &mut id, case, now));
+    let parent = settle_typed(&mut core, &mut id, &reservation, vector);
+    let (waiting, mut main) = held_at_confirm(&mut core, parent, hash);
+    std::fs::write(&hook, "x402:flush\n").unwrap();
+    respond_apdu(&mut core, &waiting, &mut main);
+    let response = next(&mut core);
+    assert_eq!(response["id"], parent, "{response}");
+    assert_eq!(response["error"]["code"], "storage", "{response}");
+    assert_eq!(response["error"]["data"]["durable"], false, "{response}");
+    assert_eq!(response["error"]["data"]["refunded"], false, "{response}");
+    assert!(response.get("result").is_none());
+    assert!(!response.to_string().contains(&signature[2..]));
+    std::fs::remove_file(&hook).unwrap();
+    assert_eq!(spent(&core), "10000");
+    refused(
+        &settle(&mut core, &mut id, &reservation, "withheld"),
+        "invalid_argument",
+        None,
+    );
+    // Memory counts it too: the next signed payment's write has both.
+    let (reservation, _) = handed(&pay_cap(&mut core, &mut id, case, now));
+    let parent = settle_typed(&mut core, &mut id, &reservation, vector);
+    let mut main = Main::new(hash);
+    let (_, response) = drive(&mut core, parent, |asked| main.answer(asked));
+    assert_eq!(result(&response.unwrap())["charged"], true);
+    assert_eq!(spent(&core), "20000");
+    assert_eq!(
+        result(&settle(&mut core, &mut id, &reservation, "withheld"))["refunded"],
+        true
+    );
+    assert_eq!(spent(&core), "10000");
+    // Nothing of the refused signatures reached main in an event either:
+    // the one signed payment's went out in its reply alone.
+    assert!(
+        core.events
+            .iter()
+            .all(|event| !event.to_string().contains(&signature[2..])),
+        "{:?}",
+        core.events
     );
     // The cap revoked while the device signs: nothing released, and no
     // room back on a cap that is gone.
@@ -1197,4 +1246,43 @@ fn a_reservation_dropped_for_room_drops_its_hold() {
         true
     );
     assert_eq!(spent(&core), "0");
+}
+
+/// Codex's round 2 on #532: the reservation's ID, drawn from the OS's RNG
+/// after the payment's nonce, fails (`FREEDOM_CORED_TEST_X402_ID_FAILS`)
+/// before any charge is held, so the failure holds nothing. After 65 such
+/// failures, more than the 64 reservations kept, the cap file is as it was
+/// and the whole cap of two payments is there, and no third.
+#[test]
+fn a_failed_reservation_draw_holds_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let mut core = start_env(
+        root.path(),
+        true,
+        Some(cap_of("20000", "0")),
+        &[("FREEDOM_CORED_TEST_X402_ID_FAILS", "65")],
+    );
+    let before = cap_file(&core).unwrap();
+    let mut id = 10;
+    let now = vector_now();
+    let case = device::case(FORMS[0]);
+    for _ in 0..65 {
+        refused(&pay_cap(&mut core, &mut id, case, now), "internal", None);
+    }
+    assert_eq!(cap_file(&core).unwrap(), before);
+    let kept: Vec<String> = (0..2)
+        .map(|_| handed(&pay_cap(&mut core, &mut id, case, now)).0)
+        .collect();
+    refused(
+        &pay_cap(&mut core, &mut id, case, now),
+        "not_authorized",
+        Some("cap"),
+    );
+    for reservation in &kept {
+        assert_eq!(
+            result(&settle(&mut core, &mut id, reservation, "withheld"))["refunded"],
+            true
+        );
+    }
+    assert_eq!(cap_file(&core).unwrap(), before);
 }
