@@ -15,6 +15,12 @@
 //! - **`hold-lock`** holds the gate until stdin closes: profile delete,
 //!   reset and `ipfs:reset` run under it.
 //!
+//! **Every command, first:** SQLite's out-of-memory hook
+//! ([`freedom_ipfs_store::fail_stop_on_oom`]; design 0010, "The memory
+//! cap"), the process's one unsafe call, before any thread or store. From
+//! then on an allocation SQLite can't make ends the process with exit 71
+//! (`oom.rs`).
+//!
 //! **`serve`, in order** (design 0010, "The recommendation", step 1):
 //! 1. the panic hook, before any other work, and the entry's one re-exec if
 //!    a descriptor is inherited ([`confine::clean_entry`]);
@@ -28,13 +34,15 @@
 //!    stdin and stdout, until it ends and every instance is torn down.
 //!    Lines before logging's writer are written directly.
 //!
-//! **Exit codes** (0001's, and 0007's 70 and 77): 0 after `ipfs.shutdown`,
-//! stdin EOF or the parent gone; 64 for usage; 70 for a panic outside a
-//! request, or a teardown that couldn't prove quiescence; 74 for storage; 75
-//! when the gate is held; 76 for a protocol error, the handshake's deadline
-//! or the writer stall; 77 when confinement refuses the process
-//! (`confinement`: a thread or descriptor it didn't expect, or its own rules
-//! refused).
+//! **Exit codes** (0001's, and 0007's 70, 71 and 77): 0 after
+//! `ipfs.shutdown`, stdin EOF or the parent gone; 64 for usage; 70 for a
+//! panic outside a request, or a teardown that couldn't prove quiescence; 71
+//! for out of memory (`out_of_memory`: SQLite couldn't allocate, under the
+//! memory cap); 74 for storage; 75 when the gate is held; 76 for a protocol
+//! error, the handshake's deadline or the writer stall; 77 when confinement
+//! refuses the process (`confinement`: a thread or descriptor it didn't
+//! expect, or its own rules refused), or SQLite's out-of-memory hook is
+//! refused (something used SQLite first).
 
 mod args;
 mod budget;
@@ -44,6 +52,7 @@ mod dns;
 mod instances;
 mod nat64;
 mod network;
+mod oom;
 mod params;
 mod progress;
 mod requests;
@@ -81,8 +90,43 @@ const PROCESS_BLOCKING: usize = 32;
 
 fn main() -> ExitCode {
     let started = Instant::now();
-    // First, before any other work (0007, "Panics").
+    // A no-op unless a test asks: SQLite used first, so the hook below is
+    // refused (`testhooks.rs`, FREEDOM_IPFSD_TEST_SQLITE_FIRST).
+    testhooks::sqlite_first();
+    // The process's one unsafe call (AGENTS.md rule 6, and Cargo.toml's
+    // lints; tests/unsafe_code.rs holds the crate to it): SQLite's
+    // allocator is process-global, and `sqlite3_config`, which sets it, has
+    // no sound safe form. With it, an allocation SQLite can't make ends the
+    // process with exit 71 at once, before any statement fails with it
+    // (design 0010, "The memory cap"; `oom.rs`).
+    #[allow(unsafe_code)]
+    // SAFETY: `fail_stop_on_oom` must run before any thread starts and
+    // before any SQLite use in the process. Both hold. It is the first call
+    // in `main`, and Rust's runtime starts no thread before `main`, so this
+    // is the only thread. Nothing has used SQLite: the panic hook, the
+    // entry's re-exec, hardening and confinement come after this, as does
+    // every thread the process starts (logging's writer, the runtimes, the
+    // connection's) and every store it opens, all from `run`. The entry's
+    // re-exec runs `main` again in a new image, where the same holds. The
+    // one exception is the test hook above, in a test build alone and only
+    // when a test sets its variable: it opens and closes a store on this
+    // thread first, which this call then sees (the store's state lock) and
+    // refuses with `TooLate` before any FFI.
+    let fail_stop = unsafe { freedom_ipfs_store::fail_stop_on_oom() };
+    // First after it, before any other work (0007, "Panics").
     fc_service::panic::install();
+    // A refused hook ends the process as a confinement step refused does,
+    // with no restart (exit 77): only a fault in this program, something
+    // using SQLite first, gets here, and it would again.
+    if let Err(refused) = fail_stop {
+        log::error(
+            "SQLite's out-of-memory hook is refused: the process ends",
+            json!({ "reason": refused.to_string() }),
+        );
+        fc_service::exit::claim();
+        log::finish(Duration::from_millis(500));
+        return ExitCode::from(Exit::Confinement.code());
+    }
     // Before anything opens a descriptor (0010, step 1): returns only when
     // nothing needed dropping, or this is the one re-exec, or it failed.
     let entry = confine::clean_entry();
@@ -140,8 +184,9 @@ fn run(started: Instant, entry: &confine::Entry) -> Exit {
                     return Exit::from(&e);
                 }
             };
-            let policy =
+            let mut policy =
                 confinement::policy(vec![gate.data_dir.clone()], &network, gate.descriptors());
+            testhooks::memory_cap(&mut policy);
             let (confinement, dns) = match confined(&policy, &network) {
                 Ok(confined) => confined,
                 Err(exit) => return exit,
@@ -159,7 +204,8 @@ fn run(started: Instant, entry: &confine::Entry) -> Exit {
             parent_pid,
         } => {
             // No lock and no directory: nothing writable, nothing kept.
-            let policy = confinement::policy(Vec::new(), &network, Vec::new());
+            let mut policy = confinement::policy(Vec::new(), &network, Vec::new());
+            testhooks::memory_cap(&mut policy);
             let (confinement, dns) = match confined(&policy, &network) {
                 Ok(confined) => confined,
                 Err(exit) => return exit,
