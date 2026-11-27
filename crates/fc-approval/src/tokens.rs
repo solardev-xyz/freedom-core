@@ -801,6 +801,224 @@ mod tests {
         );
     }
 
+    /// Design 0016's `safe-send` (D6), `{ safe, chain_id, safe_tx,
+    /// safe_tx_hash }`: the SafeTx the core built, as `safe.prepare`
+    /// answers it, is bound whole. A token minted for it is refused for the
+    /// SafeTx with any one of its ten fields changed, for another Safe and
+    /// another chain (each with its own hash, or the minted one), and for
+    /// another hash. A field Freedom never builds gets no binding at all.
+    #[test]
+    fn a_built_safe_send_binds_all_ten_fields_and_the_address() {
+        use fc_evm::U256;
+        let account = json!(1_000_001);
+        let safe = [0x5a; 20];
+        let tx = fc_safe::SafeTx::new([0x33; 20], U256::from_u64(5), vec![0xab, 0xcd], 7).unwrap();
+        // The payload for `fields` on `safe` and `chain`, with the hash of
+        // those fields where they read (`own`), or `hash`.
+        let payload = |safe: &[u8; 20], chain: u64, fields: &Value, hash: Option<[u8; 32]>| {
+            let hash = hash.unwrap_or_else(|| {
+                let tx = fc_safe::SafeTx::from_fields(fields).unwrap();
+                fc_safe::safe_tx_hash(
+                    chain,
+                    safe,
+                    tx.to(),
+                    tx.value(),
+                    tx.data(),
+                    &U256::from_u64(tx.nonce()),
+                )
+                .unwrap()
+            });
+            json!({
+                "safe": fc_evm::checksum_address(safe),
+                "chain_id": chain.to_string(),
+                "safe_tx": fields,
+                "safe_tx_hash": fc_evm::to_hex(&hash),
+            })
+        };
+        let minted_hash = tx.hash(&safe).unwrap();
+        let confirmed = payload(&safe, 100, &tx.fields(), None);
+        assert_eq!(confirmed["safe_tx_hash"], fc_evm::to_hex(&minted_hash));
+        let mut source = rng();
+        let mint = |store: &mut Tokens, source: &mut TestRng| {
+            store
+                .issue(
+                    &request(Kind::SafeSend, &account, &confirmed, None),
+                    0,
+                    source,
+                )
+                .unwrap()
+                .token
+                .to_text()
+        };
+        // The confirmed SafeTx spends it, its texts in any form.
+        let mut store = Tokens::new(LIMITS);
+        let token = mint(&mut store, &mut source);
+        let mut same = confirmed.clone();
+        same["chain_id"] = json!("0x64");
+        same["safe"] = json!(fc_evm::to_hex(&safe));
+        same["safe_tx"]["nonce"] = json!("7");
+        same["safe_tx"]["value"] = json!("0x5");
+        same["safe_tx_hash"] = json!(
+            fc_evm::to_hex(&minted_hash)
+                .to_uppercase()
+                .replace("0X", "0x")
+        );
+        let spent = store
+            .spend(&token, &request(Kind::SafeSend, &account, &same, None), 0)
+            .unwrap();
+        assert_eq!(spent.kind, Kind::SafeSend);
+        // The four fields Freedom varies, each changed with its own hash, or
+        // with the minted one.
+        let other = "0x3434343434343434343434343434343434343434";
+        for (name, value) in [
+            ("to", json!(other)),
+            ("value", json!("6")),
+            ("data", json!("0xabce")),
+            ("nonce", json!(8)),
+        ] {
+            let mut fields = tx.fields();
+            fields[name] = value.clone();
+            for hash in [None, Some(minted_hash)] {
+                let token = mint(&mut store, &mut source);
+                let changed = payload(&safe, 100, &fields, hash);
+                let refused = store
+                    .spend(
+                        &token,
+                        &request(Kind::SafeSend, &account, &changed, None),
+                        0,
+                    )
+                    .unwrap_err();
+                match hash {
+                    None => assert_eq!(refused, Refusal::Mismatch, "{name} {value}"),
+                    Some(_) => assert!(matches!(refused, Refusal::Invalid(_)), "{name}"),
+                }
+                assert_eq!(store.outstanding(), 0, "burnt: {name}");
+            }
+        }
+        // The six Freedom fixes: a SafeTx with any other is never bound.
+        for (name, value) in [
+            ("operation", json!(1)),
+            ("safeTxGas", json!("1")),
+            ("baseGas", json!("1")),
+            ("gasPrice", json!("1")),
+            ("gasToken", json!(other)),
+            ("refundReceiver", json!(other)),
+        ] {
+            let mut fields = tx.fields();
+            fields[name] = value.clone();
+            let changed = payload(&safe, 100, &fields, Some(minted_hash));
+            let token = mint(&mut store, &mut source);
+            let refused = store
+                .spend(
+                    &token,
+                    &request(Kind::SafeSend, &account, &changed, None),
+                    0,
+                )
+                .unwrap_err();
+            assert!(matches!(refused, Refusal::Invalid(_)), "{name}");
+            assert!(
+                store
+                    .issue(
+                        &request(Kind::SafeSend, &account, &changed, None),
+                        0,
+                        &mut source
+                    )
+                    .is_err(),
+                "{name}"
+            );
+        }
+        // Another Safe, another chain: each with its own hash, or the minted.
+        for (at, chain) in [([0x5b; 20], 100), (safe, 1)] {
+            for hash in [None, Some(minted_hash)] {
+                let token = mint(&mut store, &mut source);
+                let changed = payload(&at, chain, &tx.fields(), hash);
+                let refused = store
+                    .spend(
+                        &token,
+                        &request(Kind::SafeSend, &account, &changed, None),
+                        0,
+                    )
+                    .unwrap_err();
+                match hash {
+                    None => assert_eq!(refused, Refusal::Mismatch, "{chain}"),
+                    Some(_) => assert!(matches!(refused, Refusal::Invalid(_)), "{chain}"),
+                }
+            }
+        }
+        // Another hash, and none: no binding.
+        let mut wrong = confirmed.clone();
+        wrong["safe_tx_hash"] = json!(fc_evm::to_hex(&[0x11; 32]));
+        assert!(
+            store
+                .issue(
+                    &request(Kind::SafeSend, &account, &wrong, None),
+                    0,
+                    &mut source
+                )
+                .is_err()
+        );
+        let mut missing = confirmed.clone();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .shift_remove("safe_tx_hash");
+        assert!(
+            store
+                .issue(
+                    &request(Kind::SafeSend, &account, &missing, None),
+                    0,
+                    &mut source
+                )
+                .is_err()
+        );
+        // Neither form is spent as the other: APR-4's for the same call.
+        let legacy = json!({
+            "safe": fc_evm::to_hex(&safe),
+            "chain_id": "100",
+            "tx": { "to": fc_evm::to_hex(tx.to()), "value": "5", "data": "0xabcd" },
+        });
+        let token = mint(&mut store, &mut source);
+        assert_eq!(
+            store
+                .spend(&token, &request(Kind::SafeSend, &account, &legacy, None), 0)
+                .unwrap_err(),
+            Refusal::Mismatch
+        );
+        let token = store
+            .issue(
+                &request(Kind::SafeSend, &account, &legacy, None),
+                0,
+                &mut source,
+            )
+            .unwrap()
+            .token
+            .to_text();
+        assert_eq!(
+            store
+                .spend(
+                    &token,
+                    &request(Kind::SafeSend, &account, &confirmed, None),
+                    0
+                )
+                .unwrap_err(),
+            Refusal::Mismatch
+        );
+        // Both members at once are neither form.
+        let mut both = confirmed.clone();
+        both["tx"] = legacy["tx"].clone();
+        assert!(
+            store
+                .issue(
+                    &request(Kind::SafeSend, &account, &both, None),
+                    0,
+                    &mut source
+                )
+                .is_err()
+        );
+        assert!(crate::is_built_safe_send(&confirmed));
+        assert!(!crate::is_built_safe_send(&legacy));
+    }
+
     #[test]
     fn the_nonce_is_bound_only_by_a_replacement() {
         let account = json!(0);

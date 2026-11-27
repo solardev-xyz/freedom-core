@@ -61,7 +61,7 @@ pub mod x402;
 
 pub use bind::{
     Binding, Handle, Limits, MAX_ACCOUNT, MAX_CHAIN_ID, MAX_CLOSE_HASHES, MAX_NONCE, Page, Request,
-    bind,
+    bind, is_built_safe_send,
 };
 pub use error::{Error, Refusal};
 pub use kind::{Kind, PageRule, Presented, Scope};
