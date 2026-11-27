@@ -69,7 +69,7 @@ use crate::dweb::thread as dweb;
 use crate::eip1193::Connects;
 use crate::exit::Exit;
 use crate::keystore::client::DesktopKeyStore;
-use crate::ledger::lane::{Ended, Lane};
+use crate::ledger::lane::{Ended, Lane, Turn};
 use crate::ledger::methods::{self as ledger, Finish, Then};
 use crate::requests::{self, Owner, Requests};
 use crate::secrets::Secrets;
@@ -1135,7 +1135,7 @@ struct Core {
     /// A page's connects waiting on main (design 0012, APR-5c).
     connects: Connects,
     /// The device lane (design 0016): the Ledger operations of `ledger.*`
-    /// and their `shell.ledger_apdu`s.
+    /// and of `sign.*` with a Ledger key, and their `shell.ledger_apdu`s.
     ledger: Lane<Then>,
     /// The dweb thread, once the hello has settled (design 0009).
     dweb: Option<dweb::Handle>,
@@ -2241,7 +2241,8 @@ impl Core {
     }
 
     /// The Ledger operations that ended: each parent answered, or its
-    /// result handed to the accounts store first.
+    /// result handed to the accounts store first, or a signature to its
+    /// authorization's end (design 0016, L4).
     fn ledger_ended(&mut self, ended: Vec<Ended<Then>>) -> Flow {
         for ended in ended {
             let flow = match ledger::finish(ended) {
@@ -2249,6 +2250,10 @@ impl Core {
                 Finish::Answer(id, Err(error)) => self.error(id, error),
                 Finish::Store(id, op) => {
                     let outs = self.vault.ledger_end(id, op);
+                    self.dispatch(outs)
+                }
+                Finish::Signed(id, pending, signed) => {
+                    let outs = self.vault.ledger_signed(id, *pending, signed);
                     self.dispatch(outs)
                 }
             };
@@ -2498,6 +2503,19 @@ impl Core {
                     } else {
                         Flow::Exit(Exit::Internal)
                     }
+                }
+                // A Ledger key's signature, authorized (design 0016, L4): its
+                // operation waits its turn on the device lane.
+                Out::Ledger(id, device) => {
+                    let crate::signing::Device { operation, pending } = *device;
+                    let ended = self.ledger.submit(
+                        id,
+                        operation,
+                        Then::Sign(Box::new(pending)),
+                        Turn::Wait,
+                        Instant::now(),
+                    );
+                    self.ledger_ended(ended)
                 }
                 // A user's Swarm grant change (design 0015, D17), after the
                 // reply and the events that made it: the swarm thread, which

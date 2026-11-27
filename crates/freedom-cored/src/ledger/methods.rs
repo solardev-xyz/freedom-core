@@ -32,6 +32,9 @@
 //!   store (`addLedgerWallet`'s, `matched`) and answers `{ path, address,
 //!   wallet }`, with `durable: false` where the write wasn't flushed; until
 //!   then it answers `{ path, address }`, and main writes exactly those.
+//! - **`sign.*` with a Ledger key** (L4) comes here from
+//!   [`crate::signing::prepare`], authorized, as [`Then::Sign`], and its
+//!   signature goes back to [`crate::signing::finish`] ([`Finish::Signed`]).
 //! - **A device's failure** is `device_failed` with `data.ledger`, its
 //!   `LEDGER_*` code (0016's API); a request the lane or fc-ledger refuses
 //!   before its first APDU is `invalid_argument`. The parent's cancel ends
@@ -64,6 +67,9 @@ pub enum Then {
     /// `ledger.add`: the record's name, and whether the core writes the
     /// record (`vault_meta` moved).
     Add { name: JsValue, moved: bool },
+    /// `sign.*` with a Ledger key (L4): what its reply needs once signed
+    /// ([`crate::signing::finish`]).
+    Sign(Box<crate::signing::Pending>),
 }
 
 /// What the event loop does with an operation's end.
@@ -73,6 +79,10 @@ pub enum Finish {
     /// The parent's answer once the accounts store has kept its result, on
     /// the vault's queue ([`crate::vault::Vault::ledger_end`]).
     Store(u64, Op),
+    /// A Ledger key's signature, checked by fc-ledger: the parent's answer
+    /// once its authorization has done what it does on a signature
+    /// ([`crate::vault::Vault::ledger_signed`]).
+    Signed(u64, Box<crate::signing::Pending>, Signed),
 }
 
 /// Where the records discovery's check reads stand: none before
@@ -219,6 +229,9 @@ pub fn finish(ended: Ended<Then>) -> Finish {
             } else {
                 Finish::Answer(parent, Ok(json!({ "path": path, "address": address })))
             }
+        }
+        (Then::Sign(pending), signed @ (Signed::Transaction(_) | Signed::Signature(_))) => {
+            Finish::Signed(parent, pending, signed)
         }
         // An operation ends with its own kind of result.
         _ => Finish::Answer(parent, Err(crate::vault::internal())),
