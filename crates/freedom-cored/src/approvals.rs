@@ -2353,7 +2353,42 @@ impl Approvals {
             ));
         }
         let account = account(fields.get("account"), "account")?;
-        let payload = &fields["payload"];
+        let approved = self.standing_message(&page, account, &fields["payload"], clocks)?;
+        let holder = Holder::Page {
+            origin: page.origin,
+            frame: page.frame,
+            navigation: page.navigation,
+        };
+        let safe = self
+            .safes
+            .record(holder, approved, &mut OsRng)
+            .map_err(approval_error)?
+            .to_text();
+        secret_reply(
+            id,
+            &SpentReply {
+                bound: true,
+                safe: Some(&safe),
+                receipt: None,
+            },
+            0,
+        )
+    }
+
+    /// The site's standing rule for a Safe message (design 0012, "The
+    /// rules"), for the page `page` and the Safe at wallet index `account`:
+    /// `payload` is the `safe-message` payload, `{ safe, chain_id, method,
+    /// params }`. The rule is decided by the core's own grant and counted
+    /// in Q9's rate; `not_authorized` with the rule's reason when none
+    /// covers it. `approval.spend { standing }`'s and `safe.message_start`'s
+    /// (design 0016, SAFE-2's S5).
+    fn standing_message(
+        &mut self,
+        page: &PageContext,
+        account: u32,
+        payload: &Value,
+        clocks: Clocks,
+    ) -> Result<Approved, ErrorBody> {
         let signed = fc_approval::safe::standing_signed(payload, limits().max_view_len)
             .map_err(approval_error)?;
         let approved = Approved::message(payload).map_err(approval_error)?;
@@ -2379,26 +2414,59 @@ impl Approvals {
                 "no standing rule covers this request",
             ));
         }
-        drop(store);
-        let holder = Holder::Page {
-            origin: page.origin,
-            frame: page.frame,
-            navigation: page.navigation,
+        Ok(approved)
+    }
+
+    /// `safe.message_start`'s `authorization` (design 0016, "Messages" and
+    /// "Approvals: enforced"; SAFE-2's S5), for the Safe at wallet index
+    /// `account` and the `safe-message` payload `payload` (`{ safe,
+    /// chain_id, method, params }`, the Safe's address and chain from its
+    /// record and the page's request): `{ token, handle }`, a
+    /// `safe-message` token minted for that request, spent under `page`
+    /// for the page and the handle it was minted for; or `{ standing: {
+    /// paused? } }`, the site's rule, checked and counted as `approval.spend
+    /// { standing }` checks it. Either is a page's alone. It gives no Safe
+    /// approval: the core signs the owners' signatures itself. A token is
+    /// burnt whatever the outcome.
+    pub fn spend_safe_message(
+        &mut self,
+        context: &Context,
+        authorization: &Value,
+        account: u64,
+        payload: &Value,
+        clocks: Clocks,
+    ) -> Result<(), ErrorBody> {
+        let page = match (context.caller, page_context(context)?) {
+            (CallerKind::Page, Some(page)) => page.clone(),
+            _ => return Err(forbidden("a Safe message is a page's")),
         };
-        let safe = self
-            .safes
-            .record(holder, approved, &mut OsRng)
-            .map_err(approval_error)?
-            .to_text();
-        secret_reply(
-            id,
-            &SpentReply {
-                bound: true,
-                safe: Some(&safe),
-                receipt: None,
-            },
-            0,
-        )
+        let index = json!(account);
+        if authorization.get("standing").is_some() {
+            let fields = object(authorization, &["standing"], &[])?;
+            let standing = object(&fields["standing"], &[], &["paused"])?;
+            optional_bool(standing, "paused")?;
+            let account = self::account(Some(&index), "safe")?;
+            return self
+                .standing_message(&page, account, payload, clocks)
+                .map(|_| ());
+        }
+        let fields = object(authorization, &["token"], &["handle"])?;
+        let token = string(fields, "token")?;
+        let page = match token_page(context, fields.get("handle")) {
+            Ok(page) => page,
+            Err(HandleError::Body(body)) => return Err(body),
+            Err(HandleError::Handle) => return Err(refusal(Refusal::Mismatch)),
+        };
+        let request = Request {
+            kind: Kind::SafeMessage,
+            account: Some(&index),
+            payload,
+            page: page.as_ref(),
+        };
+        self.tokens
+            .spend_as(minter(context.caller), token, &request, clocks.vault_ms)
+            .map(|_| ())
+            .map_err(refusal)
     }
 
     /// `approval.grant { store, change }`: a decision main relays (design

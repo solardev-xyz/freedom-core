@@ -1,7 +1,8 @@
-//! The `safe.*` methods (design 0016, API; SAFE-2's S2, S3 and S4): a
-//! Safe's record made in the core, its status and deployment read through
-//! the chain machine, the pending store's board views, and a Safe
-//! transaction prepared, proposed and executed. Every one answers
+//! The `safe.*` methods (design 0016, API; SAFE-2's S2 to S5): a Safe's
+//! record made in the core, its status and deployment read through the
+//! chain machine, the pending store's board views, a Safe transaction
+//! prepared, proposed and executed, and a page's Safe message signed by
+//! the Safe's owners ([`messages`]). Every one answers
 //! `not_moved` (`data.store: "vault_meta"`) until the hello names
 //! `vault_meta`: the record is the core's to read and to mark.
 //!
@@ -118,19 +119,28 @@
 //!   Safe's `safe-send` approvals end, then its entry is cleared while it
 //!   is still the SafeTx named: none pending is `{}`, another
 //!   `SAFE_DISCARDED` with nothing cleared. It reads no chain.
+//! - **`safe.message_start`**, **`.message_sign`**, **`.message_state`**,
+//!   **`.message_cancel`** and **`.message_complete`** (S5): a page's
+//!   `personal_sign` or `eth_signTypedData_v4` for a Safe, as a session of
+//!   owner signatures over its SafeMessage ([`messages`]).
 //! - **The Safe's hold:** from a `safe.propose`'s spend to its answer, and
 //!   from a `safe.execute`'s start to its answer, the Safe is held: another
 //!   `safe.propose` for it is `SAFE_PENDING_EXISTS`, as the reference's
 //!   reservation answers, `safe.discard` `SAFE_BUSY`, as `cancelSafeSend`
 //!   answers while a step runs, and `safe.execute` `SAFE_BUSY`, as its
 //!   `acquire` answers. Main keeps its own exclusion from `{ send }` to
-//!   `safe.executed`.
+//!   `safe.executed`. A message's step holds it too, from a
+//!   `safe.message_start`'s spend and a `safe.message_sign`'s start to
+//!   their answers, as the reference's one step per Safe covers sends and
+//!   message sessions alike (`signature-collection.js`'s `acquire`): every
+//!   other step of the Safe is `SAFE_BUSY` meanwhile, a `safe.propose` too.
 //! - **Refusals** are `invalid_argument` with `data.safe`: `unsupported`,
 //!   `unverified` (a deployment or activation no read answered, or a read
 //!   a step that signs rests on), `changed`, `not_deployed`, `self_call`,
 //!   `nonce_behind`, `store_full`, or today's `SAFE_*` codes
 //!   (`SAFE_ADDRESS_MISMATCH`, `SAFE_NEEDS_FUNDS`, `SAFE_DISCARDED`,
-//!   `SAFE_PENDING_EXISTS`, `SAFE_BUSY`). `safe.status` reports `changed`,
+//!   `SAFE_PENDING_EXISTS`, `SAFE_BUSY`, and a message's
+//!   `SAFE_MESSAGE_EXISTS` and `SAFE_APPROVAL_NEEDED`). `safe.status` reports `changed`,
 //!   `unverified` and `not_deployed` as data, never as a refusal.
 //! - **Time:** the chain-reading methods have the `session` class's 120 s
 //!   from receipt (#520), each read the time left; past it, `deadline`. A
@@ -167,9 +177,10 @@ use crate::approvals::{Approvals, Clocks};
 use crate::phone::ChainRead;
 use crate::safe_pending::{Failure, SafePending};
 use crate::vault::{Out, error_payload};
+use messages::{Opening, Sessions};
 
 /// The methods, in `core.hello`'s capability order.
-pub const METHODS: [&str; 10] = [
+pub const METHODS: [&str; 15] = [
     "safe.create",
     "safe.status",
     "safe.deploy",
@@ -180,6 +191,11 @@ pub const METHODS: [&str; 10] = [
     "safe.propose",
     "safe.execute",
     "safe.executed",
+    "safe.message_start",
+    "safe.message_sign",
+    "safe.message_state",
+    "safe.message_cancel",
+    "safe.message_complete",
 ];
 
 /// The kind of the token the executor's prepared send carries (S4).
@@ -416,6 +432,9 @@ struct Safe {
     salt: U256,
     marked: bool,
     executor: Option<Executor>,
+    /// Every owner, in the record's order: each wallet index, as the record
+    /// stores it, and address.
+    owners: Vec<(f64, [u8; 20])>,
     /// The vault owners, in the record's order: each index and address.
     vault_owners: Vec<(u64, [u8; 20])>,
 }
@@ -440,6 +459,7 @@ fn resolve(records: &Records, index: u64) -> Result<Safe, ErrorBody> {
     let mut addresses = Vec::with_capacity(owners.len());
     let mut executor = None;
     let mut vault_owners = Vec::new();
+    let mut listed = Vec::with_capacity(owners.len());
     for owner in owners {
         let JsValue::Number(at) = owner else {
             return Err(plain("Owner wallet index does not exist"));
@@ -472,6 +492,7 @@ fn resolve(records: &Records, index: u64) -> Result<Safe, ErrorBody> {
             }
         }
         addresses.push(address);
+        listed.push((*at, address));
     }
     let threshold = match record.get("threshold") {
         Some(JsValue::Number(n)) if n.fract() == 0.0 && *n >= 0.0 => *n as usize,
@@ -504,6 +525,7 @@ fn resolve(records: &Records, index: u64) -> Result<Safe, ErrorBody> {
         salt,
         marked,
         executor,
+        owners: listed,
         vault_owners,
     })
 }
@@ -653,11 +675,21 @@ enum Deployment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Status,
-    Deploy { fee_ack: bool },
-    Deployed { hash: [u8; 32] },
+    Deploy {
+        fee_ack: bool,
+    },
+    Deployed {
+        hash: [u8; 32],
+    },
     Prepare,
     Propose,
-    Execute { fee_ack: bool },
+    Execute {
+        fee_ack: bool,
+    },
+    /// `safe.message_start` (S5).
+    MessageStart,
+    /// `safe.message_sign` (S5).
+    MessageSign,
 }
 
 /// What a `safe.prepare`, `safe.propose` or `safe.execute` carries beside
@@ -681,6 +713,14 @@ enum Work {
     Exec {
         hash: [u8; 32],
         data: Vec<u8>,
+    },
+    /// The session `safe.message_start` opens once its reads are in (S5).
+    MessageStart(Box<Opening>),
+    /// The session `safe.message_sign` signs, by its serial, and the vault
+    /// owner named (index and address), or none for the sweep (S5).
+    MessageSign {
+        serial: u64,
+        owner: Option<(u64, [u8; 20])>,
     },
 }
 
@@ -795,6 +835,8 @@ pub struct Safes {
     /// The executor's sends the fee check stopped, by the Safe's wallet
     /// index, for `fee_ack` to confirm (S4).
     offers: BTreeMap<u64, Offer>,
+    /// The Safes' message sessions, one per Safe, in memory only (S5).
+    sessions: Sessions,
 }
 
 /// What the methods read and change beyond their own state.
@@ -805,6 +847,10 @@ pub struct Ctx<'a> {
     pub pending: &'a SafePending,
     pub clocks: Clocks,
     pub now: Instant,
+    /// Whether the vault is unlocked now: a message's step that could sign
+    /// nothing with it locked reads nothing (S5). The vault owners sign
+    /// with the vault's state as it stands at the write.
+    pub unlocked: bool,
 }
 
 /// The answer `getSafeStatus` gives, balances and costs in wei, decimal,
@@ -869,6 +915,8 @@ impl Safes {
         self.session.retain(|address| holds_safe(records, address));
         self.offers
             .retain(|index, offer| holds_safe_at(records, *index, &offer.safe));
+        self.sessions
+            .retain(|index, safe| holds_safe_at(records, index, safe));
         let (kept, dropped): (BTreeMap<_, _>, BTreeMap<_, _>) = std::mem::take(&mut self.sends)
             .into_iter()
             .partition(|(index, (safe, _))| holds_safe_at(records, *index, safe));
@@ -921,8 +969,8 @@ impl Safes {
     }
 
     /// A request from `context`: its replies and reads. A token
-    /// `safe.propose` presents is burnt however the request ends, as
-    /// `sign.*` burns one (design 0012, "Tokens").
+    /// `safe.propose` or `safe.message_start` presents is burnt however the
+    /// request ends, as `sign.*` burns one (design 0012, "Tokens").
     pub fn request(
         &mut self,
         id: u64,
@@ -931,7 +979,7 @@ impl Safes {
         context: &Context,
         ctx: &mut Ctx,
     ) -> Vec<Out> {
-        let presented = (method == "safe.propose")
+        let presented = matches!(method, "safe.propose" | "safe.message_start")
             .then(|| serde_json::from_str::<Value>(raw.unwrap_or("{}")).ok())
             .flatten()
             .and_then(|params| crate::approvals::presented_token(&params, true));
@@ -960,6 +1008,13 @@ impl Safes {
             .clone();
         let mut params = Value::Null;
         let (kind, index) = match method {
+            "safe.message_start" => {
+                return self.message_start(id, raw, context, &records, ctx);
+            }
+            "safe.message_sign" => return self.message_sign(id, raw, &records, ctx),
+            "safe.message_state" => return self.message_state(id, raw, &records),
+            "safe.message_cancel" => return self.message_cancel(id, raw),
+            "safe.message_complete" => return self.message_complete(id, raw),
             "safe.pending" => {
                 members(raw, &[], &mut params)?;
                 let states = pending_states(&records, ctx.pending)?;
@@ -975,7 +1030,7 @@ impl Safes {
                 let p = members(raw, &["safe", "safe_tx_hash"], &mut params)?;
                 let index = index_of(p, "safe")?;
                 // A step holds the Safe: `cancelSafeSend`'s refusal.
-                if self.holds(index) {
+                if self.busy(index) {
                     return Err(refused("SAFE_BUSY", BUSY_TEXT));
                 }
                 let named = match p.get("safe_tx_hash") {
@@ -1016,7 +1071,7 @@ impl Safes {
                 if !safe.marked {
                     return Err(not_deployed());
                 }
-                if self.holds(index) {
+                if self.busy(index) {
                     return Err(refused("SAFE_BUSY", STEP_BUSY_TEXT));
                 }
                 let work = Work::Execute { hash: entry.hash };
@@ -1097,6 +1152,10 @@ impl Safes {
                 if self.holds(index) || pending_entry(ctx.pending, &safe).is_some() {
                     return Err(refused("SAFE_PENDING_EXISTS", PENDING_EXISTS_TEXT));
                 }
+                // A message's step holds it: the one step per Safe.
+                if self.busy(index) {
+                    return Err(refused("SAFE_BUSY", STEP_BUSY_TEXT));
+                }
                 let prepared = self
                     .prepared
                     .get(index, &safe.address, &hash)
@@ -1147,7 +1206,11 @@ impl Safes {
                 };
                 vec![self.code_read(id, &op, ctx.now)]
             }
-            Kind::Prepare | Kind::Propose | Kind::Execute { .. } => {
+            Kind::Prepare
+            | Kind::Propose
+            | Kind::Execute { .. }
+            | Kind::MessageStart
+            | Kind::MessageSign => {
                 return Err(crate::vault::internal());
             }
         };
@@ -1322,7 +1385,11 @@ impl Safes {
                     Kind::Deploy { .. } => json!({ "deployed": true }),
                     Kind::Status => status(&op.safe, true, None, None, false, &seen),
                     // They read no code this way.
-                    Kind::Prepare | Kind::Propose | Kind::Execute { .. } => {
+                    Kind::Prepare
+                    | Kind::Propose
+                    | Kind::Execute { .. }
+                    | Kind::MessageStart
+                    | Kind::MessageSign => {
                         return vec![failed(id, &crate::vault::internal())];
                     }
                 };
@@ -1337,9 +1404,11 @@ impl Safes {
             }
             Deployment::NotDeployed(seen) => match op.kind {
                 Kind::Deployed { .. } => vec![reply(id, &json!({ "deployed": false }))],
-                Kind::Prepare | Kind::Propose | Kind::Execute { .. } => {
-                    vec![failed(id, &crate::vault::internal())]
-                }
+                Kind::Prepare
+                | Kind::Propose
+                | Kind::Execute { .. }
+                | Kind::MessageStart
+                | Kind::MessageSign => vec![failed(id, &crate::vault::internal())],
                 Kind::Status | Kind::Deploy { .. } => {
                     let Some(executor) = op.safe.executor.clone() else {
                         return vec![match op.kind {
@@ -1487,9 +1556,11 @@ impl Safes {
         match op.kind {
             Kind::Deployed { .. } => vec![reply(id, &json!({ "deployed": true }))],
             Kind::Deploy { .. } => vec![reply(id, &json!({ "deployed": true }))],
-            Kind::Prepare | Kind::Propose | Kind::Execute { .. } => {
-                vec![failed(id, &crate::vault::internal())]
-            }
+            Kind::Prepare
+            | Kind::Propose
+            | Kind::Execute { .. }
+            | Kind::MessageStart
+            | Kind::MessageSign => vec![failed(id, &crate::vault::internal())],
             Kind::Status => {
                 let (evidence, reads) = Evidence::start_status(
                     op.safe.address,
@@ -1510,10 +1581,23 @@ impl Safes {
         }
     }
 
-    /// Whether a `safe.propose` holds the Safe at wallet index `index`.
+    /// Whether a `safe.propose` or a `safe.execute` holds the Safe at
+    /// wallet index `index`.
     fn holds(&self, index: u64) -> bool {
         self.ops.values().any(|op| {
             matches!(op.kind, Kind::Propose | Kind::Execute { .. }) && op.safe.index == index
+        })
+    }
+
+    /// Whether any step holds the Safe at wallet index `index`: a send's
+    /// ([`Safes::holds`]) or a message's (S5), the reference's one step per
+    /// Safe (`signature-collection.js`'s `acquire`).
+    fn busy(&self, index: u64) -> bool {
+        self.ops.values().any(|op| {
+            matches!(
+                op.kind,
+                Kind::Propose | Kind::Execute { .. } | Kind::MessageStart | Kind::MessageSign
+            ) && op.safe.index == index
         })
     }
 
@@ -1623,6 +1707,15 @@ impl Safes {
                     }
                 }
             }
+            // A message's step: the session opened or signed where no
+            // vault job is running, with the vault's state ([`Safes::write`]).
+            work @ (Work::MessageStart(_) | Work::MessageSign { .. }) => {
+                op.work = work;
+                op.step = Step::Write;
+                self.ops.insert(id, op);
+                self.writes.push(id);
+                Vec::new()
+            }
             Work::Exec { .. } | Work::None => vec![failed(id, &crate::vault::internal())],
         }
     }
@@ -1701,8 +1794,9 @@ impl Safes {
         Ok(state)
     }
 
-    /// The proposals whose signing and write are due, for the vault to run
-    /// where no vault job is running ([`Safes::write`]).
+    /// The proposals whose signing and write are due, and the message
+    /// steps whose signing is (S5), for the vault to run where no vault job
+    /// is running ([`Safes::write`]).
     pub fn take_writes(&mut self) -> Vec<u64> {
         let due = std::mem::take(&mut self.writes);
         due.into_iter()
@@ -1711,17 +1805,24 @@ impl Safes {
     }
 
     /// Proposal `id`'s signing and write, with the vault's `state`: its
-    /// answer, the board's state.
+    /// answer, the board's state. Or a message's step (S5): the session
+    /// `safe.message_start` opens, or the owners `safe.message_sign` signs.
     pub fn write(&mut self, id: u64, state: &VaultState, ctx: &mut Ctx) -> Vec<Out> {
         let Some(op) = self.ops.remove(&id) else {
             return Vec::new();
         };
-        let Work::Propose { prepared, display } = op.work else {
-            return vec![failed(id, &crate::vault::internal())];
-        };
-        match proposed(&op.safe, &prepared, display.as_ref(), state, ctx) {
-            Ok(state) => vec![js_reply(id, &state)],
-            Err(error) => vec![failed(id, &error)],
+        match op.work {
+            Work::Propose { prepared, display } => {
+                match proposed(&op.safe, &prepared, display.as_ref(), state, ctx) {
+                    Ok(state) => vec![js_reply(id, &state)],
+                    Err(error) => vec![failed(id, &error)],
+                }
+            }
+            Work::MessageStart(opening) => vec![self.opened(id, &op.safe, *opening, state, ctx)],
+            Work::MessageSign { serial, owner } => {
+                vec![self.message_signed(id, &op.safe, serial, owner, state, ctx)]
+            }
+            _ => vec![failed(id, &crate::vault::internal())],
         }
     }
 
@@ -1835,9 +1936,12 @@ impl Safes {
                 let (account, data) = (executor.index, &deployment.data);
                 self.judge(id, &op.safe, None, account, data, tx, priced.cost, ctx)
             }
-            Kind::Deployed { .. } | Kind::Prepare | Kind::Propose | Kind::Execute { .. } => {
-                failed(id, &crate::vault::internal())
-            }
+            Kind::Deployed { .. }
+            | Kind::Prepare
+            | Kind::Propose
+            | Kind::Execute { .. }
+            | Kind::MessageStart
+            | Kind::MessageSign => failed(id, &crate::vault::internal()),
         }
     }
 
@@ -2427,6 +2531,52 @@ fn send_state(
     else {
         return Ok(None);
     };
+    let (rows, executor) = owner_rows(records, index, signers)?;
+    let field = |key: &str| entry.get(key).cloned().unwrap_or(JsValue::Undefined);
+    let call = |key: &str| {
+        entry
+            .get("safeTxData")
+            .and_then(|data| data.get(key))
+            .filter(|value| !matches!(value, JsValue::Undefined | JsValue::Null))
+            .cloned()
+            .unwrap_or(JsValue::Null)
+    };
+    Ok(Some(JsValue::Object(vec![
+        ("safeIndex".into(), JsValue::Number(index as f64)),
+        ("chainId".into(), field("chainId")),
+        ("safeTxHash".into(), field("safeTxHash")),
+        ("threshold".into(), field("threshold")),
+        ("collected".into(), JsValue::Number(signers.len() as f64)),
+        ("owners".into(), JsValue::Array(rows)),
+        ("executorIndex".into(), executor),
+        ("display".into(), field("display")),
+        (
+            "call".into(),
+            JsValue::Object(vec![
+                ("to".into(), call("to")),
+                ("value".into(), call("value")),
+                ("data".into(), call("data")),
+            ]),
+        ),
+        ("createdAt".into(), field("createdAt")),
+        (
+            "status".into(),
+            JsValue::string(if superseded { "superseded" } else { "awaiting" }),
+        ),
+    ])))
+}
+
+/// The board's owner rows for the Safe at wallet index `index`, as
+/// `ownersView` derives them from the live records: each owner's `{ index,
+/// address, type, signed }` (`address` `null` when its record has none,
+/// `type` `mnemonic` when it names none), `signed` when `signers` holds its
+/// address; and the first vault owner's index, the executor, or `null`. A
+/// Safe the records no longer hold has no rows.
+fn owner_rows(
+    records: &Records,
+    index: u64,
+    signers: &[[u8; 20]],
+) -> Result<(Vec<JsValue>, JsValue), ErrorBody> {
     let owners: Vec<JsValue> = match records.record(index as f64)? {
         Some(record) if is_safe(&record) => record
             .get("owners")
@@ -2469,38 +2619,7 @@ fn send_state(
             ("signed".into(), JsValue::Bool(signed)),
         ]));
     }
-    let field = |key: &str| entry.get(key).cloned().unwrap_or(JsValue::Undefined);
-    let call = |key: &str| {
-        entry
-            .get("safeTxData")
-            .and_then(|data| data.get(key))
-            .filter(|value| !matches!(value, JsValue::Undefined | JsValue::Null))
-            .cloned()
-            .unwrap_or(JsValue::Null)
-    };
-    Ok(Some(JsValue::Object(vec![
-        ("safeIndex".into(), JsValue::Number(index as f64)),
-        ("chainId".into(), field("chainId")),
-        ("safeTxHash".into(), field("safeTxHash")),
-        ("threshold".into(), field("threshold")),
-        ("collected".into(), JsValue::Number(signers.len() as f64)),
-        ("owners".into(), JsValue::Array(rows)),
-        ("executorIndex".into(), executor),
-        ("display".into(), field("display")),
-        (
-            "call".into(),
-            JsValue::Object(vec![
-                ("to".into(), call("to")),
-                ("value".into(), call("value")),
-                ("data".into(), call("data")),
-            ]),
-        ),
-        ("createdAt".into(), field("createdAt")),
-        (
-            "status".into(),
-            JsValue::string(if superseded { "superseded" } else { "awaiting" }),
-        ),
-    ])))
+    Ok((rows, executor))
 }
 
 /// `cancelSafeSend(index, { safeTxHash })`: with `named`, only that SafeTx
@@ -2547,6 +2666,8 @@ fn discard(
         json!({ "durable": false })
     })
 }
+
+mod messages;
 
 #[cfg(test)]
 mod tests;

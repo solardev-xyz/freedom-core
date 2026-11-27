@@ -320,6 +320,12 @@ const CAPABILITIES: &[&str] = &[
     // Design 0016: the pending SafeTx executed (SAFE-2's S4).
     "safe.execute",
     "safe.executed",
+    // Design 0016: a page's Safe message, its owners' session (SAFE-2's S5).
+    "safe.message_start",
+    "safe.message_sign",
+    "safe.message_state",
+    "safe.message_cancel",
+    "safe.message_complete",
     // Design 0013: the payment history (PRF-5g-2).
     "payments.append",
     "payments.update",
