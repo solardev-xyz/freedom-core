@@ -6,9 +6,9 @@
 //!   operation, under the lane's queue, deadlines and cancel.
 //! - [`reply`]: `shell.ledger_apdu`'s replies, read strictly, and the bound
 //!   each reply is read within.
-//! - [`methods`]: `ledger.accounts` and `ledger.add` (L3), which drive it.
-//!
-//! A Ledger key in `sign.*` comes with L4.
+//! - [`methods`]: `ledger.accounts` and `ledger.add` (L3), which drive it,
+//!   and the end of `sign.*` with a Ledger key (L4,
+//!   [`crate::signing::prepare`] and [`crate::signing::finish`]).
 
 pub mod lane;
 pub mod methods;

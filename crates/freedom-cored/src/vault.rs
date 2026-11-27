@@ -124,6 +124,9 @@ pub enum Out {
     /// A user's change of a Swarm grant (design 0015, D17), for the swarm
     /// thread, which detaches what a permission manifest managed of it.
     SwarmChange(crate::approvals::SwarmChange),
+    /// Request `id`'s Ledger signature (design 0016, L4), authorized, for
+    /// the device lane: [`Vault::ledger_signed`] answers it once signed.
+    Ledger(u64, Box<crate::signing::Device>),
 }
 
 /// Why a vault operation failed. Mapped to a code and the method's JS
@@ -1609,6 +1612,8 @@ impl Vault {
             "keys.radicle_did" => {
                 params::<PublicKeyParams>(raw).and_then(|p| radicle_did(id, &p.public_key))
             }
+            // A Ledger key's goes on to the device lane, authorized (design
+            // 0016, L4); a vault key's signs now.
             _ if crate::signing::METHODS.contains(&method) => {
                 let clocks = self.clocks();
                 let mut checks = crate::signing::Checks {
@@ -1616,8 +1621,16 @@ impl Vault {
                     context,
                     clocks,
                 };
-                crate::signing::handle(&self.state, &mut checks, method, raw)
-                    .map(|result| json_result(id, &result))
+                match crate::signing::prepare(&self.state, &mut checks, method, raw) {
+                    crate::signing::Prepared::Now(result) => {
+                        result.map(|result| json_result(id, &result))
+                    }
+                    crate::signing::Prepared::Device(device) => {
+                        out.push(Out::Ledger(id, device));
+                        self.after_request(&mut out);
+                        return out;
+                    }
+                }
             }
             _ if crate::phone::Phone::handles(method) => {
                 let clocks = self.clocks();
@@ -1690,6 +1703,13 @@ impl Vault {
             ))),
             Err(error) => self.reply_error(&mut out, id, error),
         }
+        self.after_request(&mut out);
+        out
+    }
+
+    /// What follows a request's reply: the events and changes its
+    /// approvals made.
+    fn after_request(&mut self, out: &mut Vec<Out>) {
         // Design 0012: one `approval.changed` per grant change, after the
         // reply that made it.
         out.extend(self.approvals.take_events().into_iter().map(Out::Send));
@@ -1706,6 +1726,27 @@ impl Vault {
         for narrowed in self.approvals.take_narrowed() {
             self.phone.narrowed(&narrowed);
         }
+    }
+
+    /// Request `id`'s Ledger signature came back, checked by fc-ledger
+    /// (design 0016, L4): what its authorization does on a signature, then
+    /// its reply ([`crate::signing::finish`]), and the events that follow.
+    pub fn ledger_signed(
+        &mut self,
+        id: u64,
+        pending: crate::signing::Pending,
+        signed: fc_ledger::Signed,
+    ) -> Vec<Out> {
+        let mut out = Vec::new();
+        let clocks = self.clocks();
+        match crate::signing::finish(&mut self.approvals, clocks, pending, signed) {
+            Ok(result) => match json_result(id, &result) {
+                Some(payload) => out.push(Out::Send(payload)),
+                None => self.reply_error(&mut out, id, internal()),
+            },
+            Err(error) => self.reply_error(&mut out, id, error),
+        }
+        self.after_request(&mut out);
         out
     }
 
