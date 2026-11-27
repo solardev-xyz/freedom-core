@@ -60,13 +60,17 @@ fc-service = { path = "../../crates/fc-service" }
 # Then the service advisories (freedom-core #322): hickory-resolver 0.26,
 # with freedom-ipfs-net's own DNS layer in place of libp2p-dns 0.44, which
 # is on hickory 0.25 (RUSTSEC-2026-0491), and rusqlite 0.41, which bundles
-# SQLite 3.54.1 (RUSTSEC-2026-0459).
+# SQLite 3.54.1 (RUSTSEC-2026-0459). Then out of memory under the memory
+# cap (#91; design 0010, "The memory cap"): the store's
+# `StoreError::OutOfMemory` and freedom-ipfs-core's `CoreError::OutOfMemory`,
+# and `fail_stop_on_oom`, the hook src/main.rs installs first, which ends
+# the process with exit 71 when SQLite can't allocate.
 # src/build_info.rs reports the same commit.
 # freedom-ipfs-core: the memory budget's `Reservation`, which the gateway
-# crate doesn't re-export.
-freedom-ipfs-core = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "40df11b62ca4f619392a30fc276a777de6c5a80a" }
-freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "40df11b62ca4f619392a30fc276a777de6c5a80a", features = ["socks"] }
-freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "40df11b62ca4f619392a30fc276a777de6c5a80a" }
+# crate doesn't re-export, and `CoreError`, which the test hooks inject.
+freedom-ipfs-core = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "8083b764e082429c62eed1a22ba42acf17a7681f" }
+freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "8083b764e082429c62eed1a22ba42acf17a7681f", features = ["socks"] }
+freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "8083b764e082429c62eed1a22ba42acf17a7681f" }
 # The `Stream` trait, to read a response's body as it comes; already in
 # freedom-ipfs's graph.
 futures-core = "0.3"
@@ -85,7 +89,7 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 hickory-proto = { version = "0.26.2", default-features = false, features = ["std"] }
 # Upstream's SOCKS5 test proxy and test servers (its `test-util` feature),
 # for the `socks5` tests through the binary; the same pin as the gateway's.
-freedom-ipfs-net = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "40df11b62ca4f619392a30fc276a777de6c5a80a", features = ["test-util"] }
+freedom-ipfs-net = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "8083b764e082429c62eed1a22ba42acf17a7681f", features = ["test-util"] }
 tempfile = "3"
 
 # tests/confinement.rs: the kernel's Landlock ABI, which the report must name
@@ -107,8 +111,15 @@ name = "nat64_confined"
 harness = false
 
 # The core's workspace lints, copied: workspace lints don't cross workspaces.
+# Except `unsafe_code`, which is `deny` here, as in freedom-radicled, not
+# `forbid` (AGENTS.md rule 6): the one unsafe call,
+# `freedom_ipfs_store::fail_stop_on_oom` first thing in src/main.rs, carries
+# its own reviewed `#[allow(unsafe_code)]` and a `SAFETY` comment, and every
+# other unsafe block still fails to compile. tests/unsafe_code.rs fails if
+# any other line lifts the lint.
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
@@ -120,6 +131,8 @@ unimplemented = "warn"
 dbg_macro = "warn"
 print_stdout = "warn"
 print_stderr = "warn"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
 
 # Dependencies carry no debug info in dev and test builds: freedom-ipfs's
 # graph is large, and its debug info is most of a target directory.
