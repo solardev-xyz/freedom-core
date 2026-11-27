@@ -931,6 +931,7 @@ fn only_protocol_2_is_spoken() {
         "safe.message_state",
         "safe.message_cancel",
         "safe.message_complete",
+        "safe.sign_owner",
         "payments.append",
         "payments.update",
         "payments.mark_confirmed",
