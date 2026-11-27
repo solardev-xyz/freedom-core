@@ -69,6 +69,19 @@ fn unanswered(ipfsd: &mut Ipfsd, id: u64) -> String {
 /// and allocates as memory runs out: in these cases nothing else in the
 /// process works meanwhile. The proxy is never asked: routing is offline,
 /// and the start ends in its build.
+/// Whether `stderr` holds Rust's allocation-failure message for `bytes`. The
+/// allocator writes it in two pieces, "memory allocation of N" and then
+/// " bytes failed", and the service's log writer can land a whole line
+/// between them (as on radicled's CI). Only the allocator writes either
+/// piece, so the two in order are its message, whatever came between.
+#[cfg(target_os = "linux")]
+fn allocation_failed(stderr: &str, bytes: u64) -> bool {
+    let head = format!("memory allocation of {bytes}");
+    stderr
+        .find(&head)
+        .is_some_and(|at| stderr[at + head.len()..].contains(" bytes failed"))
+}
+
 #[cfg(target_os = "linux")]
 fn capped(mode: &str, env: &[(&str, &str)]) -> Ipfsd {
     let proxy = std::net::SocketAddr::from(([127, 0, 0, 1], 9));
@@ -130,10 +143,7 @@ fn a_rust_allocation_past_the_cap_aborts_and_answers_nothing() {
     let stderr = unanswered(&mut ipfsd, id);
     // Rust's allocator: its message, then SIGABRT.
     assert_eq!(status.signal(), Some(6), "{status}: {stderr}");
-    assert!(
-        stderr.contains("memory allocation of 1073741824 bytes failed"),
-        "{stderr}"
-    );
+    assert!(allocation_failed(&stderr, 1 << 30), "{stderr}");
 }
 
 #[test]
