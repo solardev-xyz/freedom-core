@@ -161,12 +161,12 @@ fn nothing_before_vault_meta_moves_and_deployed_is_mains() {
         (6, "safe.pending", json!({})),
         (7, "safe.discard", json!({ "safe": SAFE })),
         (
-            9,
+            8,
             "safe.prepare",
             json!({ "safe": SAFE, "chain_id": 100, "tx": { "to": A, "value": "1", "data": "0x" } }),
         ),
         (
-            10,
+            9,
             "safe.propose",
             json!({ "safe": SAFE, "safe_tx_hash": HASH, "authorization": { "token": "00".repeat(32) } }),
         ),
@@ -181,7 +181,7 @@ fn nothing_before_vault_meta_moves_and_deployed_is_mains() {
     );
     let reply = call(
         &mut core,
-        8,
+        10,
         "chrome",
         "safe.deployed",
         json!({ "safe": SAFE, "hash": HASH }),
