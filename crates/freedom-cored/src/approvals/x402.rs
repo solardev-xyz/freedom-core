@@ -9,12 +9,13 @@
 //!   grant it binds; with `{ cap: { agent, attributable } }`, the first
 //!   entry an active cap covers is paid (`findCoveringPermission`), never
 //!   for a tab in Agent custody or a request main couldn't attribute. The
-//!   core builds the payload as `@x402/evm` 2.28.0 builds it
-//!   (`fc_approval::x402`), with a nonce from the OS's RNG and `validBefore`
-//!   from the wall clock, and signs it inline. **A cap is charged before
-//!   the signature,** written first: a charge the file lacks signs nothing
-//!   (`x402-at-sign`). A token's payment writes its grant after the
-//!   signature, then charges a cap that covers it, as `sign-flow.js` does.
+//!   core builds the payload as `@x402/evm` 2.28.0 builds it, and 2.29.0
+//!   alike (`fc_approval::x402`, design 0016's D10), with a nonce from the
+//!   OS's RNG and `validBefore` from the wall clock, and signs it inline.
+//!   **A cap is charged before the signature,** written first: a charge the
+//!   file lacks signs nothing (`x402-at-sign`). A token's payment writes its
+//!   grant after the signature, then charges a cap that covers it, as
+//!   `sign-flow.js` does.
 //!   The reply is `{ payload, reservation, accept_index, charged, grant? }`:
 //!   `payload` the JSON main base64-encodes into the header.
 //! - **A device account** (core #392): `device: { kind, address }`, `kind`
@@ -33,6 +34,37 @@
 //!   device: { typed_data, hash }, reservation, accept_index, charged }`,
 //!   the typed data the client would hand its signer, and its EIP-712
 //!   hash. A token's grant and charge wait for the device's signature.
+//! - **A Ledger account's payment, on the device lane** (design 0016, "x402
+//!   from a Ledger account", D2): `now_s`, main's wall-clock reading in
+//!   whole seconds, taken once for the payment, comes only with `device: {
+//!   kind: "ledger" }`, and only once `vault_meta` is moved: the account's
+//!   own Ledger record ([`Approvals::ledger_account`], D9), whose address
+//!   the device's must be. A `now_s` more than 30 s from the core's clock
+//!   ([`MAX_CLOCK_SKEW_S`]) is refused. Each is refused before any token is
+//!   spent or cap charged. The authorization is then built on `now_s`, so
+//!   every time byte in it is main's, with the nonce the core drew, and
+//!   handed out and kept as a device's is; the cap's window stays the
+//!   core's clock.
+//! - `x402.settle { reservation, typed_data }` (`shell`, D2): main's own
+//!   rebuild of that authorization, `{ domain, types, primaryType, message
+//!   }`, which must equal the reserved one as JSON values (the same members
+//!   and values, arrays in order, members in any order). The core then
+//!   signs the reserved authorization on the device lane with the record's
+//!   path, as `sign.typed_data` with a Ledger key does, and fc-ledger
+//!   checks the signature against the record's address over the reserved
+//!   digest. Taken, the reply is `{ signature }`'s, `{ payload, charged,
+//!   grant?, durable? }`, and the reservation waits for its outcome.
+//!   Anything else ends the payment, with nothing of a signature returned:
+//!   another authorization (`not_authorized`, `mismatch`), a record that no
+//!   longer is the account's, what a Ledger can't carry, the device's
+//!   refusal or failure (`device_failed`), or the request's cancel. Each
+//!   gives the charge back and spends the reservation, as a refused `{
+//!   signature }` does, and says so in the error's `refunded` (a cancel's
+//!   error carries no data). While the device signs, the reservation is the
+//!   operation's alone: no other settle finds it, and none is dropped for
+//!   room. A Ledger's reservation made with `now_s` is settled only so (or
+//!   `withheld`), and one made without, as a phone's, only with `{
+//!   signature }`.
 //! - `x402.settle { reservation, outcome }` (`shell`): `withheld` gives the
 //!   charge back to the cap it was taken from, if that cap still stands
 //!   (not revoked, not granted again: its generation); `sent` keeps it.
@@ -61,6 +93,8 @@ use std::collections::{HashMap, VecDeque};
 use fc_approval::stores::{Applied, CapStore, Charge, Effect, NarrowRefusal, StoreKind};
 use fc_approval::x402::{self, Built, Payment, Requirements};
 use fc_keys::Secp256k1Key;
+use fc_ledger::Operation;
+use fc_protocol::error::ErrorCode;
 use fc_vault::state::VaultState;
 use rand_core::TryRng;
 use serde_json::{Value, json};
@@ -74,6 +108,11 @@ use crate::rng::OsRng;
 
 /// The methods this module serves.
 pub const METHODS: [&str; 3] = ["x402.authorize", "x402.settle", "x402.update"];
+
+/// How far main's `now_s` may be from the core's own clock, in seconds
+/// (design 0016, "x402 from a Ledger account"): 30 s is taken, 31 s
+/// refused.
+pub const MAX_CLOCK_SKEW_S: u64 = 30;
 
 /// Reservations kept for `x402.settle`, the oldest dropped: a dropped
 /// one's charge stands (*inferred*: as a Safe approval's count).
@@ -117,6 +156,51 @@ struct Device {
     /// signature is checked, before the cap that covers it is charged. A
     /// cap's payment is charged already.
     token_grant: Option<Option<Value>>,
+    /// How its signature comes.
+    form: Form,
+}
+
+/// How a device's payment is settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Form {
+    /// `{ reservation, signature }` (core #392): a phone's, or a Ledger's
+    /// made without `now_s`, whose authorization is on the core's clock.
+    Signature,
+    /// `{ reservation, typed_data }` (design 0016, D2): a Ledger account's
+    /// made with main's `now_s`, signed on the device lane with account
+    /// `account`'s record.
+    Ledger { account: u32 },
+}
+
+/// What `x402.*` gives the event loop: its reply now, or a Ledger payment's
+/// operation for the device lane (design 0016, D2).
+pub enum X402Reply {
+    Now(Zeroizing<Vec<u8>>),
+    Device(Box<LedgerPayment>),
+}
+
+/// A Ledger payment's signature, authorized, for the device lane:
+/// fc-ledger's operation over the reserved authorization, and the payment,
+/// which [`Approvals::x402_ledger_ended`] finishes once the device ends.
+pub struct LedgerPayment {
+    pub operation: Operation,
+    pub settling: Settling,
+}
+
+/// A Ledger payment on the device lane: its reservation, taken from the
+/// kept ones while the device signs, so that no other settle reaches it
+/// and none is dropped for room.
+pub struct Settling {
+    id: Zeroizing<String>,
+    reservation: Reservation,
+}
+
+/// Nothing of it: the reservation's ID is the payment's handle, and its
+/// authorization request data.
+impl std::fmt::Debug for Settling {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Settling").finish_non_exhaustive()
+    }
 }
 
 /// What the daemon keeps beside the cap file: each cap's generation, which
@@ -174,11 +258,29 @@ impl X402State {
             .try_fill_bytes(&mut *bytes)
             .map_err(|_| crate::vault::internal())?;
         let id = Zeroizing::new(fc_evm::to_hex(&*bytes)[2..].to_owned());
+        self.keep(id.clone(), reservation);
+        Ok(id)
+    }
+
+    /// Keeps reservation `id`, the newest, dropping the oldest for room.
+    fn keep(&mut self, id: Zeroizing<String>, reservation: Reservation) {
         if self.reservations.len() == MAX_RESERVATIONS {
             self.reservations.pop_front();
         }
-        self.reservations.push_back((id.clone(), reservation));
-        Ok(id)
+        self.reservations.push_back((id, reservation));
+    }
+
+    /// How the device's payment at `at` is settled, if one waits there.
+    fn form(&self, at: usize) -> Option<Form> {
+        self.reservations
+            .get(at)
+            .and_then(|(_, reservation)| reservation.device.as_ref())
+            .map(|device| device.form)
+    }
+
+    /// The reservation at `at`, with its ID, no longer kept.
+    fn take(&mut self, at: usize) -> Option<(Zeroizing<String>, Reservation)> {
+        self.reservations.remove(at)
     }
 
     /// Where reservation `id` is, if it is kept.
@@ -278,6 +380,94 @@ fn recorded_device(
     }
 }
 
+/// `now_s` (design 0016, D2): main's wall-clock reading in whole seconds,
+/// for a Ledger account's payment only, at most [`MAX_CLOCK_SKEW_S`] from
+/// the core's own (`wall_s`).
+fn main_clock(
+    value: &Value,
+    device: Option<&(DeviceKind, String)>,
+    wall_s: u64,
+) -> Result<u64, ErrorBody> {
+    if !matches!(device, Some((DeviceKind::Ledger, _))) {
+        return Err(invalid(
+            "now_s: only a Ledger account's payment takes main's clock",
+        ));
+    }
+    let now_s = value
+        .as_u64()
+        .ok_or_else(|| invalid("now_s: expected whole seconds"))?;
+    if now_s.abs_diff(wall_s) > MAX_CLOCK_SKEW_S {
+        return Err(invalid("now_s: more than 30 s from the core's clock"));
+    }
+    Ok(now_s)
+}
+
+/// fc-ledger's refusal before the first APDU: what a Ledger can't carry
+/// is `device_failed` with its code (design 0016, API); anything else an
+/// invalid request.
+fn device_refusal(refusal: fc_ledger::Refusal) -> ErrorBody {
+    match refusal.code() {
+        Some(code) => crate::ledger::methods::device_failed(code),
+        None => invalid(refusal.to_string()),
+    }
+}
+
+/// A Ledger payment's refusal, its charge given back or not: `refunded`
+/// beside the error's data, as a refused `{ signature }` has it; a cancel's
+/// error keeps 0001's form, with no data.
+fn with_refunded(mut error: ErrorBody, refunded: bool) -> ErrorBody {
+    if error.code == ErrorCode::Cancelled {
+        return error;
+    }
+    match &mut error.data {
+        Some(Value::Object(data)) => {
+            data.insert("refunded".to_owned(), json!(refunded));
+        }
+        Some(_) => {}
+        None => error.data = Some(json!({ "refunded": refunded })),
+    }
+    error
+}
+
+/// A Ledger payment's operation (design 0016, D2), before the device:
+/// main's `typed_data` equal to the reserved authorization, as JSON values;
+/// account `account`'s Ledger record still the one whose address the
+/// authorization names; and fc-ledger's operation over the reserved
+/// authorization and its digest, which refuses what a Ledger can't carry.
+fn ledger_operation(
+    approvals: &Approvals,
+    account: u32,
+    reservation: &Reservation,
+    typed_data: &Value,
+) -> Result<Operation, ErrorBody> {
+    let device = reservation
+        .device
+        .as_ref()
+        .ok_or_else(crate::vault::internal)?;
+    // The core's own text, read as the params are (`fc_evm::parse_json`),
+    // so a value compares as JSON.parse reads it.
+    let reserved =
+        fc_evm::parse_json(device.built.typed_data()).map_err(|_| crate::vault::internal())?;
+    if *typed_data != reserved {
+        return Err(not_authorized(
+            "mismatch",
+            "typed_data: not the reserved authorization",
+        ));
+    }
+    let record = approvals.ledger_account(account)?;
+    if record.address != device.address {
+        return Err(invalid("device: not the account's (vault-meta.json)"));
+    }
+    Operation::sign_typed_data(
+        record,
+        &reserved["domain"],
+        &reserved["types"],
+        &reserved["message"],
+        &device.built.digest,
+    )
+    .map_err(device_refusal)
+}
+
 /// A reply's JSON text, as it is.
 fn raw(text: String) -> Result<Box<serde_json::value::RawValue>, ErrorBody> {
     serde_json::value::RawValue::from_string(text).map_err(|_| crate::vault::internal())
@@ -289,7 +479,9 @@ type TokenPaid = (Option<(Held, bool)>, Option<Value>, bool);
 
 impl Approvals {
     /// `x402.authorize`, `x402.settle` and `x402.update`. A presented token
-    /// is burnt however the request ends, as `sign.*` burns one.
+    /// is burnt however the request ends, as `sign.*` burns one. A Ledger
+    /// payment's `x402.settle { typed_data }` goes on to the device lane
+    /// ([`X402Reply::Device`]).
     pub fn x402_request(
         &mut self,
         state: &VaultState,
@@ -297,7 +489,7 @@ impl Approvals {
         method: &str,
         params: &Value,
         clocks: Clocks,
-    ) -> Result<Zeroizing<Vec<u8>>, ErrorBody> {
+    ) -> Result<X402Reply, ErrorBody> {
         match method {
             "x402.authorize" => {
                 let presented = super::presented_token(params, true);
@@ -305,10 +497,10 @@ impl Approvals {
                 if let Some(token) = presented {
                     self.tokens.discard(&token);
                 }
-                reply
+                reply.map(X402Reply::Now)
             }
             "x402.settle" => self.x402_settle(id, params, clocks),
-            "x402.update" => self.x402_update(id, params),
+            "x402.update" => self.x402_update(id, params).map(X402Reply::Now),
             _ => Err(invalid("unknown method")),
         }
     }
@@ -323,13 +515,19 @@ impl Approvals {
         let fields = object(
             params,
             &["account", "detection", "requirements", "authorization"],
-            &["accept_index", "grant", "device"],
+            &["accept_index", "grant", "device", "now_s"],
         )?;
         if !self.grants.moved(StoreKind::X402) {
             return Err(not_moved(StoreKind::X402));
         }
         let account = super::account(fields.get("account"), "account")?;
         let device = fields.get("device").map(device_of).transpose()?;
+        let wall_s = clocks.wall_ms / 1000;
+        // Main's clock, for a Ledger account's payment (design 0016, D2).
+        let now_s = fields
+            .get("now_s")
+            .map(|value| main_clock(value, device.as_ref(), wall_s))
+            .transpose()?;
         // The account's own record, once `vault_meta` is moved (G20):
         // checked before anything is spent or charged. The vault pays only
         // for its own accounts (G20b): a mnemonic record in the hardware
@@ -338,6 +536,18 @@ impl Approvals {
             recorded_device(&recorded, device.as_ref())?;
             if recorded == Account::Vault {
                 self.vault_signs(account)?;
+            }
+        }
+        // A payment made with `now_s` is signed on the device lane with the
+        // account's Ledger record (D9): `not_moved` before `vault_meta` is
+        // moved, and the record's address the device's.
+        if now_s.is_some() {
+            let record = self.ledger_account(account)?;
+            let claimed = device
+                .as_ref()
+                .and_then(|(_, address)| fc_wallet_state::normalized_bytes(address));
+            if claimed != Some(record.address) {
+                return Err(invalid("device: not the account's (vault-meta.json)"));
             }
         }
         // The authorization names 20 bytes: an address past them (an ICAP
@@ -353,7 +563,6 @@ impl Approvals {
             .ok_or_else(|| invalid("detection.url: x402 pays an http or https resource"))?;
         let requirements =
             Requirements::parse(&fields["requirements"]).map_err(|e| invalid(e.to_string()))?;
-        let wall_s = clocks.wall_ms / 1000;
         let form = object(&fields["authorization"], &[], &["token", "cap"])?;
         let (authority, index) = match (form.get("token"), form.get("cap")) {
             (Some(_), None) => {
@@ -449,8 +658,11 @@ impl Approvals {
         OsRng
             .try_fill_bytes(&mut *nonce)
             .map_err(|_| crate::vault::internal())?;
+        crate::testhooks::x402_nonce(&mut nonce);
+        // Every time byte on main's clock where it gave one (D2), else on
+        // the core's (#392).
         let built = payment
-            .build(&from, wall_s, &nonce)
+            .build(&from, now_s.unwrap_or(wall_s), &nonce)
             .map_err(|e| invalid(e.to_string()))?;
         // A device's payment is held until its signature: one past a
         // frame's size isn't, before anything is charged.
@@ -502,6 +714,7 @@ impl Approvals {
                     origin,
                     tuple,
                     token_grant,
+                    form: now_s.map_or(Form::Signature, |_| Form::Ledger { account }),
                 })),
             })?;
             reply["reservation"] = json!(reservation.as_str());
@@ -652,22 +865,39 @@ impl Approvals {
         id: u64,
         params: &Value,
         clocks: Clocks,
-    ) -> Result<Zeroizing<Vec<u8>>, ErrorBody> {
-        let fields = object(params, &["reservation"], &["outcome", "signature"])?;
+    ) -> Result<X402Reply, ErrorBody> {
+        let fields = object(
+            params,
+            &["reservation"],
+            &["outcome", "signature", "typed_data"],
+        )?;
         if !self.grants.moved(StoreKind::X402) {
             return Err(not_moved(StoreKind::X402));
         }
         let reservation = string(fields, "reservation")?;
-        let withheld = match (fields.get("outcome"), fields.get("signature")) {
-            (None, Some(signature)) => {
-                return self.x402_signed(id, reservation, signature, clocks);
+        let withheld = match (
+            fields.get("outcome"),
+            fields.get("signature"),
+            fields.get("typed_data"),
+        ) {
+            (None, Some(signature), None) => {
+                return self
+                    .x402_signed(id, reservation, signature, clocks)
+                    .map(X402Reply::Now);
             }
-            (Some(_), None) => match string(fields, "outcome")? {
+            (None, None, Some(typed_data)) => {
+                return self.x402_ledger(reservation, typed_data);
+            }
+            (Some(_), None, None) => match string(fields, "outcome")? {
                 "withheld" => true,
                 "sent" => false,
                 _ => return Err(invalid("outcome: expected withheld or sent")),
             },
-            _ => return Err(invalid("expected an outcome or a device's signature")),
+            _ => {
+                return Err(invalid(
+                    "expected an outcome, a device's signature or a Ledger's typed data",
+                ));
+            }
         };
         let at = self
             .x402
@@ -698,14 +928,14 @@ impl Approvals {
             ));
         }
         let Some(held) = taken.held.filter(|_| withheld) else {
-            return json_reply(id, &json!({ "refunded": false }));
+            return json_reply(id, &json!({ "refunded": false })).map(X402Reply::Now);
         };
         let (refunded, durable) = self.give_back(held)?;
         let mut reply = json!({ "refunded": refunded });
         if !durable {
             reply["durable"] = json!(false);
         }
-        json_reply(id, &reply)
+        json_reply(id, &reply).map(X402Reply::Now)
     }
 
     /// A charge given back, only to the cap it was taken from: not one
@@ -740,6 +970,13 @@ impl Approvals {
             .ok_or_else(|| invalid("reservation: unknown"))?;
         if !self.x402.awaits_signature(at) {
             return Err(invalid("reservation: no device's signature is awaited"));
+        }
+        // A Ledger's payment made with `now_s` is signed on the device lane,
+        // never taken from main (design 0016, D2).
+        if self.x402.form(at) != Some(Form::Signature) {
+            return Err(invalid(
+                "reservation: a Ledger payment made with now_s is settled with its typed_data",
+            ));
         }
         let Some(device) = self
             .x402
@@ -790,6 +1027,103 @@ impl Approvals {
             .reservations
             .get(at)
             .is_some_and(|(_, reservation)| reservation.held.is_some());
+        let mut reply = json!({ "payload": raw(payload)?, "charged": charged });
+        if let Some(grant) = grant_reply {
+            reply["grant"] = grant;
+        }
+        if !durable {
+            reply["durable"] = json!(false);
+        }
+        secret_reply(id, &reply, 0)
+    }
+
+    /// `x402.settle { reservation, typed_data }` (design 0016, D2): main's
+    /// rebuild of a Ledger payment made with `now_s`, which must equal the
+    /// reserved authorization. Then fc-ledger's operation over the reserved
+    /// one, with the account's record, for the device lane; the reservation
+    /// goes with it ([`Settling`]). From the reservation found on, any
+    /// refusal gives its charge back and spends it, before the device.
+    fn x402_ledger(&mut self, id: &str, typed_data: &Value) -> Result<X402Reply, ErrorBody> {
+        let at = self
+            .x402
+            .find(id)
+            .ok_or_else(|| invalid("reservation: unknown"))?;
+        let account = match self.x402.form(at) {
+            Some(Form::Ledger { account }) => account,
+            Some(Form::Signature) => {
+                return Err(invalid(
+                    "reservation: made without now_s, it is settled with the device's signature",
+                ));
+            }
+            None => return Err(invalid("reservation: no device's signature is awaited")),
+        };
+        let Some((id, reservation)) = self.x402.take(at) else {
+            return Err(crate::vault::internal());
+        };
+        match ledger_operation(self, account, &reservation, typed_data) {
+            Ok(operation) => Ok(X402Reply::Device(Box::new(LedgerPayment {
+                operation,
+                settling: Settling { id, reservation },
+            }))),
+            Err(error) => Err(self.x402_spent(reservation, error)),
+        }
+    }
+
+    /// A Ledger payment that ends without a signature: its charge given
+    /// back (to the cap it was taken from, if that cap stands), and the
+    /// reservation spent. The error, with `refunded`.
+    fn x402_spent(&mut self, reservation: Reservation, error: ErrorBody) -> ErrorBody {
+        let refunded = match reservation.held {
+            // A refund whose write fails leaves the charge.
+            Some(held) => self.give_back(held).is_ok_and(|(refunded, _)| refunded),
+            None => false,
+        };
+        with_refunded(error, refunded)
+    }
+
+    /// Request `id`'s Ledger payment, once its operation ended (design
+    /// 0016, D2): with the device's signature, which fc-ledger recovered to
+    /// the record's address over the reserved digest, the payload, a
+    /// token's grant written and its cap charged, as `{ signature }` does;
+    /// the reservation is kept again and waits for its outcome. Otherwise
+    /// (the device's refusal or failure, the lane's end, a cancel) its
+    /// charge is given back and the reservation spent.
+    pub fn x402_ledger_ended(
+        &mut self,
+        id: u64,
+        settling: Settling,
+        ended: Result<fc_ledger::Signed, ErrorBody>,
+        clocks: Clocks,
+    ) -> Result<Zeroizing<Vec<u8>>, ErrorBody> {
+        let Settling {
+            id: kept,
+            mut reservation,
+        } = settling;
+        let signature = match ended {
+            Ok(fc_ledger::Signed::Signature(signature)) => signature,
+            // An operation ends with its own kind of result.
+            Ok(_) => return Err(self.x402_spent(reservation, crate::vault::internal())),
+            Err(error) => return Err(self.x402_spent(reservation, error)),
+        };
+        let Some(device) = reservation.device.take() else {
+            return Err(self.x402_spent(reservation, crate::vault::internal()));
+        };
+        let payload = device.built.payload(&signature);
+        let mut durable = true;
+        let mut grant_reply = None;
+        if let Some(grant) = &device.token_grant {
+            let (held, reply, flushed) = self.token_paid(
+                &device.origin,
+                device.tuple.as_ref(),
+                grant.as_ref(),
+                clocks.wall_ms / 1000,
+            );
+            durable &= flushed;
+            grant_reply = reply;
+            reservation.held = held.map(|(held, _)| held);
+        }
+        let charged = reservation.held.is_some();
+        self.x402.keep(kept, reservation);
         let mut reply = json!({ "payload": raw(payload)?, "charged": charged });
         if let Some(grant) = grant_reply {
             reply["grant"] = grant;

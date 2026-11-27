@@ -2256,6 +2256,10 @@ impl Core {
                     let outs = self.vault.ledger_signed(id, *pending, signed);
                     self.dispatch(outs)
                 }
+                Finish::X402(id, settling, ended) => {
+                    let outs = self.vault.x402_ledger_ended(id, *settling, ended);
+                    self.dispatch(outs)
+                }
             };
             if let Flow::Exit(exit) = flow {
                 return Flow::Exit(exit);
@@ -2512,6 +2516,23 @@ impl Core {
                         id,
                         operation,
                         Then::Sign(Box::new(pending)),
+                        Turn::Wait,
+                        Instant::now(),
+                    );
+                    self.ledger_ended(ended)
+                }
+                // A Ledger's x402 payment (design 0016, L5): its signature
+                // over the reserved authorization waits its turn on the
+                // device lane, the reservation with it.
+                Out::X402Ledger(id, payment) => {
+                    let crate::approvals::x402::LedgerPayment {
+                        operation,
+                        settling,
+                    } = *payment;
+                    let ended = self.ledger.submit(
+                        id,
+                        operation,
+                        Then::X402(Box::new(settling)),
                         Turn::Wait,
                         Instant::now(),
                     );

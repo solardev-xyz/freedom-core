@@ -142,6 +142,10 @@
 //!   appends a line to (`sign`) each time it is about to sign a payment's
 //!   digest, so a test counts the signatures: none for a cap's charge the
 //!   file lacks (design 0012, `x402-at-sign`).
+//! - `FREEDOM_CORED_TEST_X402_NONCE` holds 64 hex digits: `x402.authorize`'s
+//!   nonce, in place of the one drawn from the OS's RNG, so a test builds
+//!   the authorization `vectors/ledger.json` records under its fixed nonce
+//!   (design 0016, LDG-2's L5). Anything else leaves the drawn nonce.
 //! - `FREEDOM_CORED_TEST_KEYSTORE_DEADLINE_MS` replaces how long the core
 //!   waits for main's answer to a `shell.keystore` request (design 0013:
 //!   main's 60 s or 10 s, and 5 s more).
@@ -762,6 +766,25 @@ pub fn x402_signing() {
 }
 
 #[cfg(feature = "testhooks")]
+pub fn x402_nonce(nonce: &mut [u8; 32]) {
+    let Ok(text) = std::env::var("FREEDOM_CORED_TEST_X402_NONCE") else {
+        return;
+    };
+    let digits = text.trim();
+    if digits.len() != 64 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return;
+    }
+    for (at, byte) in nonce.iter_mut().enumerate() {
+        if let Some(value) = digits
+            .get(at * 2..at * 2 + 2)
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+        {
+            *byte = value;
+        }
+    }
+}
+
+#[cfg(feature = "testhooks")]
 pub fn swap(stage: &str, path: &std::path::Path) {
     let Ok(spec) = std::env::var("FREEDOM_CORED_TEST_SWAP") else {
         return;
@@ -1341,6 +1364,9 @@ pub fn swap(_stage: &str, _path: &std::path::Path) {}
 
 #[cfg(not(feature = "testhooks"))]
 pub fn x402_signing() {}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn x402_nonce(_nonce: &mut [u8; 32]) {}
 
 #[cfg(not(feature = "testhooks"))]
 pub fn naming_reply() {}

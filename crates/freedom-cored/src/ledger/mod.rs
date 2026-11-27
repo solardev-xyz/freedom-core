@@ -7,8 +7,9 @@
 //! - [`reply`]: `shell.ledger_apdu`'s replies, read strictly, and the bound
 //!   each reply is read within.
 //! - [`methods`]: `ledger.accounts` and `ledger.add` (L3), which drive it,
-//!   and the end of `sign.*` with a Ledger key (L4,
-//!   [`crate::signing::prepare`] and [`crate::signing::finish`]).
+//!   the end of `sign.*` with a Ledger key (L4,
+//!   [`crate::signing::prepare`] and [`crate::signing::finish`]), and of a
+//!   Ledger's x402 payment (L5, [`crate::approvals::x402`]).
 
 pub mod lane;
 pub mod methods;

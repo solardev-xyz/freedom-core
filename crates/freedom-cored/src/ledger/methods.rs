@@ -35,6 +35,11 @@
 //! - **`sign.*` with a Ledger key** (L4) comes here from
 //!   [`crate::signing::prepare`], authorized, as [`Then::Sign`], and its
 //!   signature goes back to [`crate::signing::finish`] ([`Finish::Signed`]).
+//! - **A Ledger's x402 payment** (L5, D2), `x402.settle { reservation,
+//!   typed_data }`, comes here from the approvals as [`Then::X402`], and
+//!   its end goes back to them whatever it is ([`Finish::X402`]): the
+//!   signature gives the payload, and anything else, a cancel included,
+//!   gives the charge back.
 //! - **A device's failure** is `device_failed` with `data.ledger`, its
 //!   `LEDGER_*` code (0016's API); a request the lane or fc-ledger refuses
 //!   before its first APDU is `invalid_argument`. The parent's cancel ends
@@ -70,6 +75,10 @@ pub enum Then {
     /// `sign.*` with a Ledger key (L4): what its reply needs once signed
     /// ([`crate::signing::finish`]).
     Sign(Box<crate::signing::Pending>),
+    /// `x402.settle { reservation, typed_data }` (L5, D2): the payment and
+    /// its reservation, which the approvals finish however it ends
+    /// ([`crate::approvals::Approvals::x402_ledger_ended`]).
+    X402(Box<crate::approvals::x402::Settling>),
 }
 
 /// What the event loop does with an operation's end.
@@ -83,6 +92,14 @@ pub enum Finish {
     /// once its authorization has done what it does on a signature
     /// ([`crate::vault::Vault::ledger_signed`]).
     Signed(u64, Box<crate::signing::Pending>, Signed),
+    /// A Ledger's x402 payment, ended: its signature, checked by fc-ledger,
+    /// or the parent's error, for the approvals to finish
+    /// ([`crate::vault::Vault::x402_ledger_ended`]).
+    X402(
+        u64,
+        Box<crate::approvals::x402::Settling>,
+        Result<Signed, ErrorBody>,
+    ),
 }
 
 /// Where the records discovery's check reads stand: none before
@@ -194,13 +211,8 @@ pub fn finish(ended: Ended<Then>) -> Finish {
         outcome,
     } = ended;
     let signed = match outcome {
-        Outcome::Cancelled => {
-            return Finish::Answer(
-                parent,
-                Err(ErrorBody::new(ErrorCode::Cancelled, "Cancelled")),
-            );
-        }
-        Outcome::Done(Ok(signed)) => signed,
+        Outcome::Cancelled => Err(ErrorBody::new(ErrorCode::Cancelled, "Cancelled")),
+        Outcome::Done(Ok(signed)) => Ok(signed),
         outcome => {
             if let Outcome::Done(Err(failure)) = &outcome {
                 crate::log::warn(
@@ -209,8 +221,18 @@ pub fn finish(ended: Ended<Then>) -> Finish {
                 );
             }
             let code = outcome.code().unwrap_or(fc_ledger::LedgerCode::Unknown);
-            return Finish::Answer(parent, Err(device_failed(code)));
+            Err(device_failed(code))
         }
+    };
+    // A payment's end, whatever it is, goes back to the approvals: a
+    // failure gives its charge back.
+    let then = match then {
+        Then::X402(settling) => return Finish::X402(parent, settling, signed),
+        then => then,
+    };
+    let signed = match signed {
+        Ok(signed) => signed,
+        Err(error) => return Finish::Answer(parent, Err(error)),
     };
     match (then, signed) {
         (Then::Accounts { checks }, Signed::Accounts(found)) => discovered(parent, checks, found),

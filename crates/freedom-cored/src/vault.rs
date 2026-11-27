@@ -127,6 +127,10 @@ pub enum Out {
     /// Request `id`'s Ledger signature (design 0016, L4), authorized, for
     /// the device lane: [`Vault::ledger_signed`] answers it once signed.
     Ledger(u64, Box<crate::signing::Device>),
+    /// Request `id`'s Ledger x402 payment (design 0016, L5, D2), its typed
+    /// data the reserved one, for the device lane:
+    /// [`Vault::x402_ledger_ended`] answers it however it ends.
+    X402Ledger(u64, Box<crate::approvals::x402::LedgerPayment>),
 }
 
 /// Why a vault operation failed. Mapped to a code and the method's JS
@@ -1675,16 +1679,25 @@ impl Vault {
                     .map(|result| json_result(id, &result))
             }
             // x402's payments (X402-1): the caps, the token and the
-            // authorization the core signs itself.
+            // authorization the core signs itself; a Ledger's payment goes
+            // on to the device lane (design 0016, L5).
             _ if crate::approvals::x402::METHODS.contains(&method) => {
                 let clocks = self.clocks();
-                fc_evm::parse_json(raw.unwrap_or("{}"))
+                let reply = fc_evm::parse_json(raw.unwrap_or("{}"))
                     .map_err(|_| ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters"))
                     .and_then(|params| {
                         self.approvals
                             .x402_request(&self.state, id, method, &params, clocks)
-                    })
-                    .map(Some)
+                    });
+                match reply {
+                    Ok(crate::approvals::x402::X402Reply::Now(payload)) => Ok(Some(payload)),
+                    Ok(crate::approvals::x402::X402Reply::Device(payment)) => {
+                        out.push(Out::X402Ledger(id, payment));
+                        self.after_request(&mut out);
+                        return out;
+                    }
+                    Err(error) => Err(error),
+                }
             }
             // Design 0013, "Pending Safe transactions" (PRF-5f): main's
             // own, answered at once from the file.
@@ -1779,6 +1792,29 @@ impl Vault {
                 Some(payload) => out.push(Out::Send(payload)),
                 None => self.reply_error(&mut out, id, internal()),
             },
+            Err(error) => self.reply_error(&mut out, id, error),
+        }
+        self.after_request(&mut out);
+        out
+    }
+
+    /// Request `id`'s Ledger x402 payment ended on the device lane (design
+    /// 0016, L5, D2): its payload once signed, or its refusal with its
+    /// charge given back ([`Approvals::x402_ledger_ended`]), and the events
+    /// that follow.
+    pub fn x402_ledger_ended(
+        &mut self,
+        id: u64,
+        settling: crate::approvals::x402::Settling,
+        ended: Result<fc_ledger::Signed, ErrorBody>,
+    ) -> Vec<Out> {
+        let mut out = Vec::new();
+        let clocks = self.clocks();
+        match self
+            .approvals
+            .x402_ledger_ended(id, settling, ended, clocks)
+        {
+            Ok(payload) => out.push(Out::Send(payload)),
             Err(error) => self.reply_error(&mut out, id, error),
         }
         self.after_request(&mut out);
