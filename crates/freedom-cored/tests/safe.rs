@@ -3,8 +3,10 @@
 //! marks a Safe deployed on a receipt two endpoints agree on, and
 //! `safe.status` then reads its setup (no nonce), each read through the
 //! core's own chain machine and main's `shell.rpc`; the callers each method
-//! admits; `not_moved` before `vault_meta` is in `store_moved`. The test
-//! plays main.
+//! admits; `not_moved` before `vault_meta` is in `store_moved`. S3's
+//! `safe.prepare` and `safe.propose`, and S4's `safe.execute`, whose
+//! prepared send `sign.transaction` signs only as prepared, and
+//! `safe.executed`. The test plays main.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -170,6 +172,12 @@ fn nothing_before_vault_meta_moves_and_deployed_is_mains() {
             "safe.propose",
             json!({ "safe": SAFE, "safe_tx_hash": HASH, "authorization": { "token": "00".repeat(32) } }),
         ),
+        (10, "safe.execute", json!({ "safe": SAFE })),
+        (
+            11,
+            "safe.executed",
+            json!({ "safe": SAFE, "safe_tx_hash": HASH, "hash": HASH }),
+        ),
     ] {
         let reply = call(&mut core, id, "shell", method, params);
         assert_eq!(reply["error"]["code"], "not_moved", "{method} {reply}");
@@ -181,10 +189,26 @@ fn nothing_before_vault_meta_moves_and_deployed_is_mains() {
     );
     let reply = call(
         &mut core,
-        10,
+        12,
         "chrome",
         "safe.deployed",
         json!({ "safe": SAFE, "hash": HASH }),
+    );
+    assert_eq!(reply["error"]["code"], "forbidden");
+    let reply = call(
+        &mut core,
+        13,
+        "chrome",
+        "safe.executed",
+        json!({ "safe": SAFE, "safe_tx_hash": HASH, "hash": HASH }),
+    );
+    assert_eq!(reply["error"]["code"], "forbidden");
+    let reply = call(
+        &mut core,
+        14,
+        "page",
+        "safe.execute",
+        json!({ "safe": SAFE }),
     );
     assert_eq!(reply["error"]["code"], "forbidden");
 }
@@ -644,4 +668,253 @@ fn a_safe_tx_is_prepared_proposed_and_reloaded() {
     assert!(core.hello()["result"].is_object());
     let reply = call(&mut core, 2, "chrome", "safe.pending", json!({}));
     assert_eq!(reply["result"]["states"], json!([state]), "{reply}");
+}
+
+// --- SAFE-2's S4: the pending SafeTx executed --------------------------------
+
+/// Plays main and Gnosis until request `id`'s response: the Safe's reads as
+/// [`served_for`] answers them, the executor's estimate (200,000 gas), and
+/// the fee quote's `eth_gasPrice` (16 gwei) and `eth_maxPriorityFeePerGas`
+/// (2 gwei), each from both endpoints; any other method isn't served. The
+/// reads' methods, in order.
+fn served_exec(core: &mut Core, id: u64, owners: &[[u8; 20]]) -> (Value, Vec<String>) {
+    let mut methods = Vec::new();
+    loop {
+        let message = core.recv();
+        match message["type"].as_str() {
+            Some("response") if message["id"] == id => return (message, methods),
+            Some("request") => {
+                assert_eq!(message["method"], "shell.rpc", "{message}");
+                let body: Value =
+                    serde_json::from_str(message["params"]["body"].as_str().unwrap()).unwrap();
+                let method = body["method"].as_str().unwrap();
+                methods.push(method.to_owned());
+                let mut text = json!({ "jsonrpc": "2.0", "id": body["id"] });
+                match method {
+                    "eth_estimateGas" => text["result"] = json!("0x30d40"),
+                    "eth_gasPrice" => text["result"] = json!(format!("{:#x}", 16_000_000_000u64)),
+                    "eth_maxPriorityFeePerGas" => {
+                        text["result"] = json!(format!("{:#x}", 2_000_000_000u64));
+                    }
+                    "eth_getCode" | "eth_getStorageAt" | "eth_call" => {
+                        text["result"] = answer_for(method, &body["params"], owners);
+                    }
+                    _ => {
+                        text["error"] =
+                            json!({ "code": -32601, "message": "the method does not exist" });
+                    }
+                }
+                core.send(&json!({
+                    "type": "response", "id": message["id"],
+                    "result": {
+                        "status": 200,
+                        "body": base64::engine::general_purpose::STANDARD.encode(text.to_string()),
+                    },
+                }));
+            }
+            Some("event") => {}
+            _ => panic!("unexpected {message}"),
+        }
+    }
+}
+
+/// The vector flow `one-of-two` executed over the wire: proposed as above;
+/// `safe.execute` reads the eight again, then the executor's quote, and
+/// answers the executor's send with the calldata the reference sent and its
+/// `executor-send` token. Main's `sign.transaction` with a field changed is
+/// refused and burns it; a new one signs as prepared, at main's nonce, and
+/// `safe.executed` clears the entry.
+#[test]
+fn a_proposed_safe_tx_is_executed_through_the_prepared_send() {
+    let v = vectors();
+    let flow = v["flows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|flow| flow["id"] == "one-of-two")
+        .unwrap()
+        .clone();
+    let sent = &flow["steps"][1]["sent"][0];
+    let owners: Vec<[u8; 20]> = ["A", "B"]
+        .iter()
+        .map(|name| fc_evm::parse_address(v["owners"][name]["address"].as_str().unwrap()).unwrap())
+        .collect();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("identity")).unwrap();
+    let mut core = spawn(
+        "serve",
+        &root.path().join("identity"),
+        &root.path().join("locks"),
+        &[],
+    );
+    std::fs::create_dir_all(&core.grant_root).unwrap();
+    core.store_moved = vec!["vault_meta", "safe_pending"];
+    assert!(core.hello()["result"].is_object());
+    let imported = call(
+        &mut core,
+        2,
+        "shell",
+        "vault.import",
+        json!({
+            "password_b64": base64::engine::general_purpose::STANDARD.encode("testpass1"),
+            "mnemonic_b64": base64::engine::general_purpose::STANDARD.encode(ABANDON),
+            "overwrite": true, "user_knows_password": true,
+        }),
+    );
+    assert!(imported["result"].is_object(), "{imported}");
+    call(
+        &mut core,
+        3,
+        "shell",
+        "accounts.add_mnemonic",
+        json!({ "name": "B" }),
+    );
+    let safe = call(
+        &mut core,
+        4,
+        "shell",
+        "accounts.add_safe",
+        json!({ "address": flow["safe"]["address"], "owners": [0, 1], "threshold": 1, "salt_nonce": "0" }),
+    );
+    let index = safe["result"]["wallet"]["index"].as_u64().unwrap();
+    call(
+        &mut core,
+        5,
+        "shell",
+        "accounts.mark_safe_deployed",
+        json!({ "index": index, "chain_id": 100 }),
+    );
+    call(
+        &mut core,
+        6,
+        "shell",
+        "chain.configure",
+        json!({ "chains": [gnosis_of_two()] }),
+    );
+    send(
+        &mut core,
+        7,
+        "shell",
+        "safe.prepare",
+        json!({ "safe": index, "chain_id": 100, "tx": flow["tx"] }),
+    );
+    let (reply, _) = served_for(&mut core, 7, &owners);
+    let answer = reply["result"].clone();
+    let issued = call(
+        &mut core,
+        8,
+        "shell",
+        "approval.issue",
+        json!({
+            "kind": "safe-send", "account": index,
+            "payload": {
+                "safe": flow["safe"]["address"], "chain_id": "100",
+                "safe_tx": answer["safe_tx"], "safe_tx_hash": answer["safe_tx_hash"],
+            },
+        }),
+    );
+    send(
+        &mut core,
+        9,
+        "shell",
+        "safe.propose",
+        json!({ "safe": index, "safe_tx_hash": answer["safe_tx_hash"],
+                "authorization": { "token": issued["result"]["token"] } }),
+    );
+    let (reply, _) = served_for(&mut core, 9, &owners);
+    assert_eq!(reply["result"]["collected"], 1, "{reply}");
+    // Executed: the eight again, the nonce last, then the quote.
+    send(
+        &mut core,
+        10,
+        "shell",
+        "safe.execute",
+        json!({ "safe": index, "safe_tx_hash": answer["safe_tx_hash"] }),
+    );
+    let (reply, methods) = served_exec(&mut core, 10, &owners);
+    assert_eq!(methods[..2], ["eth_getCode"; 2], "{methods:?}");
+    assert_eq!(
+        methods[14..16],
+        ["eth_call"; 2],
+        "the nonce last: {methods:?}"
+    );
+    assert!(methods[16..].contains(&"eth_estimateGas".to_owned()));
+    let send_of = |reply: &Value| {
+        let send = reply["result"]["send"].clone();
+        assert!(send.is_object(), "{reply}");
+        send
+    };
+    let prepared = send_of(&reply);
+    assert_eq!(prepared["kind"], "executor-send");
+    assert_eq!(prepared["account"], 0);
+    let tx = &prepared["tx"];
+    assert_eq!(tx["to"], sent["to"]);
+    assert_eq!(tx["value"], "0");
+    assert_eq!(tx["data"], sent["data"]);
+    assert_eq!(tx["gas_limit"], "240000");
+    // Main signs it at its nonce, with one field changed: refused, burnt.
+    let sign = |core: &mut Core, id: u64, send: &Value, edit: &dyn Fn(&mut Value)| {
+        let mut tx = send["tx"].clone();
+        tx["nonce"] = json!("5");
+        edit(&mut tx);
+        call(
+            core,
+            id,
+            "shell",
+            "sign.transaction",
+            json!({
+                "key": { "kind": "account", "index": send["account"] }, "tx": tx,
+                "authorization": { "token": send["token"], "kind": send["kind"] },
+            }),
+        )
+    };
+    let refused = sign(&mut core, 11, &prepared, &|tx| tx["value"] = json!("1"));
+    assert_eq!(refused["error"]["code"], "not_authorized", "{refused}");
+    assert_eq!(refused["error"]["data"]["reason"], "mismatch");
+    let refused = sign(&mut core, 12, &prepared, &|_| {});
+    assert_eq!(
+        refused["error"]["data"]["reason"], "unknown_token",
+        "{refused}"
+    );
+    // Without a token, main's word signs no `execTransaction`.
+    let mut bare = prepared["tx"].clone();
+    bare["nonce"] = json!("5");
+    let refused = call(
+        &mut core,
+        13,
+        "shell",
+        "sign.transaction",
+        json!({ "key": { "kind": "account", "index": 0 }, "tx": bare }),
+    );
+    assert_eq!(refused["error"]["data"]["reason"], "no_token", "{refused}");
+    // A new prepared send signs as prepared.
+    send(
+        &mut core,
+        14,
+        "shell",
+        "safe.execute",
+        json!({ "safe": index }),
+    );
+    let (reply, _) = served_exec(&mut core, 14, &owners);
+    let prepared = send_of(&reply);
+    let signed = sign(&mut core, 15, &prepared, &|_| {});
+    assert!(signed["result"].is_object(), "{signed}");
+    let hash = signed["result"]["hash"].clone();
+    assert!(hash.is_string(), "{signed}");
+    // Main broadcast it: the entry is cleared.
+    let reply = call(
+        &mut core,
+        16,
+        "shell",
+        "safe.executed",
+        json!({ "safe": index, "safe_tx_hash": answer["safe_tx_hash"], "hash": hash }),
+    );
+    assert_eq!(reply["result"], json!({}), "{reply}");
+    let file: Value = serde_json::from_str(
+        &std::fs::read_to_string(core.grant_root.join("safe-pending.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(file, json!({}));
+    let reply = call(&mut core, 17, "chrome", "safe.pending", json!({}));
+    assert_eq!(reply["result"]["states"], json!([]));
 }

@@ -1,9 +1,9 @@
-//! The `safe.*` methods (design 0016, API; SAFE-2's S2 and S3): a Safe's
-//! record made in the core, its status and deployment read through the
-//! chain machine, the pending store's board views, and a Safe transaction
-//! prepared and proposed. Every one answers `not_moved` (`data.store:
-//! "vault_meta"`) until the hello names `vault_meta`: the record is the
-//! core's to read and to mark.
+//! The `safe.*` methods (design 0016, API; SAFE-2's S2, S3 and S4): a
+//! Safe's record made in the core, its status and deployment read through
+//! the chain machine, the pending store's board views, and a Safe
+//! transaction prepared, proposed and executed. Every one answers
+//! `not_moved` (`data.store: "vault_meta"`) until the hello names
+//! `vault_meta`: the record is the core's to read and to mark.
 //!
 //! - **`safe.create { name, owners: [index], threshold }`** → `{ wallet }`
 //!   (`createSafeAccount`): the owners' addresses from their records, a
@@ -30,13 +30,17 @@
 //!   marked nor reported, has no `deployed` to give: it is refused
 //!   `unverified` with `isDeployedOnChain`'s failure, as the reference
 //!   throws.
-//! - **`safe.deploy { safe, fee_ack? }`** → `{ send: { account, tx } }`,
-//!   the executor's deployment in `sign.transaction`'s form without its
-//!   nonce (`createProxyWithNonce` to the factory, value 0, the estimate
-//!   plus 20%, the core's fee quote), or `{ fee_check }` when the fee
-//!   check at approval stops it and `fee_ack` isn't `true`, or `{
-//!   deployed: true }` for a Safe that already is. With no vault owner, or
-//!   a balance below the cost, `SAFE_NEEDS_FUNDS`.
+//! - **`safe.deploy { safe, fee_ack? }`** → `{ send: { kind, account, tx,
+//!   token } }`, the executor's deployment in `sign.transaction`'s form
+//!   without its nonce (`createProxyWithNonce` to the factory, value 0, the
+//!   estimate plus 20%, the core's fee quote) with its `executor-send`
+//!   token, or `{ fee_check }`, or `{ deployed: true }` for a Safe that
+//!   already is: judged and confirmed as an execution's send is (S4,
+//!   below), the balance read each time. With no vault owner, or a balance
+//!   below the cost, `SAFE_NEEDS_FUNDS`. A deployment isn't a Safe's call,
+//!   so main's word still signs one under `shell` without the token, as
+//!   today's activation does until SAFE-3; presented, the token is
+//!   checked.
 //! - **`safe.deployed { safe, hash }`** → `{ deployed }`, after main's
 //!   receipt (D4, the deployed mark): the receipt read again through the
 //!   chain machine, then the code. Marked only on verified evidence: a
@@ -75,10 +79,50 @@
 //!   ([`super::entry`]) unless another is pending meanwhile. It needs
 //!   `safe_pending` moved too. A presented token is burnt however the
 //!   request ends.
-//! - **The Safe's hold:** from a `safe.propose`'s spend to its answer, the
-//!   Safe is held: another `safe.propose` for it is `SAFE_PENDING_EXISTS`,
-//!   as the reference's reservation answers, and `safe.discard`
-//!   `SAFE_BUSY`, as `cancelSafeSend` answers while a step runs.
+//! - **`safe.execute { safe, fee_ack?, safe_tx_hash? }`** → `{ send }`,
+//!   `{ fee_check }` or `{ superseded }` (S4): the pending SafeTx as the
+//!   codec reads it (`safe_tx_hash`, when given, must name it), of a Safe
+//!   the record marks deployed; the eight reads again, each verified, the
+//!   nonce last; then the record and the entry read again, still the ones
+//!   checked (`SAFE_DISCARDED` for an entry replaced meanwhile, as
+//!   `executeSafePending` refuses it). A nonce past the SafeTx's ends the
+//!   Safe's `safe-send` approvals and marks the entry `superseded`, as the
+//!   reference writes it, and answers the board's state; one below it is
+//!   `nonce_behind`. At the nonce, with the record's threshold of
+//!   signatures that count, the executor's send.
+//! - **The executor's send:** `execTransaction` to the Safe with every
+//!   signature that counts, joined as `buildSignatureBytes` joins them,
+//!   value 0, from the first vault owner, its gas the estimate plus 20%
+//!   and its fees the core's quote, in `sign.transaction`'s form without
+//!   its nonce. Judged as `quotedExecutorSend` judges it: a fee the check
+//!   approves on its own (`autoApprove`) gets `{ send }` at once; any other
+//!   `{ fee_check }`, the verdict at approval, and the core keeps that
+//!   offer. `fee_ack: true` then gets `{ send }` for exactly that
+//!   transaction, with no new quote, while the SafeTx and its calldata are
+//!   the same, as `confirmedExecutorSend` signs the fee the user confirmed;
+//!   otherwise it is quoted again, and a fee the check stops is offered
+//!   again.
+//! - **Its token:** `{ send: { kind: "executor-send", account, tx, token
+//!   } }` carries an `executor-send` token the core minted for `tx`, its
+//!   nonce unbound, as fc-eip1193's `{ send }` carries a `dapp-send`'s.
+//!   `sign.transaction` spends it under `shell`, `{ token, kind:
+//!   "executor-send" }`: any other field changed is `mismatch`. A Safe's
+//!   `execTransaction` signs only with a token or a Safe approval (APR-4b),
+//!   so the core's prepared send signs only with it. Each Safe has at most
+//!   one outstanding: a newer one burns the older, and so do the Safe's
+//!   discard, its SafeTx superseded or executed, and the record's removal.
+//! - **`safe.executed { safe, safe_tx_hash, hash }`** → `{}` (S4): main's
+//!   word, after its broadcast, that the SafeTx executed, as today. The
+//!   Safe's `safe-send` approvals end, then its entry is cleared while it
+//!   is still the SafeTx named: none pending is `{}`, another
+//!   `SAFE_DISCARDED` with nothing cleared. It reads no chain.
+//! - **The Safe's hold:** from a `safe.propose`'s spend to its answer, and
+//!   from a `safe.execute`'s start to its answer, the Safe is held: another
+//!   `safe.propose` for it is `SAFE_PENDING_EXISTS`, as the reference's
+//!   reservation answers, `safe.discard` `SAFE_BUSY`, as `cancelSafeSend`
+//!   answers while a step runs, and `safe.execute` `SAFE_BUSY`, as its
+//!   `acquire` answers. Main keeps its own exclusion from `{ send }` to
+//!   `safe.executed`.
 //! - **Refusals** are `invalid_argument` with `data.safe`: `unsupported`,
 //!   `unverified` (a deployment or activation no read answered, or a read
 //!   a step that signs rests on), `changed`, `not_deployed`, `self_call`,
@@ -96,6 +140,8 @@
 //!   [`Safes::write`] with the vault's state.
 
 use std::collections::{BTreeMap, BTreeSet};
+
+use serde::Serialize;
 use std::time::{Duration, Instant};
 
 use fc_evm::{U256, checksum_address, keccak256, parse_bytes, parse_unsigned, to_hex};
@@ -121,7 +167,7 @@ use crate::safe_pending::{Failure, SafePending};
 use crate::vault::{Out, error_payload};
 
 /// The methods, in `core.hello`'s capability order.
-pub const METHODS: [&str; 8] = [
+pub const METHODS: [&str; 10] = [
     "safe.create",
     "safe.status",
     "safe.deploy",
@@ -130,7 +176,12 @@ pub const METHODS: [&str; 8] = [
     "safe.discard",
     "safe.prepare",
     "safe.propose",
+    "safe.execute",
+    "safe.executed",
 ];
+
+/// The kind of the token the executor's prepared send carries (S4).
+pub const SEND_KIND: &str = "executor-send";
 
 /// The chain-reading methods' bound: the `session` class's (#520).
 pub const DEADLINE_MS: u64 = 120_000;
@@ -152,6 +203,16 @@ const PENDING_EXISTS_TEXT: &str =
 
 /// `cancelSafeSend`'s, while a step holds the Safe.
 const BUSY_TEXT: &str = "Wait for the current step to finish first";
+
+/// `beginStep`'s, for a step started while another holds the Safe.
+const STEP_BUSY_TEXT: &str = "Another step of this transaction is still running";
+
+/// `executeSafePending`'s, with nothing pending.
+const NO_PENDING_TEXT: &str = "No pending transaction for this account";
+
+/// `pickDefaultExecutor`'s, with no vault owner to pay.
+const NO_EXECUTOR_TO_EXECUTE_TEXT: &str = "No browser account among the owners to act as executor \
+     \u{2014} choose one that can pay gas";
 
 /// The reference's `SAFE_DISCARDED` text.
 const DISCARDED_TEXT: &str = "This transaction was discarded or replaced";
@@ -256,6 +317,16 @@ fn index_of(params: &serde_json::Map<String, Value>, key: &str) -> Result<u64, E
 /// A JS number's text for an index (`7`, never `7.0`).
 fn index_value(index: u64) -> Value {
     json!(index)
+}
+
+/// A 32-byte hash: `0x` and 64 hex digits.
+fn hash_param(params: &serde_json::Map<String, Value>, key: &str) -> Result<[u8; 32], ErrorBody> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .and_then(|text| parse_bytes(text, key).ok())
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+        .ok_or_else(invalid)
 }
 
 // --- `safe.create` -------------------------------------------------------
@@ -584,9 +655,11 @@ enum Kind {
     Deployed { hash: [u8; 32] },
     Prepare,
     Propose,
+    Execute { fee_ack: bool },
 }
 
-/// What a `safe.prepare` or `safe.propose` carries beside its Safe.
+/// What a `safe.prepare`, `safe.propose` or `safe.execute` carries beside
+/// its Safe.
 enum Work {
     None,
     /// The call to build the SafeTx for.
@@ -596,6 +669,45 @@ enum Work {
         prepared: Box<Prepared>,
         display: Option<JsValue>,
     },
+    /// The pending SafeTx to execute, by its hash, as the codec read it
+    /// before the reads.
+    Execute {
+        hash: [u8; 32],
+    },
+    /// Its executor's send being priced: the SafeTx's hash and the
+    /// `execTransaction` calldata.
+    Exec {
+        hash: [u8; 32],
+        data: Vec<u8>,
+    },
+}
+
+/// An executor's send the fee check stopped, offered at `{ fee_check }`
+/// for the user to confirm: `fee_ack: true` mints for exactly it while it
+/// sends the same thing, as `confirmedExecutorSend` signs the fee the user
+/// confirmed.
+struct Offer {
+    safe: [u8; 20],
+    /// The SafeTx an execution executes; none for the deployment.
+    hash: Option<[u8; 32]>,
+    account: u64,
+    data: Vec<u8>,
+    tx: Value,
+}
+
+/// `{ send }`: the executor's prepared send and its token, which goes
+/// last, into a buffer wiped when dropped, as `approval.issue`'s does.
+#[derive(Serialize)]
+struct SendReply<'a> {
+    send: SendBody<'a>,
+}
+
+#[derive(Serialize)]
+struct SendBody<'a> {
+    kind: &'static str,
+    account: u64,
+    tx: &'a Value,
+    token: &'a str,
 }
 
 /// Where a request stands.
@@ -613,12 +725,15 @@ enum Step {
     Write,
 }
 
-/// The activation's reads: the estimate, the fee quote, the executor's
-/// balance, and for a deployment the fee evidence when it is stale.
+/// The activation's or the execution's reads: the estimate, the fee
+/// quote, for the activation the executor's balance, and for a deployment
+/// or an execution the fee evidence when it is stale.
 struct Quote {
     estimate: Option<Reply>,
     fee: Option<Reply>,
     balance: Option<Reply>,
+    /// Whether the balance is read (the activation's).
+    wants_balance: bool,
     /// The fee evidence's read is out.
     reference: bool,
     /// What the code read showed, for `safe.status`'s `setup`.
@@ -660,6 +775,15 @@ pub struct Safes {
     prepared: PreparedTxs,
     /// Proposals whose signing and write are due, for the vault to run.
     writes: Vec<u64>,
+    /// The token of each Safe's outstanding prepared send (S4), by wallet
+    /// index, with the Safe's address: burnt when a newer one is minted
+    /// for the Safe, when its SafeTx is discarded, superseded or executed,
+    /// and when the records no longer hold the Safe. A bearer secret, wiped
+    /// when dropped and never logged.
+    sends: BTreeMap<u64, ([u8; 20], Zeroizing<String>)>,
+    /// The executor's sends the fee check stopped, by the Safe's wallet
+    /// index, for `fee_ack` to confirm (S4).
+    offers: BTreeMap<u64, Offer>,
 }
 
 /// What the methods read and change beyond their own state.
@@ -708,16 +832,75 @@ fn holds_safe(records: Option<&Records>, address: &[u8; 20]) -> bool {
         })
 }
 
+/// Whether `records` hold, at wallet index `index`, the Safe at `address`.
+fn holds_safe_at(records: Option<&Records>, index: u64, address: &[u8; 20]) -> bool {
+    let Some(records) = records else {
+        return false;
+    };
+    matches!(
+        records.record(index as f64),
+        Ok(Some(record)) if is_safe(&record)
+            && record.get("address").and_then(value_address_bytes) == Some(*address)
+    )
+}
+
 impl Safes {
     pub fn new() -> Self {
         Safes::default()
     }
 
-    /// The records' snapshot changed (G20): the session's reports kept
-    /// only for the Safes `records` still hold, so a removed Safe's goes
-    /// with its record.
-    pub fn records_changed(&mut self, records: Option<&Records>) {
+    /// The records' snapshot changed (G20): the session's reports, the
+    /// prepared sends' tokens and the offers kept only for the Safes
+    /// `records` still hold, so a removed Safe's go with its record. The
+    /// tokens of the sends dropped, for the caller to burn.
+    #[must_use]
+    pub fn records_changed(&mut self, records: Option<&Records>) -> Vec<Zeroizing<String>> {
         self.session.retain(|address| holds_safe(records, address));
+        self.offers
+            .retain(|index, offer| holds_safe_at(records, *index, &offer.safe));
+        let (kept, dropped): (BTreeMap<_, _>, BTreeMap<_, _>) = std::mem::take(&mut self.sends)
+            .into_iter()
+            .partition(|(index, (safe, _))| holds_safe_at(records, *index, safe));
+        self.sends = kept;
+        dropped.into_values().map(|(_, token)| token).collect()
+    }
+
+    /// The Safe at wallet index `index` has no prepared send any more: its
+    /// SafeTx was discarded, superseded or executed. Its token is burnt and
+    /// its offer dropped.
+    fn forget_send(&mut self, index: u64, approvals: &mut Approvals) {
+        if let Some((_, token)) = self.sends.remove(&index) {
+            approvals.burn(&token);
+        }
+        self.offers.remove(&index);
+    }
+
+    /// `{ send }` for the Safe `safe`: an `executor-send` token minted for
+    /// `tx` (`sign.transaction`'s form without its nonce) for the executor
+    /// at wallet index `account`, the Safe's earlier one burnt.
+    fn send_reply(&mut self, id: u64, safe: &Safe, account: u64, tx: &Value, ctx: &mut Ctx) -> Out {
+        let token = match ctx.approvals.executor_token(account, tx, ctx.clocks) {
+            Ok(token) => token,
+            Err(error) => return failed(id, &error),
+        };
+        let reply = SendReply {
+            send: SendBody {
+                kind: SEND_KIND,
+                account,
+                tx,
+                token: &token,
+            },
+        };
+        let size = tx.to_string().len().saturating_add(512);
+        let mut payload = Zeroizing::new(Vec::with_capacity(size));
+        if fc_protocol::message::write_result(&mut *payload, id, &reply).is_err() {
+            ctx.approvals.burn(&token);
+            return failed(id, &crate::vault::internal());
+        }
+        if let Some((_, older)) = self.sends.insert(safe.index, (safe.address, token)) {
+            ctx.approvals.burn(&older);
+        }
+        Out::Send(payload)
     }
 
     /// Whether this module serves `method` on the loop (`safe.create` runs
@@ -790,6 +973,53 @@ impl Safes {
                     Some(_) => return Err(invalid()),
                 };
                 let answer = discard(&records, ctx, index, named.as_deref())?;
+                // Its prepared send, if any, signs nothing now.
+                self.forget_send(index, ctx.approvals);
+                return Ok(vec![reply(id, &answer)]);
+            }
+            "safe.execute" => {
+                ctx.pending.check_moved()?;
+                let p = members(raw, &["safe", "fee_ack", "safe_tx_hash"], &mut params)?;
+                let index = index_of(p, "safe")?;
+                let fee_ack = match p.get("fee_ack") {
+                    None => false,
+                    Some(Value::Bool(ack)) => *ack,
+                    Some(_) => return Err(invalid()),
+                };
+                let named = match p.get("safe_tx_hash") {
+                    None | Some(Value::Null) => None,
+                    Some(_) => Some(hash_param(p, "safe_tx_hash")?),
+                };
+                let safe = resolve(&records, index)?;
+                // `executeSafePending`'s order: the SafeTx named, one
+                // pending, the deployed mark, then the step's hold.
+                let entry = pending_entry(ctx.pending, &safe);
+                if let Some(named) = named
+                    && entry.as_ref().map(|entry| entry.hash) != Some(named)
+                {
+                    return Err(refused("SAFE_DISCARDED", DISCARDED_TEXT));
+                }
+                let Some(entry) = entry else {
+                    return Err(plain(NO_PENDING_TEXT));
+                };
+                if !safe.marked {
+                    return Err(not_deployed());
+                }
+                if self.holds(index) {
+                    return Err(refused("SAFE_BUSY", STEP_BUSY_TEXT));
+                }
+                let work = Work::Execute { hash: entry.hash };
+                return Ok(self.check(id, Kind::Execute { fee_ack }, safe, work, ctx.now));
+            }
+            "safe.executed" => {
+                ctx.pending.check_moved()?;
+                let p = members(raw, &["safe", "safe_tx_hash", "hash"], &mut params)?;
+                let index = index_of(p, "safe")?;
+                let named = hash_param(p, "safe_tx_hash")?;
+                hash_param(p, "hash")?;
+                let answer = executed(&records, ctx, index, &named)?;
+                // Executed, or no longer pending: its send signs nothing.
+                self.forget_send(index, ctx.approvals);
                 return Ok(vec![reply(id, &answer)]);
             }
             "safe.status" => {
@@ -878,12 +1108,7 @@ impl Safes {
             }
             "safe.deployed" => {
                 let p = members(raw, &["safe", "hash"], &mut params)?;
-                let hash = p
-                    .get("hash")
-                    .and_then(Value::as_str)
-                    .and_then(|text| parse_bytes(text, "hash").ok())
-                    .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
-                    .ok_or_else(invalid)?;
+                let hash = hash_param(p, "hash")?;
                 (Kind::Deployed { hash }, index_of(p, "safe")?)
             }
             _ => return Err(ErrorBody::new(ErrorCode::UnknownMethod, "Unknown method")),
@@ -911,7 +1136,9 @@ impl Safes {
                 };
                 vec![self.code_read(id, &op, ctx.now)]
             }
-            Kind::Prepare | Kind::Propose => return Err(crate::vault::internal()),
+            Kind::Prepare | Kind::Propose | Kind::Execute { .. } => {
+                return Err(crate::vault::internal());
+            }
         };
         self.ops.insert(id, op);
         Ok(out)
@@ -1014,7 +1241,7 @@ impl Safes {
                             })
                             .collect()
                     }
-                    Progress::Done(outcome) => self.setup_done(id, op, outcome),
+                    Progress::Done(outcome) => self.setup_done(id, op, outcome, ctx),
                 }
             }
             Step::Quote(mut quote) => {
@@ -1028,7 +1255,7 @@ impl Safes {
                 }
                 if quote.estimate.is_none()
                     || quote.fee.is_none()
-                    || quote.balance.is_none()
+                    || (quote.wants_balance && quote.balance.is_none())
                     || quote.reference
                 {
                     op.step = Step::Quote(quote);
@@ -1049,14 +1276,7 @@ impl Safes {
     /// The deployment as the reads show it (D4): marked on verified
     /// evidence, reported for the session on an unverified answer of it,
     /// and a verified empty code ends the session's report.
-    fn judged(
-        &mut self,
-        id: u64,
-        mut op: Op,
-        receipt: Receipt,
-        code: Code,
-        ctx: &mut Ctx,
-    ) -> Vec<Out> {
+    fn judged(&mut self, id: u64, op: Op, receipt: Receipt, code: Code, ctx: &mut Ctx) -> Vec<Out> {
         let address = op.safe.address;
         let deployment = match code {
             Code::Verified { empty: false } => Deployment::Mark,
@@ -1087,7 +1307,7 @@ impl Safes {
                     Kind::Deploy { .. } => json!({ "deployed": true }),
                     Kind::Status => status(&op.safe, true, None, None, false, &seen),
                     // They read no code this way.
-                    Kind::Prepare | Kind::Propose => {
+                    Kind::Prepare | Kind::Propose | Kind::Execute { .. } => {
                         return vec![failed(id, &crate::vault::internal())];
                     }
                 };
@@ -1102,7 +1322,9 @@ impl Safes {
             }
             Deployment::NotDeployed(seen) => match op.kind {
                 Kind::Deployed { .. } => vec![reply(id, &json!({ "deployed": false }))],
-                Kind::Prepare | Kind::Propose => vec![failed(id, &crate::vault::internal())],
+                Kind::Prepare | Kind::Propose | Kind::Execute { .. } => {
+                    vec![failed(id, &crate::vault::internal())]
+                }
                 Kind::Status | Kind::Deploy { .. } => {
                     let Some(executor) = op.safe.executor.clone() else {
                         return vec![match op.kind {
@@ -1112,73 +1334,91 @@ impl Safes {
                             _ => failed(id, &refused("SAFE_NEEDS_FUNDS", NO_EXECUTOR_TEXT)),
                         }];
                     };
-                    let mut out = Vec::new();
                     let deployment = op.safe.setup.deployment(&op.safe.salt);
-                    let estimate = json!([{
-                        "from": checksum_address(&executor.address),
-                        "to": checksum_address(&deployment.to),
-                        "value": "0",
-                        "data": to_hex(&deployment.data),
-                    }]);
-                    out.push(self.read(
-                        id,
-                        Some(Part::Estimate),
-                        "eth_estimateGas",
-                        estimate.to_string(),
-                        &op,
-                        ctx.now,
-                    ));
-                    out.push(self.read(
-                        id,
-                        Some(Part::Fee),
-                        crate::chain::INTERNAL_FEE_QUOTE,
-                        String::new(),
-                        &op,
-                        ctx.now,
-                    ));
-                    let balance = format!(r#"["{}","latest"]"#, to_hex(&executor.address));
-                    out.push(self.read(
-                        id,
-                        Some(Part::Balance),
-                        "eth_getBalance",
-                        balance,
-                        &op,
-                        ctx.now,
-                    ));
-                    let mut quote = Quote {
-                        estimate: None,
-                        fee: None,
-                        balance: None,
-                        reference: false,
-                        setup: seen,
-                    };
-                    if matches!(op.kind, Kind::Deploy { .. })
-                        && !ctx.approvals.fee_fresh(CHAIN_ID, ctx.clocks.vault_ms)
-                    {
-                        let read = self.read(
-                            id,
-                            Some(Part::Reference),
-                            crate::chain::INTERNAL_FEE_REFERENCE,
-                            String::new(),
-                            &op,
-                            ctx.now,
-                        );
-                        if let Out::ChainRead(read) = &read {
-                            ctx.approvals.fee_asked(
-                                read.tag,
-                                Some(&format!(r#"{{"chain_id":{CHAIN_ID}}}"#)),
-                                ctx.clocks.vault_ms,
-                            );
-                        }
-                        quote.reference = true;
-                        out.push(read);
-                    }
-                    op.step = Step::Quote(Box::new(quote));
-                    self.ops.insert(id, op);
-                    out
+                    let call = Priced::call(&executor.address, &deployment.to, &deployment.data);
+                    // Only a deployment is judged by the fee check.
+                    let judged = matches!(op.kind, Kind::Deploy { .. });
+                    self.quote(id, op, &call, Some(&executor.address), judged, seen, ctx)
                 }
             },
         }
+    }
+
+    /// The activation's or the execution's quote, `op` waiting for it: the
+    /// estimate of `call` (`eth_estimateGas`'s params), the core's fee
+    /// quote, the executor's balance at `balance` (the activation's), and,
+    /// when the send is `judged` by the fee check, the fee evidence if it
+    /// is stale. `setup` is what the code read showed, for `safe.status`.
+    #[allow(clippy::too_many_arguments)]
+    fn quote(
+        &mut self,
+        id: u64,
+        mut op: Op,
+        call: &Value,
+        balance: Option<&[u8; 20]>,
+        judged: bool,
+        setup: Outcome,
+        ctx: &mut Ctx,
+    ) -> Vec<Out> {
+        let mut out = vec![
+            self.read(
+                id,
+                Some(Part::Estimate),
+                "eth_estimateGas",
+                call.to_string(),
+                &op,
+                ctx.now,
+            ),
+            self.read(
+                id,
+                Some(Part::Fee),
+                crate::chain::INTERNAL_FEE_QUOTE,
+                String::new(),
+                &op,
+                ctx.now,
+            ),
+        ];
+        if let Some(executor) = balance {
+            let params = format!(r#"["{}","latest"]"#, to_hex(executor));
+            out.push(self.read(
+                id,
+                Some(Part::Balance),
+                "eth_getBalance",
+                params,
+                &op,
+                ctx.now,
+            ));
+        }
+        let mut quote = Quote {
+            estimate: None,
+            fee: None,
+            balance: None,
+            wants_balance: balance.is_some(),
+            reference: false,
+            setup,
+        };
+        if judged && !ctx.approvals.fee_fresh(CHAIN_ID, ctx.clocks.vault_ms) {
+            let read = self.read(
+                id,
+                Some(Part::Reference),
+                crate::chain::INTERNAL_FEE_REFERENCE,
+                String::new(),
+                &op,
+                ctx.now,
+            );
+            if let Out::ChainRead(read) = &read {
+                ctx.approvals.fee_asked(
+                    read.tag,
+                    Some(&format!(r#"{{"chain_id":{CHAIN_ID}}}"#)),
+                    ctx.clocks.vault_ms,
+                );
+            }
+            quote.reference = true;
+            out.push(read);
+        }
+        op.step = Step::Quote(Box::new(quote));
+        self.ops.insert(id, op);
+        out
     }
 
     /// A Safe known deployed: `safe.deploy` has nothing to send;
@@ -1187,7 +1427,9 @@ impl Safes {
         match op.kind {
             Kind::Deployed { .. } => vec![reply(id, &json!({ "deployed": true }))],
             Kind::Deploy { .. } => vec![reply(id, &json!({ "deployed": true }))],
-            Kind::Prepare | Kind::Propose => vec![failed(id, &crate::vault::internal())],
+            Kind::Prepare | Kind::Propose | Kind::Execute { .. } => {
+                vec![failed(id, &crate::vault::internal())]
+            }
             Kind::Status => {
                 let (evidence, reads) = Evidence::start_status(
                     op.safe.address,
@@ -1210,9 +1452,9 @@ impl Safes {
 
     /// Whether a `safe.propose` holds the Safe at wallet index `index`.
     fn holds(&self, index: u64) -> bool {
-        self.ops
-            .values()
-            .any(|op| op.kind == Kind::Propose && op.safe.index == index)
+        self.ops.values().any(|op| {
+            matches!(op.kind, Kind::Propose | Kind::Execute { .. }) && op.safe.index == index
+        })
     }
 
     /// A step that signs: the setup and the nonce, every read verified
@@ -1246,7 +1488,7 @@ impl Safes {
     /// as data; or, for a step that signs, its refusal unless the setup is
     /// the record's and every read verified (`safe_changed`,
     /// `safe_unverified`, `not_deployed`).
-    fn setup_done(&mut self, id: u64, mut op: Op, outcome: Outcome) -> Vec<Out> {
+    fn setup_done(&mut self, id: u64, mut op: Op, outcome: Outcome, ctx: &mut Ctx) -> Vec<Out> {
         if op.kind == Kind::Status {
             return vec![reply(
                 id,
@@ -1296,8 +1538,107 @@ impl Safes {
                     vec![failed(id, &refused("SAFE_DISCARDED", DISCARDED_TEXT))]
                 }
             },
-            Work::None => vec![failed(id, &crate::vault::internal())],
+            // `safe.execute`: the record and the entry still the ones
+            // checked, then the SafeTx against the verified nonce.
+            Work::Execute { hash } => {
+                let (safe, entry) = match still(&op.safe, &hash, ctx) {
+                    Ok(still) => still,
+                    Err(error) => return vec![failed(id, &error)],
+                };
+                match entry.tx.nonce_state(&nonce) {
+                    fc_safe::NonceState::Superseded => {
+                        vec![match self.supersede(&safe, &entry, ctx) {
+                            Ok(state) => {
+                                js_reply(id, &JsValue::Object(vec![("superseded".into(), state)]))
+                            }
+                            Err(error) => failed(id, &error),
+                        }]
+                    }
+                    fc_safe::NonceState::Behind => {
+                        vec![failed(id, &refused("nonce_behind", NONCE_BEHIND_TEXT))]
+                    }
+                    fc_safe::NonceState::Ready => {
+                        op.safe = safe;
+                        self.execute(id, op, &entry, ctx)
+                    }
+                }
+            }
+            Work::Exec { .. } | Work::None => vec![failed(id, &crate::vault::internal())],
         }
+    }
+
+    /// A pending SafeTx at the Safe's nonce (`entry`): with the record's
+    /// threshold of signatures that count, its `execTransaction` calldata,
+    /// every such signature joined; then the executor's send, at once for
+    /// the offer `fee_ack` confirms, or after its quote.
+    fn execute(&mut self, id: u64, mut op: Op, entry: &entry::Entry, ctx: &mut Ctx) -> Vec<Out> {
+        let threshold = op.safe.setup.threshold();
+        let joined = match entry.signatures.joined_at(threshold) {
+            Ok(joined) => joined,
+            // "Not enough signatures yet (1 of 2)".
+            Err(error) => return vec![failed(id, &plain(error.to_string()))],
+        };
+        let Some(executor) = op.safe.executor.clone() else {
+            return vec![failed(id, &plain(NO_EXECUTOR_TO_EXECUTE_TEXT))];
+        };
+        let data = fc_safe::exec_transaction(&entry.tx, &joined);
+        if op.kind == (Kind::Execute { fee_ack: true })
+            && let Some(tx) = self.offered(&op.safe, Some(entry.hash), executor.index, &data)
+        {
+            return vec![self.send_reply(id, &op.safe, executor.index, &tx, ctx)];
+        }
+        let call = Priced::call(&executor.address, &op.safe.address, &data);
+        op.work = Work::Exec {
+            hash: entry.hash,
+            data,
+        };
+        self.quote(id, op, &call, None, true, Outcome::SetupUnchanged, ctx)
+    }
+
+    /// A SafeTx the Safe's verified nonce has passed can never execute
+    /// (`executeSafePending`'s superseded): the Safe's `safe-send`
+    /// approvals end first, as the reference ends its approval, then its
+    /// entry is marked `superseded: true` as the reference writes it, while
+    /// it is still the entry read. The board's state, `status:
+    /// "superseded"`, with `durable: false` when the write's flush failed.
+    fn supersede(
+        &mut self,
+        safe: &Safe,
+        entry: &entry::Entry,
+        ctx: &mut Ctx,
+    ) -> Result<JsValue, ErrorBody> {
+        let records = ctx
+            .approvals
+            .account_records()
+            .ok_or_else(not_moved)?
+            .clone();
+        let current = ctx
+            .pending
+            .entry(safe.index)
+            .filter(|current| {
+                entry::read(current, &safe.address, safe.setup.owners())
+                    .is_ok_and(|read| read.hash == entry.hash)
+            })
+            .ok_or_else(|| refused("SAFE_DISCARDED", DISCARDED_TEXT))?;
+        ctx.approvals.end_safe_sends(&safe.address);
+        self.forget_send(safe.index, ctx.approvals);
+        let mut marked = current.clone();
+        marked.set("superseded", JsValue::Bool(true));
+        let durable = ctx
+            .pending
+            .set_where(safe.index, marked.clone(), |now| now == Some(&current))
+            .map_err(|failure| match failure {
+                Failure::Bound(_) => refused("store_full", STORE_FULL_TEXT),
+                other => other.error(),
+            })?
+            .ok_or_else(|| refused("SAFE_DISCARDED", DISCARDED_TEXT))?;
+        crate::log::info("a pending Safe transaction superseded", json!({}));
+        let mut state = send_state(&records, safe.index, &marked, &signers(entry), true)?
+            .ok_or_else(crate::vault::internal)?;
+        if !durable {
+            state.set("durable", JsValue::Bool(false));
+        }
+        Ok(state)
     }
 
     /// The proposals whose signing and write are due, for the vault to run
@@ -1384,23 +1725,31 @@ impl Safes {
             Some(Reply::Answer { result, .. }) => Some(result.clone()),
             _ => None,
         };
-        let priced = answer(&quote.estimate)
+        let priced = match answer(&quote.estimate)
             .zip(answer(&quote.fee))
             .ok_or_else(crate::vault::internal)
-            .and_then(|(estimate, fee)| priced(&estimate, &fee));
-        let balance = answer(&quote.balance)
-            .as_ref()
-            .and_then(Value::as_str)
-            .and_then(parse_unsigned);
-        let (priced, balance) = match (priced, balance) {
-            (Ok(priced), Some(balance)) => (priced, balance),
-            (Err(error), _) => return failed(id, &error),
-            (_, None) => return failed(id, &plain("Invalid balance")),
+            .and_then(|(estimate, fee)| priced(&estimate, &fee))
+        {
+            Ok(priced) => priced,
+            Err(error) => return failed(id, &error),
         };
-        let needs_funds = balance < priced.cost;
         let Some(executor) = &op.safe.executor else {
             return failed(id, &crate::vault::internal());
         };
+        // The execution's send: no balance is read, as `quotedExecutorSend`
+        // reads none.
+        if let (Kind::Execute { .. }, Work::Exec { hash, data }) = (op.kind, &op.work) {
+            return self.exec_priced(id, op, hash, data, &priced, ctx);
+        }
+        let balance = match answer(&quote.balance)
+            .as_ref()
+            .and_then(Value::as_str)
+            .and_then(parse_unsigned)
+        {
+            Some(balance) => balance,
+            None => return failed(id, &plain("Invalid balance")),
+        };
+        let needs_funds = balance < priced.cost;
         match op.kind {
             Kind::Status => reply(
                 id,
@@ -1427,24 +1776,114 @@ impl Safes {
                         ),
                     );
                 }
+                // The executor's send, as an execution's (S4): the offer the
+                // user confirmed, or the quote the check approves.
                 let deployment = op.safe.setup.deployment(&op.safe.salt);
-                let tx = priced.tx(&deployment.to, &deployment.data);
-                let (verdict, ask_again) =
-                    ctx.approvals
-                        .page_fee_check(&tx.to_string(), Some(fee_ack), ctx.clocks);
-                let verdict: Value = serde_json::from_str(&verdict).unwrap_or(Value::Null);
-                if ask_again {
-                    return reply(id, &json!({ "fee_check": verdict }));
+                let account = executor.index;
+                if fee_ack && let Some(tx) = self.offered(&op.safe, None, account, &deployment.data)
+                {
+                    return self.send_reply(id, &op.safe, account, &tx, ctx);
                 }
-                reply(
-                    id,
-                    &json!({ "send": { "account": index_value(executor.index), "tx": tx } }),
-                )
+                let tx = priced.tx(&deployment.to, &deployment.data);
+                self.judge(id, &op.safe, None, account, &deployment.data, tx, ctx)
             }
-            Kind::Deployed { .. } | Kind::Prepare | Kind::Propose => {
+            Kind::Deployed { .. } | Kind::Prepare | Kind::Propose | Kind::Execute { .. } => {
                 failed(id, &crate::vault::internal())
             }
         }
+    }
+
+    /// The execution's send priced: `execTransaction` (`data`, for the
+    /// SafeTx `hash`) to the Safe, value 0, judged by the fee check at
+    /// approval as `quotedExecutorSend` judges it. A fee the check approves
+    /// on its own (`autoApprove`) gets `{ send }` with its token; any other
+    /// is offered, `{ fee_check }` with the verdict, and kept for
+    /// `fee_ack` to confirm. The record and the entry must still be the
+    /// ones checked.
+    fn exec_priced(
+        &mut self,
+        id: u64,
+        op: &Op,
+        hash: &[u8; 32],
+        data: &[u8],
+        priced: &Priced,
+        ctx: &mut Ctx,
+    ) -> Out {
+        let safe = match still(&op.safe, hash, ctx) {
+            Ok((safe, _)) => safe,
+            Err(error) => return failed(id, &error),
+        };
+        let Some(executor) = safe.executor.clone() else {
+            return failed(id, &plain(NO_EXECUTOR_TO_EXECUTE_TEXT));
+        };
+        let tx = priced.tx(&safe.address, data);
+        self.judge(id, &safe, Some(*hash), executor.index, data, tx, ctx)
+    }
+
+    /// The executor's send `tx` for the Safe `safe`, judged by the fee
+    /// check at approval as `quotedExecutorSend` judges it: a fee the check
+    /// approves on its own (`autoApprove`: comparable, not above, not one
+    /// endpoint's evidence) gets `{ send }` with its token; any other is
+    /// offered, `{ fee_check }` with the verdict, nothing minted, and kept
+    /// for `fee_ack` to confirm (`hash`: the SafeTx it executes; `data`
+    /// what it sends).
+    #[allow(clippy::too_many_arguments)]
+    fn judge(
+        &mut self,
+        id: u64,
+        safe: &Safe,
+        hash: Option<[u8; 32]>,
+        account: u64,
+        data: &[u8],
+        tx: Value,
+        ctx: &mut Ctx,
+    ) -> Out {
+        let (verdict, _) = ctx
+            .approvals
+            .page_fee_check(&tx.to_string(), Some(false), ctx.clocks);
+        let verdict: Value = serde_json::from_str(&verdict).unwrap_or(Value::Null);
+        if verdict.get("autoApprove") == Some(&Value::Bool(true)) {
+            return self.send_reply(id, safe, account, &tx, ctx);
+        }
+        crate::log::info(
+            "a Safe executor's fee needs the user's confirmation",
+            json!({}),
+        );
+        self.offers.insert(
+            safe.index,
+            Offer {
+                safe: safe.address,
+                hash,
+                account,
+                data: data.to_vec(),
+                tx,
+            },
+        );
+        reply(id, &json!({ "fee_check": verdict }))
+    }
+
+    /// The offer `fee_ack` confirms: the transaction the Safe `safe`'s
+    /// executor at `account` was offered for sending `data` (for the SafeTx
+    /// `hash`, or the deployment), while it still sends exactly that.
+    fn offered(
+        &self,
+        safe: &Safe,
+        hash: Option<[u8; 32]>,
+        account: u64,
+        data: &[u8],
+    ) -> Option<Value> {
+        let offer = self.offers.get(&safe.index)?;
+        let same = offer.safe == safe.address
+            && offer.hash == hash
+            && offer.account == account
+            && offer.data == data;
+        same.then(|| {
+            crate::log::info(
+                "a Safe executor's fee confirmed: its offer prepared",
+                json!({}),
+            );
+            offer.tx.clone()
+        })
     }
 
     /// Cancels request `id`: `cancelled`, its reads' replies ignored.
@@ -1554,7 +1993,19 @@ fn priced(estimate: &Value, quote: &Value) -> Result<Priced, ErrorBody> {
 }
 
 impl Priced {
-    /// The deployment in `sign.transaction`'s form, without its nonce.
+    /// `eth_estimateGas`'s params for the executor at `from` sending `data`
+    /// to `to` with no value, as `estimateGas({ from, to, value: '0', data
+    /// })` asks.
+    fn call(from: &[u8; 20], to: &[u8; 20], data: &[u8]) -> Value {
+        json!([{
+            "from": checksum_address(from),
+            "to": checksum_address(to),
+            "value": "0",
+            "data": to_hex(data),
+        }])
+    }
+
+    /// The executor's send in `sign.transaction`'s form, without its nonce.
     fn tx(&self, to: &[u8; 20], data: &[u8]) -> Value {
         let mut tx = json!({
             "type": match self.fees { Fees::Eip1559 { .. } => 2, Fees::Legacy { .. } => 0 },
@@ -1695,6 +2146,71 @@ fn pending_entry(pending: &SafePending, safe: &Safe) -> Option<entry::Entry> {
             None
         }
     }
+}
+
+/// The Safe's record as it stands now, still the one the reads checked,
+/// and its pending entry as the codec reads it, still the SafeTx `hash`:
+/// `SAFE_DISCARDED` for one discarded or replaced meanwhile, as
+/// `executeSafePending` refuses it after its nonce read.
+fn still(checked: &Safe, hash: &[u8; 32], ctx: &Ctx) -> Result<(Safe, entry::Entry), ErrorBody> {
+    let records = ctx.approvals.account_records().ok_or_else(not_moved)?;
+    let safe = resolve(records, checked.index)?;
+    if safe.address != checked.address || safe.setup != checked.setup {
+        return Err(plain(format!(
+            "Wallet {} is not a Safe account",
+            safe.index
+        )));
+    }
+    let entry = pending_entry(ctx.pending, &safe)
+        .filter(|entry| entry.hash == *hash)
+        .ok_or_else(|| refused("SAFE_DISCARDED", DISCARDED_TEXT))?;
+    Ok((safe, entry))
+}
+
+/// `safe.executed { safe, safe_tx_hash, hash }`: main's word, after its
+/// broadcast, that the SafeTx `named` executed (`finishExecuted`). The
+/// Safe's `safe-send` approvals end first, then its entry is cleared while
+/// it is still that SafeTx: `{}`, with `durable: false` when the clear's
+/// flush failed. With none pending, `{}` and nothing done; with another,
+/// `SAFE_DISCARDED` and nothing cleared.
+fn executed(
+    records: &Records,
+    ctx: &mut Ctx,
+    index: u64,
+    named: &[u8; 32],
+) -> Result<Value, ErrorBody> {
+    let Some(entry) = ctx.pending.entry(index) else {
+        return Ok(json!({}));
+    };
+    let same = |entry: &JsValue| {
+        entry
+            .get("safeTxHash")
+            .and_then(JsValue::as_str)
+            .and_then(|text| parse_bytes(text, "safeTxHash").ok())
+            .as_deref()
+            == Some(named.as_slice())
+    };
+    if !same(&entry) {
+        return Err(refused("SAFE_DISCARDED", DISCARDED_TEXT));
+    }
+    let address = records
+        .record(index as f64)?
+        .filter(is_safe)
+        .and_then(|record| record.get("address").and_then(value_address_bytes));
+    if let Some(address) = address {
+        ctx.approvals.end_safe_sends(&address);
+    }
+    let cleared = ctx
+        .pending
+        .clear_where(index, |current| current.is_none_or(same))
+        .map_err(|failure| failure.error())?
+        .ok_or_else(|| refused("SAFE_DISCARDED", DISCARDED_TEXT))?;
+    crate::log::info("a pending Safe transaction executed", json!({}));
+    Ok(if cleared.durable {
+        json!({})
+    } else {
+        json!({ "durable": false })
+    })
 }
 
 /// `safe.propose`'s signing and write, where no vault job is running: the

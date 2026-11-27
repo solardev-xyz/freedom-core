@@ -364,6 +364,14 @@ pub const METHODS: &[Method] = &[
     // `propose` writes `safe-pending.json`, not the identity files.
     row("safe.prepare", PCS, false, SESSION),
     row("safe.propose", PCS, false, SESSION),
+    // Design 0016, API (SAFE-2's S4): the pending SafeTx executed.
+    // `execute` reads the setup and nonce through the chain machine first,
+    // the `session` class (#520), and answers the executor's prepared send
+    // with its `executor-send` token, or marks the entry superseded;
+    // `executed`, main's alone after its broadcast, clears the entry and
+    // reads no chain. Neither writes the identity files.
+    row("safe.execute", CS, false, SESSION),
+    row("safe.executed", SHELL, false, NOW),
     // Design 0013, "Payment history" (PRF-5g-2): the chrome reads and
     // clears (`payments:get-recent`, `:get-count`, `:get-by-id`,
     // `:clear`, `x402:get-receipts`); the writes and the repoll's are
@@ -722,6 +730,27 @@ mod tests {
             ("safe.discard", true, Deadline::Immediate),
         ] {
             assert_eq!(method(name).unwrap().deadline, deadline, "{name}");
+            for (caller, allowed) in [
+                (CallerKind::Page, false),
+                (CallerKind::Chrome, chrome),
+                (CallerKind::Shell, true),
+            ] {
+                assert_eq!(
+                    matches!(admit(name, caller, V2), Admission::Allowed(_)),
+                    allowed,
+                    "{name} {caller:?}"
+                );
+            }
+        }
+        // SAFE-2's S4: the chrome and main execute; only main says the
+        // execution went out. Neither writes the identity files; only
+        // `execute` reads the chain.
+        for (name, chrome, deadline) in [
+            ("safe.execute", true, Deadline::Session),
+            ("safe.executed", false, Deadline::Immediate),
+        ] {
+            let row = method(name).unwrap();
+            assert_eq!((row.deadline, row.mutates), (deadline, false), "{name}");
             for (caller, allowed) in [
                 (CallerKind::Page, false),
                 (CallerKind::Chrome, chrome),

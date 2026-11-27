@@ -317,7 +317,9 @@ impl Harness {
     fn records(&mut self) {
         let meta = VaultMeta::load(self.meta.to_string().as_bytes()).unwrap();
         self.approvals.set_records(Some(Records::Read(meta)));
-        self.safes.records_changed(self.approvals.account_records());
+        for token in self.safes.records_changed(self.approvals.account_records()) {
+            self.approvals.burn(&token);
+        }
     }
 
     /// The Safe's record removed, and the snapshot taken again.
@@ -733,17 +735,46 @@ fn deploy_prepares_the_executors_deployment() {
     h.asked.clear();
     let reply = h.call("safe.deploy", json!({ "safe": SAFE, "fee_ack": true }));
     let deployment = setup().deployment(&U256::from_u64(SALT));
+    let mut send = result(&reply)["send"].clone();
+    // Its `executor-send` token (S4), for the transaction but its nonce.
+    let token = send.as_object_mut().unwrap().shift_remove("token").unwrap();
+    assert_eq!(token.as_str().unwrap().len(), 64, "{reply}");
     assert_eq!(
-        result(&reply),
-        &json!({ "send": { "account": 0, "tx": {
+        send,
+        json!({ "kind": "executor-send", "account": 0, "tx": {
             "type": 2, "chain_id": "100", "gas_limit": "240000",
             "to": checksum_address(&PROXY_FACTORY), "value": "0",
             "data": to_hex(&deployment.data),
             "max_fee_per_gas": "7000000000", "max_priority_fee_per_gas": "1000000000",
-        } } })
+        } })
     );
+    let keys: Vec<&String> = result(&reply)["send"].as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["kind", "account", "tx", "token"], "the token last");
     assert_eq!(h.asked, ["code", "estimate", "fee", "balance"]);
     assert!(h.marked.is_empty());
+    // Main's `sign.transaction` spends it at its nonce, and only so.
+    let spend = |h: &mut Harness, tx: &Value, token: &Value| {
+        let parsed = fc_evm::Transaction::from_json(tx).unwrap();
+        let signed = crate::approvals::Signed::Transaction {
+            account: 0,
+            tx_json: tx,
+            tx: &parsed,
+        };
+        let authorization = json!({ "token": token, "kind": "executor-send" });
+        h.approvals
+            .authorize(&h.context.clone(), &authorization, signed, CLOCKS)
+            .map(|_| ())
+    };
+    let mut changed = send["tx"].clone();
+    changed["nonce"] = json!("4");
+    changed["gas_limit"] = json!("240001");
+    let refused = spend(&mut h, &changed, &token).unwrap_err();
+    assert_eq!(refused.data, Some(json!({ "reason": "mismatch" })));
+    let reply = h.call("safe.deploy", json!({ "safe": SAFE, "fee_ack": true }));
+    let send = result(&reply)["send"].clone();
+    let mut tx = send["tx"].clone();
+    tx["nonce"] = json!("4");
+    assert!(spend(&mut h, &tx, &send["token"]).is_ok());
     // Within the check: the send at once.
     let mut h = Harness::new(
         meta(false),
@@ -1359,3 +1390,5 @@ fn the_cost_is_exact_to_two_to_the_256() {
 // --- SAFE-2's S3: `safe.prepare` and `safe.propose` --------------------------
 
 mod propose;
+
+mod execute;
