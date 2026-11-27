@@ -11,13 +11,24 @@
 //!   queue, as `accounts.add_safe`. It reads no chain.
 //! - **`safe.status { safe }`** → `getSafeStatus`'s fields, `{ deployed,
 //!   chainId, executorIndex, executorAddress, executorBalance,
-//!   estimatedCost, needsFunds }`. A Safe the record marks deployed has
-//!   its setup and nonce read through [`super::evidence`] first, and only
-//!   one that is the record's is answered: `safe_changed`,
-//!   `safe_unverified` or `not_deployed` otherwise. An unmarked one has its
-//!   code read; with none, the executor's (the first vault owner's)
-//!   balance, the deployment's estimate plus 20% and the fee quote give
-//!   the activation's cost, each read for display only, its label kept.
+//!   estimatedCost, needsFunds }`, and `setup`, what the chain reads show
+//!   of the Safe's setup, as data for the board ([`Outcome::state`]):
+//!   `{ state: "unchanged" }`, `{ state: "changed", changed: [what] }`,
+//!   `{ state: "unverified", read, why }` or `{ state: "not_deployed" }`.
+//!   It signs nothing, so none of these is a refusal: `safe_changed`,
+//!   `safe_unverified` and `not_deployed` refuse only the steps that sign
+//!   or execute (S3 to S5). A Safe the record marks deployed (`deployed`
+//!   stays `true`) has its code and six setup reads made through
+//!   [`super::evidence`], and no nonce, which status doesn't show. An
+//!   unmarked one has its code read: a verified empty code is
+//!   `not_deployed`, and any other answer but a verified code is the
+//!   code's read `unverified`; with no code, the executor's (the first
+//!   vault owner's) balance, the deployment's estimate plus 20% and the
+//!   fee quote give the activation's cost, each read for display only,
+//!   its label kept. A code read nothing answered, for a Safe neither
+//!   marked nor reported, has no `deployed` to give: it is refused
+//!   `unverified` with `isDeployedOnChain`'s failure, as the reference
+//!   throws.
 //! - **`safe.deploy { safe, fee_ack? }`** → `{ send: { account, tx } }`,
 //!   the executor's deployment in `sign.transaction`'s form without its
 //!   nonce (`createProxyWithNonce` to the factory, value 0, the estimate
@@ -35,15 +46,21 @@
 //!   (code, or such a receipt) marks nothing: the Safe is reported
 //!   deployed for as long as this core runs, with `verified: false` on
 //!   `safe.deployed`'s answer, until a verified read decides (deviation
-//!   `deployed-mark`). A verified empty code ends it.
+//!   `deployed-mark`). A verified empty code ends it. It is held only for
+//!   a Safe the current records hold: none is added for an address no
+//!   Safe record has, and each records' snapshot drops the Safes it no
+//!   longer holds ([`Safes::records_changed`]), so it is bounded by the
+//!   records.
 //! - **`safe.pending {}`** → `{ states }` (`getAllSafeSendStates`), and
 //!   **`safe.discard { safe, safe_tx_hash? }`** → `{}` (`cancelSafeSend`):
 //!   the Safe's `safe-send` approvals ended, then its entry cleared, under
 //!   the pending store's 1 MiB bound and its set-aside of an unreadable
 //!   file (D3).
 //! - **Refusals** are `invalid_argument` with `data.safe`: `unsupported`,
-//!   `changed`, `unverified`, `not_deployed`, or today's `SAFE_*` codes
-//!   (`SAFE_ADDRESS_MISMATCH`, `SAFE_NEEDS_FUNDS`, `SAFE_DISCARDED`).
+//!   `unverified` (a deployment or activation no read answered), or today's
+//!   `SAFE_*` codes (`SAFE_ADDRESS_MISMATCH`, `SAFE_NEEDS_FUNDS`,
+//!   `SAFE_DISCARDED`). `changed` and `not_deployed` are the steps' that
+//!   sign (S3 to S5); `safe.status` reports them as data.
 //! - **Time:** the chain-reading methods have the `session` class's 120 s
 //!   from receipt (#520), each read the time left; past it, `deadline`. A
 //!   cancel answers `cancelled`; a late reply changes nothing.
@@ -64,7 +81,7 @@ use fc_wallet_state::vault_meta::VaultMeta;
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
-use super::evidence::{Evidence, Outcome, Progress, Tags};
+use super::evidence::{Evidence, Outcome, Progress, Tags, Why};
 use crate::accounts::Records;
 use crate::approvals::{Approvals, Clocks};
 use crate::phone::ChainRead;
@@ -88,7 +105,9 @@ pub const DEADLINE_MS: u64 = 120_000;
 /// as `SafeProxyFactory` 1.4.1 emits it (safe-deployments 1.37.66).
 const PROXY_CREATION: &str = "ProxyCreation(address,address)";
 
-/// `not_deployed`'s text (proposed, design 0016, "Chain reads").
+/// `not_deployed`'s text (design 0016, "Chain reads"): the refusal of the
+/// steps that sign or execute (S3 to S5), never of `safe.status`.
+#[allow(dead_code)]
 pub const NOT_DEPLOYED_TEXT: &str = "Activate this account on Gnosis first.";
 
 /// `isDeployedOnChain`'s, for a code read no source answered.
@@ -125,6 +144,8 @@ fn not_moved() -> ErrorBody {
     .with_data(json!({ "store": crate::accounts::STORE }))
 }
 
+/// The steps' `not_deployed` refusal (S3 to S5).
+#[allow(dead_code)]
 fn not_deployed() -> ErrorBody {
     refused("not_deployed", NOT_DEPLOYED_TEXT)
 }
@@ -428,13 +449,14 @@ enum Code {
     Unverified {
         empty: bool,
     },
-    /// No answer to judge: a failed read, or one that isn't hex.
-    Failed,
+    /// No answer to judge: a failed read, or one that isn't hex; why, as
+    /// the setup check names it.
+    Failed(Why),
 }
 
 fn code_of(reply: &Reply) -> Code {
     let Reply::Answer { result, verified } = reply else {
-        return Code::Failed;
+        return Code::Failed(Why::Failed);
     };
     // `!code || code === '0x'`.
     let empty = match result {
@@ -448,18 +470,32 @@ fn code_of(reply: &Reply) -> Code {
     match (empty, verified) {
         (Some(empty), true) => Code::Verified { empty },
         (Some(empty), false) => Code::Unverified { empty },
-        (None, _) => Code::Failed,
+        (None, true) => Code::Failed(Why::Unreadable(None)),
+        (None, false) => Code::Failed(Why::Unverified),
     }
 }
 
-/// What the reads decide of the deployment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A code read that isn't evidence, as `safe.status`'s `setup` reports it.
+fn code_unverified(code: Code) -> Outcome {
+    let why = match code {
+        Code::Failed(why) => why,
+        _ => Why::Unverified,
+    };
+    Outcome::Unverified {
+        read: fc_safe::Read::Code,
+        why,
+    }
+}
+
+/// What the reads decide of the deployment, each but the mark with what
+/// `safe.status`'s `setup` reports of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Deployment {
     /// Verified: marked for good.
     Mark,
     /// Reported deployed for the session, unverified.
-    Session,
-    NotDeployed,
+    Session(Outcome),
+    NotDeployed(Outcome),
     /// Nothing answered: no read to judge.
     Unknown,
 }
@@ -487,13 +523,14 @@ enum Step {
 
 /// The activation's reads: the estimate, the fee quote, the executor's
 /// balance, and for a deployment the fee evidence when it is stale.
-#[derive(Default)]
 struct Quote {
     estimate: Option<Reply>,
     fee: Option<Reply>,
     balance: Option<Reply>,
     /// The fee evidence's read is out.
     reference: bool,
+    /// What the code read showed, for `safe.status`'s `setup`.
+    setup: Outcome,
 }
 
 /// Which of the activation's reads a tag is.
@@ -521,7 +558,8 @@ pub struct Safes {
     /// Each read out: its request, and the activation's part it is.
     reads: BTreeMap<u64, (u64, Option<Part>)>,
     /// Safes an unverified answer showed deployed: reported so until a
-    /// verified read decides.
+    /// verified read decides, and only while the records hold a Safe at
+    /// the address ([`Safes::records_changed`]).
     session: BTreeSet<[u8; 20]>,
     /// Requests whose mark is due, for the vault to write.
     marks: Vec<u64>,
@@ -537,13 +575,16 @@ pub struct Ctx<'a> {
     pub now: Instant,
 }
 
-/// The answer `getSafeStatus` gives: balances and costs in wei, decimal.
+/// The answer `getSafeStatus` gives, balances and costs in wei, decimal,
+/// and `setup`, what the reads show of the Safe's setup
+/// ([`Outcome::state`]).
 fn status(
     safe: &Safe,
     deployed: bool,
     balance: Option<&U256>,
     cost: Option<&U256>,
     needs_funds: bool,
+    setup: &Outcome,
 ) -> Value {
     json!({
         "deployed": deployed,
@@ -553,12 +594,33 @@ fn status(
         "executorBalance": balance.map(U256::to_decimal),
         "estimatedCost": cost.map(U256::to_decimal),
         "needsFunds": needs_funds,
+        "setup": setup.state(),
     })
+}
+
+/// Whether `records` hold a Safe at `address`: the session reports no
+/// other.
+fn holds_safe(records: Option<&Records>, address: &[u8; 20]) -> bool {
+    let Some(Records::Read(meta)) = records else {
+        return false;
+    };
+    meta.find_by_address(&JsValue::string(to_hex(address).as_str()))
+        .is_some_and(|record| {
+            is_safe(&record)
+                && record.get("address").and_then(value_address_bytes) == Some(*address)
+        })
 }
 
 impl Safes {
     pub fn new() -> Self {
         Safes::default()
+    }
+
+    /// The records' snapshot changed (G20): the session's reports kept
+    /// only for the Safes `records` still hold, so a removed Safe's goes
+    /// with its record.
+    pub fn records_changed(&mut self, records: Option<&Records>) {
+        self.session.retain(|address| holds_safe(records, address));
     }
 
     /// Whether this module serves `method` on the loop (`safe.create` runs
@@ -760,20 +822,13 @@ impl Safes {
                             })
                             .collect()
                     }
+                    // `safe.status`'s, the only request that checks the
+                    // setup here: what the reads show, as data.
                     Progress::Done(outcome) => {
-                        let answer = match outcome {
-                            Outcome::Unchanged { .. } => {
-                                Ok(status(&op.safe, true, None, None, false))
-                            }
-                            Outcome::NotDeployed => Err(not_deployed()),
-                            refused => {
-                                Err(refused.refusal().unwrap_or_else(crate::vault::internal))
-                            }
-                        };
-                        vec![match answer {
-                            Ok(answer) => reply(id, &answer),
-                            Err(error) => failed(id, &error),
-                        }]
+                        vec![reply(
+                            id,
+                            &status(&op.safe, true, None, None, false, &outcome),
+                        )]
                     }
                 }
             }
@@ -822,18 +877,22 @@ impl Safes {
             Code::Verified { empty: false } => Deployment::Mark,
             Code::Verified { empty: true } => {
                 self.session.remove(&address);
-                Deployment::NotDeployed
+                Deployment::NotDeployed(Outcome::NotDeployed)
             }
-            Code::Unverified { empty: false } => Deployment::Session,
-            _ if receipt == Receipt::Suggests => Deployment::Session,
-            _ if self.session.contains(&address) => Deployment::Session,
-            Code::Unverified { empty: true } => Deployment::NotDeployed,
-            Code::Failed => Deployment::Unknown,
+            Code::Unverified { empty: false } => Deployment::Session(code_unverified(code)),
+            _ if receipt == Receipt::Suggests => Deployment::Session(code_unverified(code)),
+            _ if self.session.contains(&address) => Deployment::Session(code_unverified(code)),
+            Code::Unverified { empty: true } => Deployment::NotDeployed(code_unverified(code)),
+            Code::Failed(_) => Deployment::Unknown,
         };
         match deployment {
             Deployment::Mark => self.mark(id, op),
-            Deployment::Session => {
-                self.session.insert(address);
+            Deployment::Session(seen) => {
+                // Only for a Safe the records still hold: one removed while
+                // the read was out adds nothing.
+                if holds_safe(ctx.approvals.account_records(), &address) {
+                    self.session.insert(address);
+                }
                 crate::log::warn(
                     "safe deployment reported unverified, for the session",
                     json!({}),
@@ -841,7 +900,7 @@ impl Safes {
                 let answer = match op.kind {
                     Kind::Deployed { .. } => json!({ "deployed": true, "verified": false }),
                     Kind::Deploy { .. } => json!({ "deployed": true }),
-                    Kind::Status => status(&op.safe, true, None, None, false),
+                    Kind::Status => status(&op.safe, true, None, None, false, &seen),
                 };
                 vec![reply(id, &answer)]
             }
@@ -852,12 +911,14 @@ impl Safes {
                 };
                 vec![failed(id, &refused("unverified", text))]
             }
-            Deployment::NotDeployed => match op.kind {
+            Deployment::NotDeployed(seen) => match op.kind {
                 Kind::Deployed { .. } => vec![reply(id, &json!({ "deployed": false }))],
                 Kind::Status | Kind::Deploy { .. } => {
                     let Some(executor) = op.safe.executor.clone() else {
                         return vec![match op.kind {
-                            Kind::Status => reply(id, &status(&op.safe, false, None, None, true)),
+                            Kind::Status => {
+                                reply(id, &status(&op.safe, false, None, None, true, &seen))
+                            }
                             _ => failed(id, &refused("SAFE_NEEDS_FUNDS", NO_EXECUTOR_TEXT)),
                         }];
                     };
@@ -894,7 +955,13 @@ impl Safes {
                         &op,
                         ctx.now,
                     ));
-                    let mut quote = Quote::default();
+                    let mut quote = Quote {
+                        estimate: None,
+                        fee: None,
+                        balance: None,
+                        reference: false,
+                        setup: seen,
+                    };
                     if matches!(op.kind, Kind::Deploy { .. })
                         && !ctx.approvals.fee_fresh(CHAIN_ID, ctx.clocks.vault_ms)
                     {
@@ -925,13 +992,13 @@ impl Safes {
     }
 
     /// A Safe known deployed: `safe.deploy` has nothing to send;
-    /// `safe.status` reads the setup and the nonce first.
+    /// `safe.status` reads the code and the setup, and no nonce.
     fn deployed(&mut self, id: u64, mut op: Op, ctx: &mut Ctx) -> Vec<Out> {
         match op.kind {
             Kind::Deployed { .. } => vec![reply(id, &json!({ "deployed": true }))],
             Kind::Deploy { .. } => vec![reply(id, &json!({ "deployed": true }))],
             Kind::Status => {
-                let (evidence, reads) = Evidence::start(
+                let (evidence, reads) = Evidence::start_status(
                     op.safe.address,
                     op.safe.setup.clone(),
                     left_ms(&op, ctx.now),
@@ -1036,6 +1103,7 @@ impl Safes {
                     Some(&balance),
                     Some(&priced.cost),
                     needs_funds,
+                    &quote.setup,
                 ),
             ),
             Kind::Deploy { fee_ack } => {

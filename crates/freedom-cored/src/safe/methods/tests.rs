@@ -3,7 +3,7 @@
 //! each read answered as the chain thread writes its reply, and the
 //! labels through the chain thread's own machine where they decide.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use base64::Engine as _;
 use fc_safe::constants::{FALLBACK_HANDLER, SENTINEL, SINGLETON};
@@ -302,9 +302,21 @@ impl Harness {
         harness
     }
 
+    /// The records' snapshot, taken as the vault's `refresh_records` takes
+    /// it: the session's reports follow it.
     fn records(&mut self) {
         let meta = VaultMeta::load(self.meta.to_string().as_bytes()).unwrap();
         self.approvals.set_records(Some(Records::Read(meta)));
+        self.safes.records_changed(self.approvals.account_records());
+    }
+
+    /// The Safe's record removed, and the snapshot taken again.
+    fn remove_safe(&mut self) {
+        self.meta["derivedWallets"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|record| record["index"] != SAFE);
+        self.records();
     }
 
     fn path(&self) -> std::path::PathBuf {
@@ -384,7 +396,9 @@ fn refusal(reply: &Value) -> String {
         .map_or_else(|| error["code"].as_str().unwrap().to_owned(), str::to_owned)
 }
 
-const SETUP_READS: [&str; 8] = [
+/// `safe.status`'s reads of a deployed Safe: the code and the six setup
+/// reads, no nonce.
+const STATUS_READS: [&str; 7] = [
     "code",
     "singleton",
     "owners",
@@ -392,7 +406,6 @@ const SETUP_READS: [&str; 8] = [
     "guard",
     "handler",
     "modules",
-    "nonce",
 ];
 
 // --- `safe.create` -----------------------------------------------------
@@ -469,6 +482,7 @@ fn status_of_an_undeployed_safe_prices_its_activation() {
             "executorBalance": "1000000000000000000",
             // 200,000 gas plus 20%, at 7 gwei.
             "estimatedCost": "1680000000000000", "needsFunds": false,
+            "setup": { "state": "not_deployed" },
         })
     );
     // Display only: no fee evidence, no setup read.
@@ -502,13 +516,14 @@ fn status_with_no_vault_owner_needs_funds_and_reads_no_price() {
         &json!({
             "deployed": false, "chainId": 100, "executorIndex": null, "executorAddress": null,
             "executorBalance": null, "estimatedCost": null, "needsFunds": true,
+            "setup": { "state": "not_deployed" },
         })
     );
     assert_eq!(h.asked, ["code"]);
 }
 
 #[test]
-fn status_of_a_marked_safe_reads_its_setup_and_nonce() {
+fn status_of_a_marked_safe_reads_its_setup_and_no_nonce() {
     let mut h = Harness::new(meta(true), Chain::deployed());
     let reply = h.call("safe.status", json!({ "safe": SAFE }));
     assert_eq!(
@@ -516,52 +531,163 @@ fn status_of_a_marked_safe_reads_its_setup_and_nonce() {
         &json!({
             "deployed": true, "chainId": 100, "executorIndex": 0, "executorAddress": A,
             "executorBalance": null, "estimatedCost": null, "needsFunds": false,
+            "setup": { "state": "unchanged" },
         })
     );
-    assert_eq!(h.asked, SETUP_READS);
+    // Seven reads answered, the nonce not among them.
+    assert_eq!(h.asked, STATUS_READS);
+}
+
+/// `safe.status` of the marked Safe on `chain`: its `setup`, and the reads
+/// the chain answered.
+fn marked_status(chain: Chain) -> (Value, Vec<&'static str>) {
+    let mut h = Harness::new(meta(true), chain);
+    let reply = h.call("safe.status", json!({ "safe": SAFE }));
+    let status = result(&reply);
+    assert_eq!(status["deployed"], true, "{reply}");
+    assert_eq!(status["executorIndex"], 0);
+    assert_eq!(status["needsFunds"], false);
+    assert!(!h.asked.contains(&"nonce"), "{:?}", h.asked);
+    (status["setup"].clone(), h.asked)
 }
 
 #[test]
-fn status_refuses_a_changed_unverified_or_undeployed_marked_safe() {
-    // `safe_changed`: a threshold the record doesn't have, an owner added.
+fn status_reports_each_setup_state_as_data() {
+    // `changed`, naming what changed as `check_setup` does: never a
+    // refusal, since status signs nothing.
+    let mut handler = word(&FALLBACK_HANDLER);
+    handler[31] ^= 1;
+    for (chain, changed) in [
+        (
+            Chain::deployed().with("threshold", hex_words(&[uint(2)])),
+            json!(["threshold"]),
+        ),
+        (
+            Chain::deployed().with("owners", owner_list(&[address(A), address(B), address(C)])),
+            json!(["owners"]),
+        ),
+        (
+            Chain::deployed().with("guard", hex_words(&[word(&[0x99; 20])])),
+            json!(["guard"]),
+        ),
+        (
+            Chain::deployed().with(
+                "modules",
+                hex_words(&[uint(0x40), word(&SENTINEL), uint(1), word(&[0x99; 20])]),
+            ),
+            json!(["module"]),
+        ),
+        (
+            Chain::deployed()
+                .with("singleton", hex_words(&[word(&[0x99; 20])]))
+                .with("handler", hex_words(&[handler])),
+            json!(["singleton", "handler"]),
+        ),
+    ] {
+        let (setup, asked) = marked_status(chain);
+        assert_eq!(setup, json!({ "state": "changed", "changed": changed }));
+        assert_eq!(asked, STATUS_READS);
+    }
+    // `unverified`, naming the read and why: each of the seven answered
+    // unverified in turn. An unverified code ends the check there.
+    for read in STATUS_READS {
+        let (setup, asked) = marked_status(Chain::deployed().served(read, Serve::Unverified));
+        assert_eq!(
+            setup,
+            json!({ "state": "unverified", "read": read, "why": "unverified" }),
+            "{read}"
+        );
+        let expected: &[&str] = if read == "code" {
+            &["code"]
+        } else {
+            &STATUS_READS
+        };
+        assert_eq!(asked, expected, "{read}");
+    }
+    // A reverted call, and an answer that isn't Safe 1.4.1's encoding.
+    let (setup, _) = marked_status(Chain::deployed().served("owners", Serve::Failed));
+    assert_eq!(
+        setup,
+        json!({ "state": "unverified", "read": "owners", "why": "failed" })
+    );
+    let (setup, _) = marked_status(Chain::deployed().with("threshold", json!("0x02")));
+    assert_eq!(
+        setup,
+        json!({ "state": "unverified", "read": "threshold", "why": "length" })
+    );
+    // `not_deployed`: no code, verified, where the record marks it.
+    let (setup, asked) = marked_status(Chain::undeployed());
+    assert_eq!(setup, json!({ "state": "not_deployed" }));
+    assert_eq!(asked, ["code"]);
+}
+
+#[test]
+fn a_nonce_status_doesnt_read_fails_nothing() {
+    // The code and the six setup reads verified, the nonce unverified,
+    // reverting or unreadable: a normal status, the nonce never asked.
     for chain in [
-        Chain::deployed().with("threshold", hex_words(&[uint(2)])),
-        Chain::deployed().with("owners", owner_list(&[address(A), address(B), address(C)])),
-        Chain::deployed().with("guard", hex_words(&[word(&[0x99; 20])])),
+        Chain::deployed().served("nonce", Serve::Unverified),
+        Chain::deployed().served("nonce", Serve::Failed),
+        Chain::deployed().with("nonce", json!("0x")),
     ] {
         let mut h = Harness::new(meta(true), chain);
         let reply = h.call("safe.status", json!({ "safe": SAFE }));
-        assert_eq!(refusal(&reply), "changed", "{reply}");
         assert_eq!(
-            reply["error"]["message"],
-            super::super::evidence::CHANGED_TEXT
+            result(&reply),
+            &json!({
+                "deployed": true, "chainId": 100, "executorIndex": 0, "executorAddress": A,
+                "executorBalance": null, "estimatedCost": null, "needsFunds": false,
+                "setup": { "state": "unchanged" },
+            })
         );
+        assert_eq!(h.asked, STATUS_READS);
     }
-    // `safe_unverified`: each of the eight answered unverified in turn,
-    // and a reverted call.
-    for read in SETUP_READS {
-        let mut h = Harness::new(
-            meta(true),
-            Chain::deployed().served(read, Serve::Unverified),
-        );
-        let reply = h.call("safe.status", json!({ "safe": SAFE }));
-        assert_eq!(refusal(&reply), "unverified", "{read}");
-        assert_eq!(reply["error"]["code"], "invalid_argument");
-    }
+}
+
+#[test]
+fn status_of_an_unmarked_safe_reports_its_code_read() {
+    // No code, but unverified: the activation is priced, and the code's
+    // read is named unverified.
     let mut h = Harness::new(
-        meta(true),
-        Chain::deployed().served("owners", Serve::Failed),
+        meta(false),
+        Chain::undeployed().served("code", Serve::Unverified),
     );
-    assert_eq!(
-        refusal(&h.call("safe.status", json!({ "safe": SAFE }))),
-        "unverified"
-    );
-    // `not_deployed`: no code, verified, where the record marks it.
-    let mut h = Harness::new(meta(true), Chain::undeployed());
     let reply = h.call("safe.status", json!({ "safe": SAFE }));
-    assert_eq!(refusal(&reply), "not_deployed");
-    assert_eq!(reply["error"]["message"], NOT_DEPLOYED_TEXT);
+    assert_eq!(result(&reply)["deployed"], false);
+    assert_eq!(result(&reply)["estimatedCost"], "1680000000000000");
+    assert_eq!(
+        result(&reply)["setup"],
+        json!({ "state": "unverified", "read": "code", "why": "unverified" })
+    );
+    // Code, unverified: the session's report, its read named.
+    let mut h = Harness::new(
+        meta(false),
+        Chain::deployed().served("code", Serve::Unverified),
+    );
+    let reply = h.call("safe.status", json!({ "safe": SAFE }));
+    assert_eq!(
+        result(&reply),
+        &json!({
+            "deployed": true, "chainId": 100, "executorIndex": 0, "executorAddress": A,
+            "executorBalance": null, "estimatedCost": null, "needsFunds": false,
+            "setup": { "state": "unverified", "read": "code", "why": "unverified" },
+        })
+    );
     assert_eq!(h.asked, ["code"]);
+    // Then a failed read: still the session's, the failure named.
+    h.chain = Chain::deployed().served("code", Serve::Failed);
+    let reply = h.call("safe.status", json!({ "safe": SAFE }));
+    assert_eq!(result(&reply)["deployed"], true);
+    assert_eq!(
+        result(&reply)["setup"],
+        json!({ "state": "unverified", "read": "code", "why": "failed" })
+    );
+    // A code read nothing answered, neither marked nor reported: no
+    // `deployed` to give, so `isDeployedOnChain`'s failure.
+    let mut h = Harness::new(meta(false), Chain::deployed().served("code", Serve::Failed));
+    let reply = h.call("safe.status", json!({ "safe": SAFE }));
+    assert_eq!(refusal(&reply), "unverified");
+    assert_eq!(reply["error"]["message"], ACTIVATION_UNVERIFIED_TEXT);
 }
 
 #[test]
@@ -569,10 +695,11 @@ fn status_marks_a_safe_whose_verified_code_shows_it() {
     let mut h = Harness::new(meta(false), Chain::deployed());
     let reply = h.call("safe.status", json!({ "safe": SAFE }));
     assert_eq!(result(&reply)["deployed"], true);
+    assert_eq!(result(&reply)["setup"], json!({ "state": "unchanged" }));
     assert_eq!(h.marked, [SAFE]);
-    // The mark, then the setup check.
+    // The mark, then the setup check, without the nonce.
     let mut expected = vec!["code"];
-    expected.extend(SETUP_READS);
+    expected.extend(STATUS_READS);
     assert_eq!(h.asked, expected);
 }
 
@@ -780,6 +907,78 @@ fn an_empty_or_unanswered_code_marks_nothing() {
     assert_eq!(refusal(&reply), "unverified");
     assert_eq!(reply["error"]["message"], DEPLOYMENT_UNVERIFIED_TEXT);
     assert!(h.marked.is_empty());
+}
+
+#[test]
+fn a_removed_safes_session_report_goes_with_its_record() {
+    let (reply, mut h) = deployed(
+        Chain::undeployed()
+            .served("receipt", Serve::Unverified)
+            .served("code", Serve::Unverified),
+    );
+    assert_eq!(
+        result(&reply),
+        &json!({ "deployed": true, "verified": false })
+    );
+    assert_eq!(h.safes.session, BTreeSet::from([safe_address()]));
+    // A snapshot that still holds the Safe keeps its report.
+    h.meta["activeWalletIndex"] = json!(1);
+    h.records();
+    assert_eq!(h.safes.session.len(), 1);
+    // Its record removed: the report goes.
+    h.remove_safe();
+    assert!(h.safes.session.is_empty());
+}
+
+#[test]
+fn an_answer_for_a_safe_no_record_holds_adds_nothing() {
+    for method in ["safe.deployed", "safe.status"] {
+        let chain = Chain::undeployed()
+            .served("receipt", Serve::Unverified)
+            .served("code", Serve::Unverified);
+        let chain = if method == "safe.status" {
+            chain.with("code", Chain::deployed().answers["code"].clone())
+        } else {
+            chain
+        };
+        let mut h = Harness::new(meta(false), chain);
+        h.hold = true;
+        let params = if method == "safe.status" {
+            json!({ "safe": SAFE })
+        } else {
+            json!({ "safe": SAFE, "hash": to_hex(&HASH) })
+        };
+        let outs = h.send(method, params);
+        let outs = if method == "safe.status" {
+            outs
+        } else {
+            // `safe.deployed`'s receipt, then its code read, held.
+            assert!(h.drive(outs).is_none());
+            let read = h.held.pop().unwrap();
+            h.safes
+                .chain_read(read.tag, &payload(&h.chain, &read), false, ctx!(h))
+        };
+        assert!(h.drive(outs).is_none());
+        // The record goes while the code read is out.
+        h.remove_safe();
+        h.hold = false;
+        let read = h.held.pop().unwrap();
+        assert_eq!(name_of(&read), "code");
+        let outs = h
+            .safes
+            .chain_read(read.tag, &payload(&h.chain, &read), false, ctx!(h));
+        let reply = h.drive(outs).unwrap();
+        assert_eq!(result(&reply)["deployed"], true, "{method} {reply}");
+        assert!(h.safes.session.is_empty(), "{method}");
+    }
+    // A snapshot keeps only the reports of the Safes its records hold.
+    let mut h = Harness::new(meta(false), Chain::deployed());
+    h.safes.session.insert(safe_address());
+    h.records();
+    assert_eq!(h.safes.session.len(), 1);
+    h.safes.session.insert([0x99; 20]);
+    h.records();
+    assert_eq!(h.safes.session, BTreeSet::from([safe_address()]));
 }
 
 /// Gnosis's snapshot: `read_order` over endpoints `a` and `b`, quorum 2 of

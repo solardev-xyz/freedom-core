@@ -1,10 +1,10 @@
 //! SAFE-2's S2 methods through the real binary (design 0016, API):
 //! `safe.create` writes the record with no chain read; `safe.deployed`
 //! marks a Safe deployed on a receipt two endpoints agree on, and
-//! `safe.status` then reads its setup, each read through the core's own
-//! chain machine and main's `shell.rpc`; the callers each method admits;
-//! `not_moved` before `vault_meta` is in `store_moved`. The test plays
-//! main.
+//! `safe.status` then reads its setup (no nonce), each read through the
+//! core's own chain machine and main's `shell.rpc`; the callers each method
+//! admits; `not_moved` before `vault_meta` is in `store_moved`. The test
+//! plays main.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -301,7 +301,8 @@ fn a_receipt_two_endpoints_agree_on_marks_the_safe_and_status_reads_its_setup() 
         record(root.path(), SAFE)["deployed"],
         json!({ "100": { "verified": true } })
     );
-    // Marked: the status reads the eight, each from both endpoints.
+    // Marked: the status reads the code and the six setup reads, each
+    // from both endpoints, and no nonce.
     send(
         &mut core,
         4,
@@ -315,11 +316,12 @@ fn a_receipt_two_endpoints_agree_on_marks_the_safe_and_status_reads_its_setup() 
         json!({
             "deployed": true, "chainId": 100, "executorIndex": 0, "executorAddress": A,
             "executorBalance": null, "estimatedCost": null, "needsFunds": false,
+            "setup": { "state": "unchanged" },
         }),
         "{reply}"
     );
-    assert_eq!(methods.len(), 16, "{methods:?}");
-    assert_eq!(methods.last().unwrap(), "eth_call");
+    assert_eq!(methods.len(), 14, "{methods:?}");
+    assert_eq!(methods[..2], ["eth_getCode"; 2]);
     // The deployment of a deployed Safe sends nothing.
     let reply = call(
         &mut core,
