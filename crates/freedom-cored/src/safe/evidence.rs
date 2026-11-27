@@ -2,9 +2,12 @@
 //! "Owners, threshold and setup"; SAFE-2's S1): the eight reads `fc-safe`
 //! lists, each made through the chain machine as one of the core's own
 //! reads ([`In::Internal`](crate::chain::In::Internal)), each answer
-//! required `verified`, and `fc-safe`'s [`check_setup`] on them. S2 to S5
-//! run it before each owner's signature and before execution, and sign
-//! nothing on any [`Outcome`] but [`Outcome::Unchanged`].
+//! required `verified`, and `fc-safe`'s [`check_setup`] on them. S3 to S5
+//! run it ([`Evidence::start`]) before each owner's signature and before
+//! execution, and sign nothing on any [`Outcome`] but
+//! [`Outcome::Unchanged`]. S2's `safe.status`, which signs nothing, runs
+//! it without the nonce ([`Evidence::start_status`]) and reports the
+//! outcome as data ([`Outcome::state`]), never as a refusal.
 //!
 //! - **Verified, or nothing is signed:** an answer is evidence only when
 //!   the chain machine labels it `verified` by 0005's rules: a verifier's
@@ -23,7 +26,10 @@
 //!   all six have answered, since the reads aren't pinned to one block
 //!   (`fc_safe::Read::ALL`). Each step that decides ends the check there:
 //!   no code, verified, is [`Outcome::NotDeployed`], and a code or setup
-//!   read that isn't verified ends it before the nonce is read.
+//!   read that isn't verified ends it before the nonce is read. A status
+//!   check ([`Scope::Status`]) stops after the six: it reads no nonce, so
+//!   none can fail it, and its unchanged answer is
+//!   [`Outcome::SetupUnchanged`].
 //! - **A read that can't be used** is [`Outcome::Unverified`]: a failed
 //!   read (a reverted `eth_call`, a node's other error, a transport
 //!   failure, the machine's own refusal or deadline), an answer with no
@@ -42,9 +48,6 @@
 //!   its reply here (S2 does); a phone payment's count up from 1. A reply
 //!   for a tag the check isn't waiting for changes nothing.
 
-// S2 to S5 call it; until then only the tests do.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::BTreeMap;
 
 use fc_evm::{U256, parse_bytes, to_hex};
@@ -62,11 +65,16 @@ use crate::phone::ChainRead;
 /// The bit that marks a Safe check's chain reads' tags.
 pub const SAFE_TAG: u64 = 1 << 62;
 
+// The signing steps' refusals (S3 to S5): until they land only the tests
+// use them, since `safe.status` reports the outcome as data.
+
 /// `safe_unverified`'s text (design 0016, "Chain reads").
+#[cfg_attr(not(test), allow(dead_code))]
 pub const UNVERIFIED_TEXT: &str = "Freedom couldn't verify this Safe on Gnosis, so it won't sign. \
      Try again, or add an RPC provider in Settings.";
 
 /// `safe_changed`'s text (design 0016, "Owners, threshold and setup").
+#[cfg_attr(not(test), allow(dead_code))]
 pub const CHANGED_TEXT: &str =
     "This Safe was changed outside Freedom, so Freedom can't sign for it.";
 
@@ -97,6 +105,17 @@ impl Tags {
         self.next = (self.next + 1) & (SAFE_TAG - 1);
         tag
     }
+}
+
+/// Which reads a check makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// All eight, the nonce last: before each owner's signature and
+    /// before execution (S3 to S5).
+    Signing,
+    /// The code and the six setup reads, and no nonce: `safe.status`'s,
+    /// which signs nothing and shows no nonce (S2).
+    Status,
 }
 
 /// Why a read isn't evidence of the Safe's setup.
@@ -135,6 +154,9 @@ pub enum Outcome {
     /// Deployed with the record's setup, as the reads see it now
     /// (0016, "What the setup check can't see"), and its nonce, read last.
     Unchanged { nonce: U256 },
+    /// The same, from a check that reads no nonce ([`Scope::Status`]):
+    /// never a step that signs.
+    SetupUnchanged,
     /// Changed outside Freedom (`safe_changed`): what changed, in
     /// [`Change`]'s order, at least one.
     Changed(Vec<Change>),
@@ -146,15 +168,40 @@ pub enum Outcome {
 impl Outcome {
     /// The refusal of a step that signs (design 0016, API): `safe_changed`
     /// or `safe_unverified`, `invalid_argument` with `data.safe`. `None`
-    /// for [`Outcome::Unchanged`], and for [`Outcome::NotDeployed`], whose
-    /// answer S2 settles.
+    /// for [`Outcome::Unchanged`] and [`Outcome::SetupUnchanged`], and for
+    /// [`Outcome::NotDeployed`], which the step refuses `not_deployed`
+    /// itself (`methods::NOT_DEPLOYED_TEXT`). S3 to S5 call it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn refusal(&self) -> Option<ErrorBody> {
         let (text, safe) = match self {
             Outcome::Changed(_) => (CHANGED_TEXT, "changed"),
             Outcome::Unverified { .. } => (UNVERIFIED_TEXT, "unverified"),
-            Outcome::NotDeployed | Outcome::Unchanged { .. } => return None,
+            Outcome::NotDeployed | Outcome::Unchanged { .. } | Outcome::SetupUnchanged => {
+                return None;
+            }
         };
         Some(ErrorBody::new(ErrorCode::InvalidArgument, text).with_data(json!({ "safe": safe })))
+    }
+
+    /// The outcome as `safe.status`'s `setup` reports it, data for the
+    /// board (design 0016, API): `{ state }`, one of `unchanged`,
+    /// `changed` with what changed (`changed`, [`Change`]'s names in its
+    /// order), `unverified` with the first read that isn't evidence and
+    /// why (`read`, `why`), or `not_deployed` (no code, verified).
+    pub fn state(&self) -> serde_json::Value {
+        match self {
+            Outcome::Unchanged { .. } | Outcome::SetupUnchanged => json!({ "state": "unchanged" }),
+            Outcome::Changed(changes) => json!({
+                "state": "changed",
+                "changed": changes.iter().map(|change| change.name()).collect::<Vec<_>>(),
+            }),
+            Outcome::Unverified { read, why } => json!({
+                "state": "unverified",
+                "read": read.name(),
+                "why": why.name(),
+            }),
+            Outcome::NotDeployed => json!({ "state": "not_deployed" }),
+        }
     }
 }
 
@@ -173,6 +220,7 @@ type Answer = Result<Vec<u8>, Why>;
 
 /// One check of a Safe's setup against its record, in flight.
 pub struct Evidence {
+    scope: Scope,
     safe: [u8; 20],
     setup: Setup,
     deadline_ms: u64,
@@ -190,13 +238,37 @@ impl Evidence {
     /// The check of the Safe at `safe` against its record's `setup`, each
     /// read with `deadline_ms`: the check, and its first read. The caller
     /// has checked the address against the record (`Setup::check_address`).
+    /// S3 to S5 call it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn start(
         safe: [u8; 20],
         setup: Setup,
         deadline_ms: u64,
         tags: &mut Tags,
     ) -> (Self, Vec<ChainRead>) {
+        Self::begin(Scope::Signing, safe, setup, deadline_ms, tags)
+    }
+
+    /// The same check without the nonce ([`Scope::Status`]), for
+    /// `safe.status`: its unchanged answer is [`Outcome::SetupUnchanged`].
+    pub fn start_status(
+        safe: [u8; 20],
+        setup: Setup,
+        deadline_ms: u64,
+        tags: &mut Tags,
+    ) -> (Self, Vec<ChainRead>) {
+        Self::begin(Scope::Status, safe, setup, deadline_ms, tags)
+    }
+
+    fn begin(
+        scope: Scope,
+        safe: [u8; 20],
+        setup: Setup,
+        deadline_ms: u64,
+        tags: &mut Tags,
+    ) -> (Self, Vec<ChainRead>) {
         let mut evidence = Evidence {
+            scope,
             safe,
             setup,
             deadline_ms,
@@ -208,6 +280,7 @@ impl Evidence {
     }
 
     /// Whether the read tagged `tag` is this check's, and still out.
+    #[cfg(test)]
     pub fn waits_for(&self, tag: u64) -> bool {
         self.out.contains_key(&tag)
     }
@@ -272,7 +345,7 @@ impl Evidence {
         if let Some(unverified) = self.unverified(&SETUP) {
             return Next::Done(unverified);
         }
-        if !self.answers.contains_key(&Read::Nonce) {
+        if self.scope == Scope::Signing && !self.answers.contains_key(&Read::Nonce) {
             return Next::Reads(&[Read::Nonce]);
         }
         Next::Done(self.judged())
@@ -333,15 +406,24 @@ impl Evidence {
         }))
     }
 
-    /// All eight in: `check_setup` on the verified answers.
+    /// All the scope's reads in: `check_setup` on the verified answers. A
+    /// status check reads no nonce, so `check_setup` is given a zero word
+    /// in its place, which always decodes and is never reported.
     fn judged(&self) -> Outcome {
+        const NO_NONCE: [u8; 32] = [0; 32];
         if let Some(unverified) = self.unverified(&Read::ALL) {
             return unverified;
         }
-        let answers = Answers::from_fn(|read| self.verified(read).unwrap_or(&[]));
+        let answers = Answers::from_fn(|read| match (read, self.scope) {
+            (Read::Nonce, Scope::Status) => &NO_NONCE,
+            _ => self.verified(read).unwrap_or(&[]),
+        });
         match check_setup(&self.setup, &answers) {
             Ok(SetupCheck::NotDeployed) => Outcome::NotDeployed,
-            Ok(SetupCheck::Unchanged { nonce }) => Outcome::Unchanged { nonce },
+            Ok(SetupCheck::Unchanged { nonce }) => match self.scope {
+                Scope::Signing => Outcome::Unchanged { nonce },
+                Scope::Status => Outcome::SetupUnchanged,
+            },
             Ok(SetupCheck::Changed(changes)) => Outcome::Changed(changes),
             Err(error) => Outcome::Unverified {
                 read: error.read,
@@ -363,7 +445,7 @@ fn logged(outcome: &Outcome) {
             "safe setup changed",
             json!({ "changed": changes.iter().map(|c| c.name()).collect::<Vec<_>>() }),
         ),
-        Outcome::NotDeployed | Outcome::Unchanged { .. } => {}
+        Outcome::NotDeployed | Outcome::Unchanged { .. } | Outcome::SetupUnchanged => {}
     }
 }
 
