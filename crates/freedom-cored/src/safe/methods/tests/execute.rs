@@ -882,34 +882,48 @@ fn a_confirmed_deployment_still_needs_the_funds() {
     assert_eq!(h.safes.sends.len(), 1);
 }
 
-/// An offer replaced while a confirmed deployment's balance is read is no
-/// longer the one the user confirmed: quoted again, as with none standing,
-/// and a fee the check stops is offered again, nothing minted.
+/// An offer replaced or dropped while a confirmed deployment's balance is
+/// read is no longer the one the user confirmed: quoted again, as with
+/// none standing, whatever the stale balance read answered (a balance or
+/// a failure), and a fee the check stops is offered again, nothing minted.
 #[test]
 fn a_deployment_offer_replaced_meanwhile_is_quoted_again() {
-    let mut h = Harness::new(meta(false), Chain::undeployed());
-    let reply = h.call("safe.deploy", json!({ "safe": SAFE }));
-    assert_eq!(result(&reply)["fee_check"]["above"], true, "{reply}");
-    h.hold = true;
-    let outs = h.send("safe.deploy", json!({ "safe": SAFE, "fee_ack": true }));
-    assert!(h.drive(outs).is_none());
-    let code = h.held.pop().unwrap();
-    assert_eq!(name_of(&code), "code");
-    let outs = h
-        .safes
-        .chain_read(code.tag, &payload(&h.chain, &code), false, ctx!(h));
-    assert!(h.drive(outs).is_none());
-    let balance = h.held.pop().unwrap();
-    assert_eq!(name_of(&balance), "balance");
-    // Another quote's offer replaces it meanwhile.
-    h.safes.offers.get_mut(&SAFE).unwrap().tx["gas_limit"] = json!("250000");
-    h.hold = false;
-    h.asked.clear();
-    let outs = h
-        .safes
-        .chain_read(balance.tag, &payload(&h.chain, &balance), false, ctx!(h));
-    let reply = h.drive(outs).unwrap();
-    assert_eq!(result(&reply)["fee_check"]["above"], true, "{reply}");
-    assert_eq!(h.asked, ["estimate", "fee", "balance"]);
-    assert!(h.safes.sends.is_empty());
+    for stale in [Serve::Verified, Serve::Failed] {
+        for dropped in [false, true] {
+            let case = format!("{stale:?}, dropped: {dropped}");
+            let mut h = Harness::new(meta(false), Chain::undeployed());
+            let reply = h.call("safe.deploy", json!({ "safe": SAFE }));
+            assert_eq!(result(&reply)["fee_check"]["above"], true, "{reply}");
+            h.hold = true;
+            let outs = h.send("safe.deploy", json!({ "safe": SAFE, "fee_ack": true }));
+            assert!(h.drive(outs).is_none());
+            let code = h.held.pop().unwrap();
+            assert_eq!(name_of(&code), "code");
+            let outs = h
+                .safes
+                .chain_read(code.tag, &payload(&h.chain, &code), false, ctx!(h));
+            assert!(h.drive(outs).is_none());
+            let balance = h.held.pop().unwrap();
+            assert_eq!(name_of(&balance), "balance");
+            // Another quote's offer replaces it meanwhile, or it goes.
+            if dropped {
+                h.safes.offers.remove(&SAFE);
+            } else {
+                h.safes.offers.get_mut(&SAFE).unwrap().tx["gas_limit"] = json!("250000");
+            }
+            // The stale read's answer; the new quote's reads all answer.
+            let late = payload(&h.chain.clone().served("balance", stale), &balance);
+            h.hold = false;
+            h.asked.clear();
+            let outs = h.safes.chain_read(balance.tag, &late, false, ctx!(h));
+            let reply = h.drive(outs).unwrap();
+            assert_eq!(
+                result(&reply)["fee_check"]["above"],
+                true,
+                "{case}: {reply}"
+            );
+            assert_eq!(h.asked, ["estimate", "fee", "balance"], "{case}");
+            assert!(h.safes.sends.is_empty(), "{case}");
+        }
+    }
 }

@@ -1921,22 +1921,15 @@ impl Safes {
         reply(id, &json!({ "fee_check": verdict }))
     }
 
-    /// `safe.deploy { fee_ack: true }`'s balance is in (`quote.balance`):
-    /// the offer it started with (`tx`) gets `{ send }` exactly as offered,
-    /// as `confirmedExecutorSend` signs the fee the user confirmed, while it
-    /// still stands and the executor can still pay its cost; with too
-    /// little, `SAFE_NEEDS_FUNDS` and nothing minted. An offer replaced or
-    /// dropped while the balance was read is no longer the one the user
-    /// confirmed: quoted again, as with none standing.
+    /// `safe.deploy { fee_ack: true }`'s balance is in (`quote.balance`).
+    /// The offer it started with (`tx`) is checked first, before the reply
+    /// is read at all: one replaced or dropped meanwhile is no longer the
+    /// one the user confirmed, so it is quoted again, as with none
+    /// standing, whatever the balance read answered. While it stands, it
+    /// gets `{ send }` exactly as offered, as `confirmedExecutorSend` signs
+    /// the fee the user confirmed, if the executor can still pay its cost;
+    /// with too little, `SAFE_NEEDS_FUNDS` and nothing minted.
     fn confirmed(&mut self, id: u64, op: Op, tx: Value, quote: Quote, ctx: &mut Ctx) -> Vec<Out> {
-        let balance = match quote.balance {
-            Some(Reply::Answer { result, .. }) => result.as_str().and_then(parse_unsigned),
-            // As `quoted` answers a failed balance read.
-            Some(Reply::Failed(error)) => {
-                return vec![failed(id, &ErrorBody::new(error.code, error.message))];
-            }
-            None => None,
-        };
         let Some(executor) = op.safe.executor.clone() else {
             return vec![failed(id, &crate::vault::internal())];
         };
@@ -1956,6 +1949,14 @@ impl Safes {
                 quote.setup,
                 ctx,
             );
+        };
+        let balance = match quote.balance {
+            Some(Reply::Answer { result, .. }) => result.as_str().and_then(parse_unsigned),
+            // As `quoted` answers a failed balance read.
+            Some(Reply::Failed(error)) => {
+                return vec![failed(id, &ErrorBody::new(error.code, error.message))];
+            }
+            None => None,
         };
         let Some(balance) = balance else {
             return vec![failed(id, &plain("Invalid balance"))];
