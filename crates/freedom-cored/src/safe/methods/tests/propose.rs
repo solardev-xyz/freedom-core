@@ -95,7 +95,7 @@ pub(super) fn flows_meta(unmarked: bool) -> Value {
         json!({ "index": 1, "name": "Wallet 2", "address": OB }),
         json!({ "index": 2, "name": "Wallet 3", "address": OC }),
         json!({ "index": 1_000_000, "name": "Ledger 1", "address": OD, "type": "ledger",
-                "path": "m/44'/60'/0'/0/0", "addressCheck": "matched" }),
+                "path": "44'/60'/0'/0/0", "addressCheck": "matched" }),
         json!({ "index": 1_000_001, "name": "Phone 1", "address": OE, "type": "remote",
                 "addressCheck": "matched" }),
     ];
@@ -157,13 +157,13 @@ fn page_context() -> Context {
 }
 
 /// The flows' call: 0.25 xDAI to D.
-fn call() -> Value {
+pub(super) fn call() -> Value {
     json!({ "to": OD, "value": "250000000000000000", "data": "0x" })
 }
 
 impl Harness {
     /// `safe.prepare` for the call to the Safe at `index`: its answer.
-    fn prepare(&mut self, index: u64, tx: Value) -> Value {
+    pub(super) fn prepare(&mut self, index: u64, tx: Value) -> Value {
         self.call(
             "safe.prepare",
             json!({ "safe": index, "chain_id": 100, "tx": tx }),
@@ -172,7 +172,7 @@ impl Harness {
 
     /// A token for `payload`, minted by the harness's caller (with the
     /// handle when it is a page).
-    fn token(&mut self, index: u64, payload: &Value) -> String {
+    pub(super) fn token(&mut self, index: u64, payload: &Value) -> String {
         let mut params = json!({ "kind": "safe-send", "account": index, "payload": payload });
         if self.context.caller == CallerKind::Page {
             params["handle"] = json!(HANDLE);
@@ -187,7 +187,13 @@ impl Harness {
     }
 
     /// `safe.propose` of the prepared `answer` with `token`.
-    fn propose(&mut self, index: u64, answer: &Value, token: &str, display: Value) -> Value {
+    pub(super) fn propose(
+        &mut self,
+        index: u64,
+        answer: &Value,
+        token: &str,
+        display: Value,
+    ) -> Value {
         let mut authorization = json!({ "token": token });
         if self.context.caller == CallerKind::Page {
             authorization["handle"] = json!(HANDLE);
@@ -202,7 +208,7 @@ impl Harness {
     }
 
     /// The token payload for a prepared answer, as main mints it (D6).
-    fn payload(&self, index: u64, answer: &Value) -> Value {
+    pub(super) fn payload(&self, index: u64, answer: &Value) -> Value {
         json!({
             "safe": checksum_address(&Flows::address(index)), "chain_id": "100",
             "safe_tx": answer["safe_tx"], "safe_tx_hash": answer["safe_tx_hash"],
@@ -210,7 +216,7 @@ impl Harness {
     }
 
     /// Prepared, minted and proposed: the answer to `safe.propose`.
-    fn proposed(&mut self, index: u64) -> Value {
+    pub(super) fn proposed(&mut self, index: u64) -> Value {
         let answer = result(&self.prepare(index, call())).clone();
         let token = self.token(index, &self.payload(index, &answer));
         self.propose(index, &answer, &token, json!({ "symbol": "xDAI" }))
@@ -224,7 +230,7 @@ impl Harness {
     }
 }
 
-fn without_clock(mut entry: Value) -> Value {
+pub(super) fn without_clock(mut entry: Value) -> Value {
     entry.as_object_mut().unwrap().shift_remove("createdAt");
     entry
 }

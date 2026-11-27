@@ -332,7 +332,7 @@ fn ledger_record(checks: &Checks<'_>, key: &LedgerKey) -> Result<fc_ledger::Acco
 /// fc-ledger's refusal before the first APDU: what a Ledger can't carry
 /// is `device_failed` with its code (design 0016, API); anything else an
 /// invalid request.
-fn device_refusal(refusal: fc_ledger::Refusal) -> ErrorBody {
+pub(crate) fn device_refusal(refusal: fc_ledger::Refusal) -> ErrorBody {
     match refusal.code() {
         Some(code) => crate::ledger::methods::device_failed(code),
         None => invalid(refusal.to_string()),

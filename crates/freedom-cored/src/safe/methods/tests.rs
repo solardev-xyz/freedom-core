@@ -272,7 +272,15 @@ struct Harness {
     state: fc_vault::state::VaultState,
     /// Who calls.
     context: Context,
+    /// The device a Ledger owner's operation is driven on (S6): its end;
+    /// with none, the operation is held in `on_lane`.
+    device: Option<Box<DeviceFn>>,
+    /// Ledger owners' operations handed to the lane and held there.
+    on_lane: Vec<(u64, fc_ledger::Operation)>,
 }
+
+/// A scripted device and main: an operation driven to its end.
+type DeviceFn = dyn FnMut(&mut fc_ledger::Operation) -> Result<fc_ledger::Signed, ErrorBody>;
 
 macro_rules! ctx {
     ($h:expr) => {
@@ -308,6 +316,8 @@ impl Harness {
                 caller: fc_protocol::message::CallerKind::Shell,
                 page: None,
             },
+            device: None,
+            on_lane: Vec::new(),
         };
         harness.records();
         harness
@@ -389,6 +399,16 @@ impl Harness {
                     }
                     let payload = payload(&self.chain, &read);
                     queue.extend(self.safes.chain_read(read.tag, &payload, false, ctx!(self)));
+                }
+                // A Ledger owner's operation (S6): the device's end, or held.
+                Out::SafeLedger(id, operation) => {
+                    let mut operation = *operation;
+                    let Some(device) = self.device.as_mut() else {
+                        self.on_lane.push((id, operation));
+                        continue;
+                    };
+                    let ended = device(&mut operation);
+                    queue.extend(self.safes.device_ended(id, ended, self.now));
                 }
                 _ => panic!("unexpected out"),
             }
@@ -1405,3 +1425,7 @@ mod execute;
 // --- SAFE-2's S5: a page's Safe message ---------------------------------
 
 mod messages;
+
+// --- SAFE-2's S6: owners who sign after a proposal --------------------------
+
+mod owners;

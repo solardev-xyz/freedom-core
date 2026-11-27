@@ -40,6 +40,12 @@
 //!   its end goes back to them whatever it is ([`Finish::X402`]): the
 //!   signature gives the payload, and anything else, a cancel included,
 //!   gives the charge back.
+//! - **A Safe's Ledger owner** (SAFE-2's S6), `safe.sign_owner` for a
+//!   pending SafeTx or `safe.message_sign` for a SafeMessage session, comes
+//!   here from the Safe methods as [`Then::Safe`], and its end goes back to
+//!   them whatever it is ([`Finish::Safe`]): they hold the Safe until it
+//!   ends, and keep the signature only while the SafeTx or the session is
+//!   still the one checked.
 //! - **A device's failure** is `device_failed` with `data.ledger`, its
 //!   `LEDGER_*` code (0016's API); a request the lane or fc-ledger refuses
 //!   before its first APDU is `invalid_argument`. The parent's cancel ends
@@ -79,6 +85,9 @@ pub enum Then {
     /// its reservation, which the approvals finish however it ends
     /// ([`crate::approvals::Approvals::x402_ledger_ended`]).
     X402(Box<crate::approvals::x402::Settling>),
+    /// A Safe's Ledger owner (S6): the Safe methods hold the request, and
+    /// finish it however it ends ([`crate::vault::Vault::safe_ledger_ended`]).
+    Safe,
 }
 
 /// What the event loop does with an operation's end.
@@ -100,6 +109,10 @@ pub enum Finish {
         Box<crate::approvals::x402::Settling>,
         Result<Signed, ErrorBody>,
     ),
+    /// A Safe's Ledger owner's operation, ended: its signature, checked by
+    /// fc-ledger, or the parent's error, for the Safe methods to finish
+    /// ([`crate::vault::Vault::safe_ledger_ended`]).
+    Safe(u64, Result<Signed, ErrorBody>),
 }
 
 /// Where the records discovery's check reads stand: none before
@@ -228,6 +241,8 @@ pub fn finish(ended: Ended<Then>) -> Finish {
     // failure gives its charge back.
     let then = match then {
         Then::X402(settling) => return Finish::X402(parent, settling, signed),
+        // A Safe owner's too: the Safe methods release the Safe.
+        Then::Safe => return Finish::Safe(parent, signed),
         then => then,
     };
     let signed = match signed {
