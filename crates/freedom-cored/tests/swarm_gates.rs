@@ -2440,10 +2440,16 @@ fn vault_under_load(window: Duration, delay_ms: u64, paced: bool) -> VaultRun {
     // ran through the window, as checked above.
     let answer = rig.answer(search);
     let text = answer.to_string();
+    // The stuck lane's answer exactly: its code, message and reason.
+    let stuck = json!({ "object": [
+        ["code", { "number": "-32603" }],
+        ["message", { "string": "GSOC mining failed: mining lane stuck" }],
+        ["data", { "object": [["reason", { "string": "gsoc_mining_failed" }]] }],
+    ] });
     assert!(
         answer["result"]["result_typed"].is_object()
             || text.contains("gsoc_mining_timeout")
-            || text.contains("GSOC mining failed: mining lane stuck"),
+            || answer["result"]["error_typed"] == stuck,
         "{answer}"
     );
     rig.settled();
