@@ -1059,6 +1059,31 @@ impl Vault {
         self.safe_pending.configure(root, moved);
     }
 
+    /// The hello's `safe3` (design 0016, C1): main's Safe runs on the core.
+    /// A site's Safe send then gets `safe.prepare`'s reads before its
+    /// prompt and design 0016's `safe-send`, and the approvals refuse what
+    /// only main's own Safe path used ([`Approvals::deployment_check`]).
+    pub fn configure_safe3(&mut self, safe3: bool) {
+        self.approvals.set_safe3(safe3);
+    }
+
+    /// Whether main's hello declared `safe3` (design 0016, C1).
+    pub fn safe3(&self) -> bool {
+        self.approvals.safe3()
+    }
+
+    /// A site's Safe send under `safe3` (design 0016, C1): `safe.prepare`'s
+    /// checks before its reads, for the Safe at wallet index `index` and
+    /// the call `call` (`{ to, value, data }`, JSON text), against the
+    /// core's own records (`not_moved` before `vault_meta` is moved).
+    pub fn eip1193_safe_check(
+        &self,
+        index: u32,
+        call: &str,
+    ) -> Result<crate::safe::methods::page::PageSafe, ErrorBody> {
+        crate::safe::methods::page::PageSafe::check(self.approvals.account_records(), index, call)
+    }
+
     /// The hello's `grant_root`, where `wallet-intents.jsonl` is, and
     /// whether `store_moved` names `intents` (design 0013, "The intent
     /// journal").
@@ -1243,7 +1268,10 @@ impl Vault {
     /// binding what [`fc_eip1193::sign::DeviceApproval::binds`] gives: minted for the
     /// request's document and the handle of main's answer, as for a vault
     /// account's, and returned to main in the `{ device }` answer, since
-    /// the device signs through main. The token, or the refusal's message.
+    /// the device signs through main. A Safe's `safe-send` of design
+    /// 0016's form (under `safe3`, C1) has its SafeTx kept for
+    /// `safe.propose` first ([`crate::safe::methods::Safes::keep_built`]).
+    /// The token, or the refusal's message.
     pub fn eip1193_device(
         &mut self,
         page: &message::PageContext,
@@ -1252,6 +1280,11 @@ impl Vault {
         let kind = fc_approval::Kind::from_name(approved.token_kind())
             .ok_or_else(|| internal().message)?;
         let payload = fc_evm::parse_json(approved.binds()).map_err(|_| internal().message)?;
+        if kind == fc_approval::Kind::SafeSend && fc_approval::is_built_safe_send(&payload) {
+            self.safes
+                .keep_built(u64::from(approved.account()), &payload)
+                .map_err(|body| body.message)?;
+        }
         let clocks = self.clocks();
         self.approvals
             .page_token(

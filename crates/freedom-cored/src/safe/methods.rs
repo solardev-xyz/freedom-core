@@ -43,8 +43,10 @@
 //!   offer is sent as shown while the balance covers its cost. With no
 //!   vault owner, or a balance below the cost, `SAFE_NEEDS_FUNDS`, nothing
 //!   minted. A deployment isn't a Safe's call, so main's word still signs
-//!   one under `shell` without the token, as today's activation does until
-//!   SAFE-3; presented, the token is checked.
+//!   one under `shell` without the token, as today's activation does, until
+//!   main's hello declares SAFE-3's field, `safe3` (C1): from then
+//!   `sign.transaction` under `shell` signs a transaction to the factory
+//!   only with its `executor-send` token. Presented, the token is checked.
 //! - **`safe.deployed { safe, hash }`** → `{ deployed }`, after main's
 //!   receipt (D4, the deployed mark): the receipt read again through the
 //!   chain machine, then the code. Marked only on verified evidence: a
@@ -66,7 +68,14 @@
 //!   the pending store's 1 MiB bound and its set-aside of an unreadable
 //!   file (D3). The board shows each entry as S3's codec reads it for its
 //!   Safe's record ([`super::entry`]): one it sets aside is left out, and
-//!   only the signatures that count are counted.
+//!   only the signatures that count are counted. Under SAFE-3's field
+//!   (`safe3`, C1) each board state, here and in `safe.propose`'s,
+//!   `safe.sign_owner`'s and `safe.execute`'s answers, also has `proposed`:
+//!   whether its entry carries the core's proposal mark.
+//! - **A site's Safe send under SAFE-3's field** (C1, [`page`]):
+//!   `eip1193.request` runs `safe.prepare`'s checks, reads and build before
+//!   its prompt, and the SafeTx its `safe-send` binds is kept for
+//!   `safe.propose` as the token is minted.
 //! - **`safe.prepare { safe, chain_id, tx: { to, value, data } }`** → `{
 //!   safe_tx, safe_tx_hash, view }` (S3): refused for another chain than
 //!   Gnosis (`unsupported`), for a Safe the record doesn't mark deployed
@@ -541,6 +550,39 @@ fn resolve(records: &Records, index: u64) -> Result<Safe, ErrorBody> {
         owners: listed,
         vault_owners,
     })
+}
+
+/// `safe.prepare`'s checks before any read (S3), in its order, which a
+/// page's Safe send under SAFE-3's field runs too ([`page`], C1): the
+/// record (`resolve`), another chain than Gnosis (`unsupported`), a Safe
+/// the record doesn't mark deployed (`not_deployed`), and a call to the
+/// Safe itself (`self_call`).
+fn prepare_checked(
+    records: &Records,
+    index: u64,
+    chain_id: Option<u64>,
+    call: &Call,
+) -> Result<Safe, ErrorBody> {
+    let safe = resolve(records, index)?;
+    if chain_id != Some(CHAIN_ID) {
+        return Err(refused("unsupported", GNOSIS_ONLY_TEXT));
+    }
+    if !safe.marked {
+        return Err(not_deployed());
+    }
+    call.check_not_self(&safe.address)?;
+    Ok(safe)
+}
+
+/// What a step that signs takes from its reads: the verified nonce of a
+/// Safe whose setup is the record's; otherwise its refusal, `not_deployed`
+/// for no code (verified), `safe_changed` or `safe_unverified`.
+fn signing_nonce(outcome: Outcome) -> Result<U256, ErrorBody> {
+    match outcome {
+        Outcome::Unchanged { nonce } => Ok(nonce),
+        Outcome::NotDeployed => Err(not_deployed()),
+        other => Err(other.refusal().unwrap_or_else(crate::vault::internal)),
+    }
 }
 
 // --- Chain replies ------------------------------------------------------
@@ -1043,7 +1085,7 @@ impl Safes {
             "safe.sign_owner" => return self.sign_owner(id, raw, &records, ctx),
             "safe.pending" => {
                 members(raw, &[], &mut params)?;
-                let states = pending_states(&records, ctx.pending)?;
+                let states = pending_states(&records, ctx.pending, ctx.approvals.safe3())?;
                 let text = JsValue::Object(vec![("states".into(), JsValue::Array(states))]);
                 let raw = serde_json::value::RawValue::from_string(text.stringify())
                     .map_err(|_| crate::vault::internal())?;
@@ -1137,14 +1179,7 @@ impl Safes {
                     _ => return Err(invalid()),
                 };
                 let call = Call::of(p.get("tx").ok_or_else(invalid)?)?;
-                let safe = resolve(&records, index)?;
-                if chain_id != Some(CHAIN_ID) {
-                    return Err(refused("unsupported", GNOSIS_ONLY_TEXT));
-                }
-                if !safe.marked {
-                    return Err(not_deployed());
-                }
-                call.check_not_self(&safe.address)?;
+                let safe = prepare_checked(&records, index, chain_id, &call)?;
                 return Ok(self.check(id, Kind::Prepare, safe, Work::Prepare(call), ctx.now));
             }
             "safe.propose" => {
@@ -1674,13 +1709,9 @@ impl Safes {
                 &status(&op.safe, true, None, None, false, &outcome),
             )];
         }
-        let nonce = match outcome {
-            Outcome::Unchanged { nonce } => nonce,
-            Outcome::NotDeployed => return vec![failed(id, &not_deployed())],
-            other => {
-                let refusal = other.refusal().unwrap_or_else(crate::vault::internal);
-                return vec![failed(id, &refusal)];
-            }
+        let nonce = match signing_nonce(outcome) {
+            Ok(nonce) => nonce,
+            Err(refusal) => return vec![failed(id, &refusal)],
         };
         match std::mem::replace(&mut op.work, Work::None) {
             // `safe.prepare`: the SafeTx at the verified nonce, kept.
@@ -1827,7 +1858,8 @@ impl Safes {
             })?
             .ok_or_else(|| refused("SAFE_DISCARDED", DISCARDED_TEXT))?;
         crate::log::info("a pending Safe transaction superseded", json!({}));
-        let mut state = send_state(&records, safe.index, &marked, &signers(entry), true)?
+        let safe3 = ctx.approvals.safe3();
+        let mut state = send_state(&records, safe.index, &marked, &signers(entry), true, safe3)?
             .ok_or_else(crate::vault::internal)?;
         if !durable {
             state.set("durable", JsValue::Bool(false));
@@ -2364,7 +2396,11 @@ fn format_ether(wei: &U256) -> String {
 /// An entry it sets aside (no Safe record at its index, or one it doesn't
 /// read for that Safe) is left out and logged; only the signatures that
 /// count are counted.
-fn pending_states(records: &Records, pending: &SafePending) -> Result<Vec<JsValue>, ErrorBody> {
+fn pending_states(
+    records: &Records,
+    pending: &SafePending,
+    safe3: bool,
+) -> Result<Vec<JsValue>, ErrorBody> {
     let mut states = Vec::new();
     for (index, value) in pending.entries() {
         let safe = match resolve(records, index) {
@@ -2388,7 +2424,14 @@ fn pending_states(records: &Records, pending: &SafePending) -> Result<Vec<JsValu
                 json!({ "refused": read.refused }),
             );
         }
-        match send_state(records, index, &value, &signers(&read), read.superseded)? {
+        match send_state(
+            records,
+            index,
+            &value,
+            &signers(&read),
+            read.superseded,
+            safe3,
+        )? {
             Some(state) => states.push(state),
             None => set_aside("shape"),
         }
@@ -2566,7 +2609,8 @@ fn proposed(
         json!({ "signed": signatures.len() }),
     );
     let signers: Vec<[u8; 20]> = signatures.iter().map(|s| *s.owner()).collect();
-    let mut answer = send_state(&records, safe.index, &written, &signers, false)?
+    let safe3 = ctx.approvals.safe3();
+    let mut answer = send_state(&records, safe.index, &written, &signers, false, safe3)?
         .ok_or_else(crate::vault::internal)?;
     if !durable {
         answer.set("durable", JsValue::Bool(false));
@@ -2575,13 +2619,18 @@ fn proposed(
 }
 
 /// `getSafeSendState(index)` for `entry`, whose signatures that count are
-/// `signers`' and which is `superseded` or not (the codec's reading).
+/// `signers`' and which is `superseded` or not (the codec's reading). Under
+/// SAFE-3's field (`safe3`, design 0016, C1) it also says whether the entry
+/// carries the core's proposal mark, `proposed`, so the board can tell an
+/// entry `safe.propose` wrote, which owners sign later, from one main's
+/// own path wrote before (`not_proposed`).
 fn send_state(
     records: &Records,
     index: u64,
     entry: &JsValue,
     signers: &[[u8; 20]],
     superseded: bool,
+    safe3: bool,
 ) -> Result<Option<JsValue>, ErrorBody> {
     let (JsValue::Object(_), Some(_)) =
         (entry, entry.get("signatures").and_then(JsValue::as_array))
@@ -2598,7 +2647,7 @@ fn send_state(
             .cloned()
             .unwrap_or(JsValue::Null)
     };
-    Ok(Some(JsValue::Object(vec![
+    let mut state = vec![
         ("safeIndex".into(), JsValue::Number(index as f64)),
         ("chainId".into(), field("chainId")),
         ("safeTxHash".into(), field("safeTxHash")),
@@ -2620,7 +2669,11 @@ fn send_state(
             "status".into(),
             JsValue::string(if superseded { "superseded" } else { "awaiting" }),
         ),
-    ])))
+    ];
+    if safe3 {
+        state.push(("proposed".into(), JsValue::Bool(entry::is_proposed(entry))));
+    }
+    Ok(Some(JsValue::Object(state)))
 }
 
 /// The board's owner rows for the Safe at wallet index `index`, as
@@ -2726,6 +2779,7 @@ fn discard(
 
 mod messages;
 mod owners;
+pub mod page;
 
 #[cfg(test)]
 mod tests;

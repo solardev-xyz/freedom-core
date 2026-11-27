@@ -1218,6 +1218,17 @@ struct HelloParams {
     /// writer per store: `store_moved`"): [`STORES`]. Absent means none.
     #[serde(default)]
     store_moved: Vec<String>,
+    /// SAFE-3's field (design 0016, C1, D8's mechanism): `true` once main's
+    /// Safe runs on the core. A site's Safe send then answers `{ device }`
+    /// with design 0016's `safe-send`, `safe.prepare`'s reads made before
+    /// its prompt; `approval.issue` refuses `executor-send` and APR-4's
+    /// `safe-send`, `approval.spend` APR-4's `safe-send`, and
+    /// `sign.transaction` under `shell` a Safe's deployment without its
+    /// `executor-send` token; `safe.*`'s board states carry `proposed`.
+    /// Absent means `false`: everything as before, for main's own Safe
+    /// path. Answered with `safe3: true` when taken.
+    #[serde(default)]
+    safe3: bool,
 }
 
 /// The names `store_moved` may give (design 0013): all known from the
@@ -1390,6 +1401,9 @@ struct HelloResult<'a> {
     /// The confinement `serve` got (design 0017): `fc_service`'s report,
     /// as the services' ready lines carry it. Main logs it.
     confinement: &'a serde_json::Value,
+    /// The hello's `safe3`, taken (design 0016, C1); left out without it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    safe3: bool,
 }
 
 /// Where `text`, borrowed from `payload`, lies in it.
@@ -2366,6 +2380,7 @@ impl Core {
         }
         let root = grants.0.clone();
         self.vault.configure_grants(grants.0, grants.1);
+        self.vault.configure_safe3(params.safe3);
         self.vault
             .configure_safe_pending(root.clone(), stores.contains(&"safe_pending"));
         self.vault
@@ -2476,6 +2491,7 @@ impl Core {
                 node_recovery: &self.node_recovery,
                 store_moved: &self.stores_echo,
                 confinement: &self.confinement,
+                safe3: self.vault.safe3(),
             },
         );
         let flow = match written {

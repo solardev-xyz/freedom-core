@@ -39,6 +39,14 @@
 //!   approve answers `{ device }` with the token ([`DeviceApproval`]): a
 //!   `dapp-send` binding the prepared transaction, or a Safe's `safe-send`
 //!   binding `{ safe, chain_id, tx: { to, value, data } }`.
+//! - **A Safe's send under SAFE-3's field** (design 0016, C1: main's
+//!   `core.hello` declares `safe3`): the core runs `safe.prepare`'s checks,
+//!   reads and build before the prompt ([`Prepare::safe_call`], then
+//!   [`Prepare::built`]), so the view shows the whole SafeTx with its nonce
+//!   and its hash (`safeTx`, `safeTxHash`), and an approve's `safe-send`
+//!   binds design 0016's form, `{ safe, chain_id, safe_tx, safe_tx_hash }`,
+//!   for the page and the handle, which only `safe.propose` spends.
+//!   Without the field, nothing here changes.
 //! - **The answer is `{ send }`**: the prepared transaction without its
 //!   nonce, and its token, for main to add the nonce, have it signed by
 //!   `sign.transaction` with no other field changed, record it and
@@ -134,6 +142,20 @@ pub struct Prepare {
     custody: bool,
     /// D12's pause, as main sent it.
     paused: Option<bool>,
+    /// A Safe's SafeTx, built by the core before the prompt under SAFE-3's
+    /// field (design 0016, C1); `None` otherwise.
+    built: Option<SafeBuilt>,
+}
+
+/// A Safe's SafeTx the core built at `safe.prepare`'s reads, before the
+/// prompt, under SAFE-3's field (design 0016, C1): its ten fields as
+/// `safe-pending.json` keeps them, its hash, and the `safe-send` payload an
+/// approve's token binds, D6's `{ safe, chain_id, safe_tx, safe_tx_hash }`.
+#[derive(Debug, Clone, PartialEq)]
+struct SafeBuilt {
+    safe_tx: JsValue,
+    safe_tx_hash: String,
+    payload: String,
 }
 
 /// The fees a quote gives, in the type they imply.
@@ -379,11 +401,54 @@ impl Send {
             device,
             custody: agent != Some(false),
             paused: self.world.paused(),
+            built: None,
         })
     }
 }
 
 impl Prepare {
+    /// For a Safe's send (design 0016, C1): the Safe's wallet index and the
+    /// call `safe.prepare` builds the SafeTx for, `{ to, value, data }` as
+    /// JSON text (`to` as the page sent it, `value` in decimal, `data` as
+    /// hex). `None` for another account's send, and for a grant whose
+    /// `walletIndex` isn't an index (`Err` then: the refusal the token's
+    /// mint would give).
+    pub fn safe_call(&self) -> Option<Result<(u32, String), Answer>> {
+        if self.device != Some(Device::Safe) {
+            return None;
+        }
+        let Some(index) = account_index(&self.wallet_index) else {
+            return Some(Err(Answer::error(INTERNAL_ERROR_CODE, INVALID_INDEX)));
+        };
+        let call = JsValue::Object(vec![
+            prop("to", JsValue::string(self.tx.to.as_str())),
+            prop("value", JsValue::string(self.tx.value.as_str())),
+            prop("data", JsValue::string(self.tx.data.as_str())),
+        ]);
+        Some(Ok((index, call.stringify())))
+    }
+
+    /// A Safe's send with the SafeTx the core built for it (design 0016,
+    /// C1), each as JSON text: `safe_tx`, its ten fields as
+    /// `safe-pending.json` keeps them; `safe_tx_hash`, its hash; and
+    /// `payload`, the `safe-send` payload an approve's token binds. Its
+    /// prompt shows the SafeTx and its hash; its approve mints over
+    /// `payload`. `None` for another account's send, or text that isn't
+    /// JSON.
+    pub fn built(mut self, safe_tx: &str, safe_tx_hash: &str, payload: &str) -> Option<Prepare> {
+        if self.device != Some(Device::Safe) {
+            return None;
+        }
+        let safe_tx = fc_json::parse(safe_tx).ok()?;
+        fc_json::parse(payload).ok()?;
+        self.built = Some(SafeBuilt {
+            safe_tx,
+            safe_tx_hash: safe_tx_hash.to_owned(),
+            payload: payload.to_owned(),
+        });
+        Some(self)
+    }
+
     /// Whether "Always allow" may be ticked: not for a Safe's send, not in
     /// Agent custody (APR-7), and not for a Safe's call, which no rule
     /// answers (APR-4d).
@@ -600,7 +665,7 @@ fn view(prepare: &Prepare, quoted: Option<&Quoted>, verdict: Option<&str>, again
     } else {
         quoted.map_or(JsValue::Null, Quoted::view)
     };
-    JsValue::Object(vec![
+    let mut members = vec![
         prop("account", prepare.account_view.clone()),
         prop("chain", prepare.chain_view.clone()),
         prop(
@@ -611,6 +676,17 @@ fn view(prepare: &Prepare, quoted: Option<&Quoted>, verdict: Option<&str>, again
                 prop("data", JsValue::string(tx.data.as_str())),
             ]),
         ),
+    ];
+    // A Safe's SafeTx the core built before the prompt (design 0016, C1):
+    // all ten fields, the nonce included, and its hash.
+    if let Some(built) = &prepare.built {
+        members.push(prop("safeTx", built.safe_tx.clone()));
+        members.push(prop(
+            "safeTxHash",
+            JsValue::string(built.safe_tx_hash.as_str()),
+        ));
+    }
+    members.extend([
         prop("fee", fee),
         prop("feeCheck", verdict),
         prop("feeAskAgain", JsValue::Bool(again)),
@@ -620,8 +696,8 @@ fn view(prepare: &Prepare, quoted: Option<&Quoted>, verdict: Option<&str>, again
             "alwaysAllow",
             JsValue::Bool(offered && selector_of(&tx.data).is_some()),
         ),
-    ])
-    .stringify()
+    ]);
+    JsValue::Object(members).stringify()
 }
 
 impl Ask {
@@ -803,12 +879,24 @@ impl SafeSend {
     /// The key's grant, as `grant` gives it now, must still expose the
     /// Safe; then the daemon mints the site's `safe-send` for the Safe, its
     /// chain and the SafeTx, and main spends it on the SafeTx and its board
-    /// (*inferred*: the reference's `safeSend` from its token on).
+    /// (*inferred*: the reference's `safeSend` from its token on). Under
+    /// SAFE-3's field (design 0016, C1) it binds the SafeTx the core built
+    /// before the prompt, D6's form, which main presents to `safe.propose`.
     pub fn judged(self, grant: impl FnOnce(&str) -> Option<JsValue>) -> Judged {
         let account = match exposed(&self.prepare, grant) {
             Ok(account) => account,
             Err(answer) => return Judged::Answer(answer),
         };
+        if let Some(built) = self.prepare.built {
+            return Judged::Device(DeviceApproval::send(
+                Device::Safe,
+                account,
+                self.handle,
+                SAFE_TOKEN_KIND,
+                built.payload,
+                None,
+            ));
+        }
         let tx = &self.prepare.tx;
         let payload = JsValue::Object(vec![
             prop("safe", self.prepare.address.clone()),

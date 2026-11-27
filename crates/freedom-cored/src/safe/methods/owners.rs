@@ -272,7 +272,7 @@ impl Safes {
                     return Err(plain(NOT_OWNER_TEXT));
                 };
                 if has_signed(&entry.signatures, address) {
-                    return Ok(vec![js_reply(id, &board(records, &safe, ctx.pending)?)]);
+                    return Ok(vec![js_reply(id, &board(records, &safe, ctx)?)]);
                 }
                 Some(named(ctx, &safe, owner, address, |account| {
                     tx_operation(account, &safe.address, &entry.tx, &entry.hash)
@@ -292,7 +292,7 @@ impl Safes {
                     .iter()
                     .all(|(_, address)| has_signed(&entry.signatures, address)) =>
             {
-                return Ok(vec![js_reply(id, &board(records, &safe, ctx.pending)?)]);
+                return Ok(vec![js_reply(id, &board(records, &safe, ctx)?)]);
             }
             _ => {}
         }
@@ -427,14 +427,23 @@ impl Safes {
 }
 
 /// The board's state for the Safe's pending entry as it stands.
-fn board(records: &Records, safe: &Safe, pending: &SafePending) -> Result<JsValue, ErrorBody> {
-    let raw = pending
+fn board(records: &Records, safe: &Safe, ctx: &Ctx) -> Result<JsValue, ErrorBody> {
+    let raw = ctx
+        .pending
         .entry(safe.index)
         .ok_or_else(|| plain(NO_PENDING_TEXT))?;
     let read = entry::read(&raw, &safe.address, safe.setup.owners())
         .map_err(|_| plain(NO_PENDING_TEXT))?;
-    send_state(records, safe.index, &raw, &signers(&read), read.superseded)?
-        .ok_or_else(crate::vault::internal)
+    let safe3 = ctx.approvals.safe3();
+    send_state(
+        records,
+        safe.index,
+        &raw,
+        &signers(&read),
+        read.superseded,
+        safe3,
+    )?
+    .ok_or_else(crate::vault::internal)
 }
 
 /// The owners' signatures over the SafeTx `hash` of the record `checked`,
@@ -485,7 +494,8 @@ fn sign_entry(
         None => added = super::messages::sweep(state, &records, &safe, hash, &mut counted),
     }
     if added.is_empty() {
-        return send_state(&records, safe.index, &raw, &signers(&read), false)?
+        let safe3 = ctx.approvals.safe3();
+        return send_state(&records, safe.index, &raw, &signers(&read), false, safe3)?
             .ok_or_else(crate::vault::internal);
     }
     // The reference's `[...current.signatures, signature]`: what the entry
@@ -522,7 +532,8 @@ fn sign_entry(
         json!({ "signed": added.len() }),
     );
     let signed: Vec<[u8; 20]> = counted.kept().iter().map(|kept| *kept.owner()).collect();
-    let mut answer = send_state(&records, safe.index, &written, &signed, false)?
+    let safe3 = ctx.approvals.safe3();
+    let mut answer = send_state(&records, safe.index, &written, &signed, false, safe3)?
         .ok_or_else(crate::vault::internal)?;
     if !durable {
         answer.set("durable", JsValue::Bool(false));

@@ -199,6 +199,14 @@ pub fn proposal(safe: &[u8; 20], hash: &[u8; 32]) -> JsValue {
     ])
 }
 
+/// Whether `entry` carries the core's proposal mark for what it is: the
+/// Safe its `safeAddress` names on Gnosis and the SafeTx its fields
+/// recompute to (the board's `proposed` under SAFE-3's field, design 0016,
+/// C1).
+pub fn is_proposed(entry: &JsValue) -> bool {
+    identity(entry).is_some_and(|(safe, hash)| entry.get(PROPOSAL) == Some(&proposal(&safe, &hash)))
+}
+
 /// `safe.propose`'s entry marked as the core's, for the SafeTx `hash` of
 /// the Safe at `safe`: [`PROPOSAL`] set, after the reference's members.
 pub fn mark(entry: &mut JsValue, safe: &[u8; 20], hash: &[u8; 32]) {

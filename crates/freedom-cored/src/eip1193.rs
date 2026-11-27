@@ -30,6 +30,18 @@
 //!   send (APR-5e-2) is prepared and asked as a vault account's (a phone's
 //!   fee unchecked, a Safe's unquoted), and its `{ device }` carries a
 //!   `dapp-send` (a Safe's `safe-send`).
+//! - **A Safe's send under SAFE-3's field** (design 0016, C1: main's hello
+//!   declared `safe3`): before its prompt, `safe.prepare`'s checks and its
+//!   eight reads, each verified, the nonce last, on the request's own clock
+//!   ([`crate::safe::methods::page`]), and the SafeTx built at that nonce.
+//!   The prompt's view shows it whole with its hash, and an approve's `{
+//!   device }` carries design 0016's `safe-send`, `{ safe, chain_id,
+//!   safe_tx, safe_tx_hash }`, for the request's page and that answer's
+//!   handle, which main presents to `safe.propose` under `page`. A refusal
+//!   of the checks or the reads (`not_deployed`, `safe_changed`,
+//!   `safe_unverified`, a call to the Safe itself …) answers the page
+//!   `-32603` with the core's text, and no prompt opens. Without the field
+//!   a Safe's send goes to its prompt unread, as before.
 //! - **A send the site's rule answers** (APR-5e-2) asks main to unlock the
 //!   vault first while it is locked, then is quoted by the core's own chain
 //!   machine and judged by the fee check: a read failing answers its
@@ -116,6 +128,8 @@ use std::borrow::Cow;
 use zeroize::Zeroizing;
 
 use crate::requests::{self, Dispatch, Owner, Requests, Start};
+use crate::safe::evidence::{Evidence, Progress, SAFE_TAG, Tags};
+use crate::safe::methods::page::PageSafe;
 use crate::transport::{self, Allowance};
 use crate::vault::{Out, Vault};
 
@@ -210,8 +224,12 @@ pub struct Connects {
     /// whether its deadline is all the request's time left, so that its
     /// timeout is the request's deadline.
     reads: BTreeMap<u64, (u64, Part, bool)>,
-    /// The next chain read's tag, below [`SEND_TAG`].
+    /// The next chain read's tag, below [`SAFE_TAG`]: a Safe send's reads
+    /// (design 0016, C1) are [`SAFE_TAG`]'s, from `safe_tags`, each with
+    /// [`SEND_TAG`] added, so the two never meet.
     next_tag: u64,
+    /// A Safe send's reads' tags under SAFE-3's field (design 0016, C1).
+    safe_tags: Tags,
 }
 
 /// Which of a send's chain reads a tag names.
@@ -223,6 +241,8 @@ enum Part {
     Quote,
     /// New fee evidence, for the fee check.
     Reference,
+    /// One of a Safe's setup reads under SAFE-3's field (design 0016, C1).
+    Safe,
 }
 
 /// A send waiting on its chain reads: each `None` until it replies, then
@@ -260,6 +280,14 @@ impl Quoting {
             reference: false,
         }
     }
+}
+
+/// A Safe's send under SAFE-3's field (design 0016, C1), past
+/// `safe.prepare`'s checks, waiting on its reads before its prompt.
+struct SafeReads {
+    prepare: send::Prepare,
+    safe: PageSafe,
+    evidence: Evidence,
 }
 
 struct Open {
@@ -327,6 +355,9 @@ enum Pending {
     /// An approved send waiting on new fee evidence for the check at its
     /// approval (APR-5e-1).
     Judge(send::Judge),
+    /// A Safe's send under SAFE-3's field waiting on `safe.prepare`'s reads
+    /// (design 0016, C1). No request to main is open for it.
+    Safe(Box<SafeReads>),
     /// A send the site's rule answers, quoted and within the fee check,
     /// waiting on main's recheck (APR-5e-2).
     SendRule(send::Rule),
@@ -488,6 +519,7 @@ impl Connects {
             ended: Bindings::default(),
             reads: BTreeMap::new(),
             next_tag: 1,
+            safe_tags: Tags::default(),
         }
     }
 
@@ -924,6 +956,11 @@ impl Connects {
         let locked = !vault.unlocked();
         match sending {
             Sending::Rule(rule) if locked => self.prompt(id, held, Asking::SendUnlock(rule), vault),
+            // A Safe's under SAFE-3's field (design 0016, C1): its SafeTx
+            // built first.
+            Sending::Prompt(prepare) if !prepare.quotes() && vault.safe3() => {
+                self.safe_reads(id, held, prepare, vault)
+            }
             Sending::Prompt(prepare) if !prepare.quotes() => {
                 self.prompt(id, held, Asking::Send(prepare.ask(None, None)), vault)
             }
@@ -938,6 +975,108 @@ impl Connects {
                 );
                 self.reads_for(id, vault)
             }
+        }
+    }
+
+    /// Page request `id`'s Safe send under SAFE-3's field (design 0016,
+    /// C1): `safe.prepare`'s checks before any read, then its eight reads,
+    /// each with the request's time left. A refusal answers the page
+    /// `-32603` with the core's text, before any prompt.
+    fn safe_reads(
+        &mut self,
+        id: u64,
+        held: Held,
+        prepare: send::Prepare,
+        vault: &mut Vault,
+    ) -> Vec<Out> {
+        let checked = match prepare.safe_call() {
+            Some(Ok((index, call))) => vault
+                .eip1193_safe_check(index, &call)
+                .map_err(|body| send::Prepared::refused(&body.message)),
+            Some(Err(answer)) => Err(answer),
+            None => return vec![error(id, internal())],
+        };
+        let safe = match checked {
+            Ok(safe) => safe,
+            Err(answer) => return vec![reply(id, &answer)],
+        };
+        let left = held.budget.left(self.now_ms());
+        let (evidence, first) = safe.start(left, &mut self.safe_tags);
+        let reads = SafeReads {
+            prepare,
+            safe,
+            evidence,
+        };
+        self.open.insert(
+            id,
+            Open {
+                held,
+                step: Pending::Safe(Box::new(reads)),
+                asked: None,
+            },
+        );
+        self.safe_chain_reads(id, first)
+    }
+
+    /// A Safe send's reads (design 0016, C1), for the chain thread: each
+    /// tag marked [`SEND_TAG`] too, so the event loop routes its reply
+    /// here. Their deadline is the request's time left when the check
+    /// began, so a failure past due is the request's deadline.
+    fn safe_chain_reads(&mut self, id: u64, reads: Vec<crate::phone::ChainRead>) -> Vec<Out> {
+        reads
+            .into_iter()
+            .map(|mut read| {
+                read.tag |= SEND_TAG;
+                self.reads.insert(read.tag, (id, Part::Safe, true));
+                Out::ChainRead(read)
+            })
+            .collect()
+    }
+
+    /// One of page request `id`'s Safe reads answered (design 0016, C1):
+    /// the check's next reads, or with its outcome, the SafeTx built at the
+    /// verified nonce and the prompt; or `safe.prepare`'s refusal, answered
+    /// `-32603` with the core's text.
+    fn safe_answered(
+        &mut self,
+        id: u64,
+        tag: u64,
+        payload: &[u8],
+        past_due: bool,
+        vault: &mut Vault,
+    ) -> Vec<Out> {
+        let Some(Open {
+            step: Pending::Safe(reads),
+            ..
+        }) = self.open.get_mut(&id)
+        else {
+            return Vec::new();
+        };
+        let progress =
+            reads
+                .evidence
+                .answered(tag & !SEND_TAG, payload, past_due, &mut self.safe_tags);
+        let outcome = match progress {
+            Progress::Waiting => return Vec::new(),
+            Progress::Reads(more) => return self.safe_chain_reads(id, more),
+            Progress::Done(outcome) => outcome,
+        };
+        let Some(Open {
+            held,
+            step: Pending::Safe(reads),
+            ..
+        }) = self.open.remove(&id)
+        else {
+            return vec![error(id, internal())];
+        };
+        let SafeReads { prepare, safe, .. } = *reads;
+        let built = match safe.built(outcome) {
+            Ok(built) => built,
+            Err(body) => return vec![reply(id, &send::Prepared::refused(&body.message))],
+        };
+        match prepare.built(&built.safe_tx, &built.safe_tx_hash, &built.payload) {
+            Some(prepare) => self.prompt(id, held, Asking::Send(prepare.ask(None, None)), vault),
+            None => vec![error(id, internal())],
         }
     }
 
@@ -997,10 +1136,10 @@ impl Connects {
         left: u64,
     ) -> Out {
         let tag = SEND_TAG | self.next_tag;
-        self.next_tag = (self.next_tag + 1) & !SEND_TAG;
+        self.next_tag = (self.next_tag + 1) & (SAFE_TAG - 1);
         let deadline_ms = match part {
             Part::Reference => EVIDENCE_DEADLINE_MS.min(left),
-            Part::Estimate | Part::Quote => left,
+            Part::Estimate | Part::Quote | Part::Safe => left,
         };
         let whole = deadline_ms == left;
         self.reads.insert(tag, (id, part, whole));
@@ -1064,7 +1203,9 @@ impl Connects {
         };
         let waits = matches!(
             (&open.step, part),
-            (Pending::Quote(_), _) | (Pending::Judge(_), Part::Reference)
+            (Pending::Quote(_), _)
+                | (Pending::Judge(_), Part::Reference)
+                | (Pending::Safe(_), Part::Safe)
         );
         if waits && whole && past_due {
             self.open.remove(&id);
@@ -1078,6 +1219,8 @@ impl Connects {
                     Part::Estimate => quoting.estimate = Some(read_outcome(payload, true)),
                     Part::Quote => quoting.quote = Some(read_outcome(payload, false)),
                     Part::Reference => quoting.reference = false,
+                    // A Safe's reads are never a quote's.
+                    Part::Safe => return Vec::new(),
                 }
                 let (Some(_), Some(_), false) =
                     (&quoting.estimate, &quoting.quote, quoting.reference)
@@ -1087,6 +1230,7 @@ impl Connects {
                 self.quoted(id, vault)
             }
             (Pending::Judge(_), Part::Reference) => self.judge_for(id, vault),
+            (Pending::Safe(_), Part::Safe) => self.safe_answered(id, tag, payload, past_due, vault),
             _ => Vec::new(),
         }
     }
@@ -1283,7 +1427,7 @@ impl Connects {
             let page = &open.held.page;
             let (method, params) = match &open.step {
                 // A send's own reads go to the chain thread, never here.
-                Pending::Quote(_) | Pending::Judge(_) => continue,
+                Pending::Quote(_) | Pending::Judge(_) | Pending::Safe(_) => continue,
                 Pending::Recheck(_)
                 | Pending::Switch(_)
                 | Pending::Rule(_)
@@ -1405,7 +1549,9 @@ impl Connects {
         };
         let mut outs = match step {
             // No request to main is open for these.
-            Pending::Quote(_) | Pending::Judge(_) => vec![error(id, internal())],
+            Pending::Quote(_) | Pending::Judge(_) | Pending::Safe(_) => {
+                vec![error(id, internal())]
+            }
             Pending::Recheck(connected) => match text.ok_or(Crossed).and_then(Recheck::parse) {
                 Ok(recheck) => {
                     let rechecked = connected.answer(recheck.live);
@@ -1668,6 +1814,7 @@ impl Connects {
             | Pending::SendRule(_)
             | Pending::Quote(_)
             | Pending::Judge(_)
+            | Pending::Safe(_)
             | Pending::Name(_)
             | Pending::Last(_) => {
                 self.asked.remove(&core);
