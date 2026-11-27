@@ -560,12 +560,16 @@ fn vault_account(checks: &Checks<'_>, key: KeyRef) -> Result<u32, ErrorBody> {
 /// Checks the request's `authorization` for what it signs (design 0012,
 /// Q8): a page's and the chrome's signatures need one (APR-4a), and a
 /// Safe's under any caller (APR-4b); main's own under `shell` has one
-/// checked when it comes.
+/// checked when it comes, but a Safe's deployment under SAFE-3's field,
+/// which needs its `executor-send` token (design 0016, C1).
 fn authorize(
     checks: &mut Checks<'_>,
     fields: &Map<String, Value>,
     signed: Signed<'_>,
 ) -> Result<After, ErrorBody> {
+    checks
+        .approvals
+        .deployment_check(checks.context, fields.get("authorization"), &signed)?;
     match fields.get("authorization") {
         None => crate::approvals::without_authorization(checks.context, &signed)
             .map(|()| After::Nothing),

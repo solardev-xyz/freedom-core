@@ -28,6 +28,15 @@
 //!   given to, once the device signed and main recorded the send: it takes
 //!   the receipt and writes the rule its token's "Always allow" asked for,
 //!   as `sign.transaction` writes a vault send's (`token-remember`).
+//! - **SAFE-3's field** (design 0016, C1: main's `core.hello` declares
+//!   `safe3`, its Safe on the core): `approval.issue` mints no
+//!   `executor-send`, which the core mints itself at `safe.execute` and
+//!   `safe.deploy`, and no `safe-send` of APR-4's form; `approval.spend`
+//!   spends none of APR-4's form; and `sign.transaction` under `shell`
+//!   signs a transaction to the pinned Safe proxy factory, a Safe's
+//!   deployment, only with its `executor-send` token
+//!   ([`Approvals::deployment_check`]). Without the field each is as
+//!   before, so main's own Safe path keeps working.
 //! - `approval.end { safe }` ends a Safe approval, and answers `{}` whatever
 //!   it was. Every method here runs inline on the event loop, as `sign.*`
 //!   does, so a signature that presented the approval has finished before
@@ -173,6 +182,8 @@ pub struct Approvals {
     /// is moved (G20): the checks read an account's kind and address there.
     /// None before, when main owns the file and its word on them stands.
     records: Option<crate::accounts::Records>,
+    /// SAFE-3's field (design 0016, C1): main's hello declared `safe3`.
+    safe3: bool,
 }
 
 impl std::fmt::Debug for Approvals {
@@ -380,6 +391,31 @@ pub fn without_authorization(context: &Context, signed: &Signed<'_>) -> Result<(
         )),
         CallerKind::Chrome => Err(chrome_needs_token()),
     }
+}
+
+/// The selector of `createProxyWithNonce(address,bytes,uint256)`, the
+/// Safe deployment `safe.deploy` prepares (design 0016, "Built and hashed
+/// in the core").
+fn create_proxy_with_nonce() -> [u8; 4] {
+    let hash = fc_evm::keccak256(b"createProxyWithNonce(address,bytes,uint256)");
+    [hash[0], hash[1], hash[2], hash[3]]
+}
+
+/// A Safe's deployment under SAFE-3's field (design 0016, C1): `shell`'s
+/// transaction to the pinned proxy factory with no `executor-send` token.
+fn deployment_needs_token(tx: &Transaction) -> ErrorBody {
+    let selector = tx.data().get(..4);
+    let what = if selector == Some(&create_proxy_with_nonce()[..]) {
+        "a Safe's deployment (createProxyWithNonce to the pinned factory)"
+    } else {
+        "a transaction to the pinned Safe proxy factory"
+    };
+    not_authorized(
+        "no_token",
+        format!(
+            "{what} signs only with the executor-send token safe.deploy minted for it (SAFE-3)"
+        ),
+    )
 }
 
 fn chrome_needs_token() -> ErrorBody {
@@ -757,6 +793,7 @@ impl Approvals {
             swarm_changes: Vec::new(),
             x402: x402::X402State::default(),
             records: None,
+            safe3: false,
         }
     }
 
@@ -865,6 +902,21 @@ impl Approvals {
         // only under `shell`.
         if !minter(context.caller).mints(kind) {
             return Err(forbidden("this caller can't confirm this kind"));
+        }
+        // SAFE-3's field (design 0016, C1): the core mints the executor's
+        // token itself, with the send `safe.execute` or `safe.deploy`
+        // prepared, and APR-4's `safe-send` is gone: neither is issued.
+        if self.safe3 {
+            if kind == Kind::ExecutorSend {
+                return Err(forbidden(
+                    "under SAFE-3 the core mints executor-send itself, at safe.execute and safe.deploy",
+                ));
+            }
+            if kind == Kind::SafeSend && !fc_approval::is_built_safe_send(&fields["payload"]) {
+                return Err(forbidden(
+                    "under SAFE-3 a safe-send binds the SafeTx safe.prepare built: { safe, chain_id, safe_tx, safe_tx_hash }",
+                ));
+            }
         }
         let page = match token_page(context, fields.get("handle")) {
             Ok(page) => page,
@@ -1013,6 +1065,13 @@ impl Approvals {
         // Design 0016's `safe-send`, the SafeTx the core built, is spent
         // only by `safe.propose` (D6): presented here, it is burnt.
         if kind == Kind::SafeSend && fc_approval::is_built_safe_send(&fields["payload"]) {
+            self.tokens.discard(token);
+            return Err(refusal(Refusal::Mismatch));
+        }
+        // APR-4's `safe-send` gives no Safe approval under SAFE-3's field
+        // (design 0016, C1): the core signs the owners' signatures over the
+        // SafeTx it built, and main builds none.
+        if self.safe3 && kind == Kind::SafeSend {
             self.tokens.discard(token);
             return Err(refusal(Refusal::Mismatch));
         }
@@ -2024,6 +2083,58 @@ impl Approvals {
     /// ([`crate::accounts::Records`]); none until `vault_meta` is moved.
     pub fn set_records(&mut self, records: Option<crate::accounts::Records>) {
         self.records = records;
+    }
+
+    /// SAFE-3's field (design 0016, C1), as main's hello declared it.
+    pub fn set_safe3(&mut self, safe3: bool) {
+        self.safe3 = safe3;
+    }
+
+    /// Whether main's hello declared SAFE-3's field (design 0016, C1).
+    pub fn safe3(&self) -> bool {
+        self.safe3
+    }
+
+    /// SAFE-3's field (design 0016, C1): `sign.transaction` under `shell`
+    /// signs a transaction to the pinned Safe proxy factory (a Safe's
+    /// deployment, `createProxyWithNonce`, which `safe.deploy` prepares)
+    /// only with `{ token, kind: "executor-send" }`, the token `safe.deploy`
+    /// minted for it, which [`Approvals::authorize`] then spends with its
+    /// binding. Main's word, another kind, an intent, a Safe approval or a
+    /// standing rule is `not_authorized` (`no_token`) before a key is
+    /// touched. Every call to the factory is covered, not only
+    /// `createProxyWithNonce` (conservative: the core's token binds only
+    /// that one, and Freedom sends the factory nothing else). Without the
+    /// field, or under another caller, nothing changes here: main's word
+    /// still signs one under `shell`, as SAFE-2's S4 has it, and a page's
+    /// or the chrome's signature already needs its token.
+    pub fn deployment_check(
+        &self,
+        context: &Context,
+        authorization: Option<&Value>,
+        signed: &Signed<'_>,
+    ) -> Result<(), ErrorBody> {
+        let Signed::Transaction { tx, .. } = signed else {
+            return Ok(());
+        };
+        if !self.safe3
+            || context.caller != CallerKind::Shell
+            || tx.to() != Some(&fc_safe::constants::PROXY_FACTORY)
+        {
+            return Ok(());
+        }
+        let executor = authorization
+            .and_then(Value::as_object)
+            .is_some_and(|form| {
+                form.contains_key("token")
+                    && !form.contains_key("intent")
+                    && form.get("kind").and_then(Value::as_str) == Some(Kind::ExecutorSend.name())
+            });
+        if executor {
+            Ok(())
+        } else {
+            Err(deployment_needs_token(tx))
+        }
     }
 
     /// Account `index` as the core's own records give it once `vault_meta`
@@ -3089,6 +3200,9 @@ fn js_number(text: &str) -> JsValue {
     }
     text.parse::<f64>().map_or(JsValue::Null, JsValue::Number)
 }
+
+#[cfg(test)]
+mod safe3_tests;
 
 #[cfg(test)]
 mod tests {
