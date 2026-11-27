@@ -326,6 +326,18 @@ pub const METHODS: &[Method] = &[
     row("safe_pending.set", SHELL, false, NOW),
     row("safe_pending.clear", SHELL, false, NOW),
     row("safe_pending.list", SHELL, false, NOW),
+    // Design 0016, API (SAFE-2's S2): a Safe's record made in the core,
+    // which writes it on the vault queue as `accounts.add_safe`; its
+    // status, deployment and deployed mark, which read the chain under the
+    // chain machine's bound, the `session` class (#520), and may write the
+    // record's verified mark; the pending board's views. `deployed` is
+    // main's alone, after its receipt.
+    row("safe.create", CS, true, VAULT),
+    row("safe.status", CS, true, SESSION),
+    row("safe.deploy", CS, true, SESSION),
+    row("safe.deployed", SHELL, true, SESSION),
+    row("safe.pending", CS, false, NOW),
+    row("safe.discard", CS, false, NOW),
     // Design 0013, "Payment history" (PRF-5g-2): the chrome reads and
     // clears (`payments:get-recent`, `:get-count`, `:get-by-id`,
     // `:clear`, `x402:get-receipts`); the writes and the repoll's are
@@ -660,6 +672,31 @@ mod tests {
             for (caller, allowed) in [
                 (CallerKind::Page, false),
                 (CallerKind::Chrome, false),
+                (CallerKind::Shell, true),
+            ] {
+                assert_eq!(
+                    matches!(admit(name, caller, V2), Admission::Allowed(_)),
+                    allowed,
+                    "{name} {caller:?}"
+                );
+            }
+        }
+        // Design 0016, API: who reaches each of SAFE-2's S2 methods, and
+        // their classes (#520): `session` for the ones that read the chain,
+        // the vault queue's for `safe.create`, which reads nothing, and
+        // none for the pending board's. A page reaches none.
+        for (name, chrome, deadline) in [
+            ("safe.create", true, Deadline::Vault),
+            ("safe.status", true, Deadline::Session),
+            ("safe.deploy", true, Deadline::Session),
+            ("safe.deployed", false, Deadline::Session),
+            ("safe.pending", true, Deadline::Immediate),
+            ("safe.discard", true, Deadline::Immediate),
+        ] {
+            assert_eq!(method(name).unwrap().deadline, deadline, "{name}");
+            for (caller, allowed) in [
+                (CallerKind::Page, false),
+                (CallerKind::Chrome, chrome),
                 (CallerKind::Shell, true),
             ] {
                 assert_eq!(

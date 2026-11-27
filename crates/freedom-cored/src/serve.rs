@@ -298,6 +298,13 @@ const CAPABILITIES: &[&str] = &[
     "safe_pending.set",
     "safe_pending.clear",
     "safe_pending.list",
+    // Design 0016: the Safe methods (SAFE-2's S2).
+    "safe.create",
+    "safe.status",
+    "safe.deploy",
+    "safe.deployed",
+    "safe.pending",
+    "safe.discard",
     // Design 0013: the payment history (PRF-5g-2).
     "payments.append",
     "payments.update",
@@ -794,13 +801,14 @@ pub fn run(options: &Options) -> Exit {
                 payload,
                 past_due,
             }) => {
-                // A page send's reads (APR-5e-1), or a phone payment's,
+                // A page send's reads (APR-5e-1); a Safe method's (design
+                // 0016, SAFE-2), by their tag's bit; or a phone payment's,
                 // whose fixed deadline is no request's.
                 let outs = if tag & crate::eip1193::SEND_TAG != 0 {
                     core.connects
                         .chain_read_done(tag, &payload, past_due, &mut core.vault)
                 } else {
-                    core.vault.chain_read(tag, &payload)
+                    core.vault.chain_read(tag, &payload, past_due)
                 };
                 if let Flow::Exit(exit) = core.dispatch(outs) {
                     break exit;

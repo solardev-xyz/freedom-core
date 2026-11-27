@@ -183,11 +183,29 @@ impl SafePending {
     }
 
     /// `not_moved` for a write before the name, whatever its parameters.
-    fn check_moved(&self) -> Result<(), ErrorBody> {
+    pub fn check_moved(&self) -> Result<(), ErrorBody> {
         match &*self.lock() {
             Some(place) if place.moved => Ok(()),
             _ => Err(Failure::NotMoved.error()),
         }
+    }
+
+    /// Every entry, in `listPendingIndexes()`'s order, as `getPending`
+    /// gives each (a falsy one left out), from the file as it stands: the
+    /// Safe methods' `safe.pending` (design 0016, SAFE-2).
+    pub fn entries(&self) -> Vec<(u64, JsValue)> {
+        self.read(|store| {
+            store
+                .list()
+                .into_iter()
+                .filter_map(|index| store.get(index).map(|entry| (index, entry.clone())))
+                .collect()
+        })
+    }
+
+    /// `getPending(index)`, from the file as it stands.
+    pub fn entry(&self, index: u64) -> Option<JsValue> {
+        self.read(|store| store.get(index).cloned())
     }
 
     /// A read: the store as the file gives it, empty where there is none

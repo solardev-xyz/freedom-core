@@ -42,9 +42,6 @@
 //!   its reply here (S2 does); a phone payment's count up from 1. A reply
 //!   for a tag the check isn't waiting for changes nothing.
 
-// S2 to S5 call it; until then only the tests do.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::BTreeMap;
 
 use fc_evm::{U256, parse_bytes, to_hex};
@@ -205,11 +202,6 @@ impl Evidence {
         };
         let reads = evidence.send(&[Read::Code], tags);
         (evidence, reads)
-    }
-
-    /// Whether the read tagged `tag` is this check's, and still out.
-    pub fn waits_for(&self, tag: u64) -> bool {
-        self.out.contains_key(&tag)
     }
 
     /// The chain thread's reply to read `tag` (its whole payload, and

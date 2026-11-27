@@ -123,6 +123,14 @@ pub enum Op {
         index: f64,
         chain_id: f64,
     },
+    /// `safe.create` (design 0016, SAFE-2): `createSafeAccount`, whose
+    /// owners' addresses, salt and address the core resolves, draws and
+    /// computes itself, then `addSafeWallet` as `accounts.add_safe`.
+    CreateSafe {
+        name: JsValue,
+        owners: JsValue,
+        threshold: JsValue,
+    },
     SetActive {
         index: f64,
     },
@@ -394,6 +402,20 @@ impl Store {
         })
     }
 
+    /// `safe.create`'s operation, at admission: `not_moved` until the store
+    /// is named (the core writes the record), the parameters checked.
+    pub fn create_safe_op(&self, raw: Option<&str>) -> Result<Op, ErrorBody> {
+        if !self.moved {
+            return Err(not_moved());
+        }
+        let p = members(raw, &["name", "owners", "threshold"])?;
+        Ok(Op::CreateSafe {
+            name: any(&p, "name"),
+            owners: any(&p, "owners"),
+            threshold: any(&p, "threshold"),
+        })
+    }
+
     fn path(&self) -> PathBuf {
         self.dir.join(vault_meta::FILE_NAME)
     }
@@ -534,6 +556,23 @@ impl Store {
                 meta.mark_safe_deployed(index, chain_id)
                     .map_err(refused)?
                     .wrote
+            }
+            Op::CreateSafe {
+                name,
+                owners,
+                threshold,
+            } => {
+                let (address, salt_nonce) =
+                    crate::safe::methods::created(&meta, &owners, &threshold)?;
+                let params = SafeParams {
+                    address: &address,
+                    owners: &owners,
+                    threshold: &threshold,
+                    salt_nonce: &salt_nonce,
+                };
+                let changed = meta.add_safe(&name, params).map_err(refused)?;
+                answer.set("wallet", changed.value);
+                changed.wrote
             }
             Op::SetActive { index } => meta.set_active(index).map_err(refused)?.wrote,
             Op::Rename { index, name } => meta.rename(index, &name).map_err(refused)?.wrote,
@@ -690,6 +729,16 @@ pub enum Records {
 }
 
 impl Records {
+    /// `getWalletRecord(index)` as the snapshot holds it, normalized
+    /// ([`VaultMeta::record`]): the Safe methods' records (design 0016,
+    /// SAFE-2).
+    pub fn record(&self, index: f64) -> Result<Option<JsValue>, ErrorBody> {
+        match self {
+            Records::Pending => Err(storage("other")),
+            Records::Read(meta) => Ok(meta.record(index)),
+        }
+    }
+
     /// Account `index` as the snapshot records it.
     pub fn account(&self, index: u32) -> Result<Account, ErrorBody> {
         match self {
