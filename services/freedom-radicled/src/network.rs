@@ -240,6 +240,11 @@ pub fn clone(
             Some(result) => result,
             None => network.clone_repo_with(clone.rid, &policy, &ticket.cancel, &mut emit),
         };
+        // Out of memory ends the process before anything is written: no
+        // event and no answer ([`crate::oom`]).
+        if let Err(e) = &result {
+            crate::oom::check(e);
+        }
         // Its events, the terminal one last, before its answer.
         if let Some(feed) = &feed {
             feed.flush();

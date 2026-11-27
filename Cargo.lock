@@ -466,6 +466,7 @@ version = "0.29.0"
 dependencies = [
  "fc-evm",
  "fc-json",
+ "fc-safe",
  "k256",
  "rand_core 0.10.1",
  "serde",
@@ -824,6 +825,7 @@ dependencies = [
  "fc-json",
  "fc-keys",
  "fc-keystore",
+ "fc-ledger",
  "fc-naming",
  "fc-profile",
  "fc-protocol",

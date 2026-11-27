@@ -34,7 +34,7 @@ fc-service = { path = "../../crates/fc-service" }
 # The sealed release of the node key (0008, "The sealed release"): the
 # service's X25519 key for one start, and opening what the core sealed to it.
 fc-seal = { path = "../../crates/fc-seal" }
-# libradicle at `integration/rust-core` (36b176b, #40's merge),
+# libradicle at `integration/rust-core` (6a991c4, #41's merge),
 # built with `no-spawn`,
 # explicitly (0008, "Spawn and lock"): serving runs in process and `git gc`
 # is skipped. It carries the upstream changes 0008 lists for the service's
@@ -48,11 +48,11 @@ fc-seal = { path = "../../crates/fc-seal" }
 # reconciliation driver `rad.reconcile` runs on, with its seed gate and its
 # host failures (`driver::Error::Host`). It also has the shipped seeds for a
 # main-network profile only, an isolated node with no proxy, onion, I2P or
-# external-address route, `isolate_git_config` (called first thing in
-# src/main.rs), `Options::seeding_policy`, and the host's repository gate
-# (`Options::repositories`), the online repair signed with the node's key
-# and `remove_quarantined` (libradicle item 9a), and a stop that reports who
-# asked, how the node's thread ended and the home apart (`Shutdown`). And
+# external-address route, `isolate_git_config`, `Options::seeding_policy`,
+# and the host's repository gate (`Options::repositories`), the online
+# repair signed with the node's key and `remove_quarantined` (libradicle
+# item 9a), and a stop that reports who asked, how the node's thread ended
+# and the home apart (`Shutdown`). And
 # R-19's fix (libradicle #31): a commit's diff that isn't UTF-8 is decoded
 # lossily, and serialized without a `Value` copy, instead of panicking, and
 # an alias Radicle refuses is `Error::Alias`. Then the bounded reads' charges
@@ -68,10 +68,15 @@ fc-seal = { path = "../../crates/fc-seal" }
 # `Error::NodeBusy`, `waiting_on_node`), and so do `seeders`, the
 # announcement of a COB change and `remove_quarantined`'s unseed (#40,
 # freedom-core #363: `seeders_within`, the four COB writes' `_within` forms,
-# `remove_quarantined_within`, `Error::is_announce`). Pinned by commit until those
-# changes are released (deny.toml allows solardev-xyz).
+# `remove_quarantined_within`, `Error::is_announce`). And the fail-stop on
+# out of memory (#41; 0010, "The memory cap"): `process_init`, called first
+# thing in src/main.rs, which does what `isolate_git_config` does and
+# installs libgit2's allocator and SQLite's allocation wrappers, each ending
+# the process with exit 71 on a NULL; `Error::is_out_of_memory`, the
+# backstop; and `Error::ProcessInit`. Pinned by commit until those changes
+# are released (deny.toml allows solardev-xyz).
 # src/build_info.rs reports the same commit.
-libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "36b176bc3e2667c8c1500bf0eb6fc80407bd9d84", features = ["no-spawn"] }
+libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "6a991c4d28e3e1c92ceb006ac208c02de990031e", features = ["no-spawn"] }
 # libgit2's process-wide options, which heartwood's `radicle::git::raw`
 # doesn't re-export: the object cache turned off (src/reads.rs, `uncache`),
 # and the probe of it. Already in libradicle's graph, at its version and with
@@ -139,7 +144,7 @@ fc-sys = { path = "../../crates/fc-sys" }
 
 # The core's workspace lints, copied: workspace lints don't cross workspaces.
 # Except `unsafe_code`, which is `deny` here, as in fc-sys, not `forbid`
-# (AGENTS.md rule 6): the one unsafe call, `libradicle::isolate_git_config`
+# (AGENTS.md rule 6): the one unsafe call, `libradicle::process_init`
 # first thing in src/main.rs, carries its own reviewed `#[allow(unsafe_code)]`
 # and a `SAFETY` comment, and every other unsafe block still fails to
 # compile. tests/unsafe_code.rs fails if any other line lifts the lint.

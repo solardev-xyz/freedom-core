@@ -98,15 +98,61 @@ pub enum Deadline {
     /// progresses, so `schema.json` writes it apart from `null`
     /// ([`Deadline::schema_value`]).
     Idle,
+    /// A request that may drive a Ledger (design 0016, API: "Deadlines";
+    /// "Deadlines, cancel and unplugging"): `sign.*`, `ledger.*`,
+    /// `x402.settle`, `safe.sign_owner` and `safe.message_sign`. No overall
+    /// deadline: each APDU has its own on the exchange, [`DEVICE_APDU_MS`],
+    /// or [`DEVICE_CONFIRM_MS`] for the one the user confirms
+    /// ([`device_apdu_ms`]), sent as its `shell.ledger_apdu`'s
+    /// `deadline_ms`, and the lane its own bounds: no request waits in its
+    /// queue past 5 minutes.
+    ///
+    /// Main picks its hang watchdog from the class and the request's
+    /// params. A request it can see will use the device (a `sign.*` whose
+    /// `key.kind` is `"ledger"`, every `ledger.*`, `x402.settle`'s Ledger
+    /// form, a Ledger owner's `safe.sign_owner` or `safe.message_sign`)
+    /// gets 5 minutes and 15 s until a `shell.ledger_apdu` first names it in
+    /// `for` (the lane's longest wait in the queue, plus 0001's 15 s
+    /// margin), then each APDU's `deadline_ms` plus the margin, reset by
+    /// each APDU and each answer, and none once the request ends. Every
+    /// other request of the class, a vault key's `sign.*` included, keeps
+    /// the immediate 15 s, but for `safe.sign_owner` and
+    /// `safe.message_sign`, whose chain reads come first: 135 s for vault
+    /// owners, and 7 minutes and 15 s before a Ledger owner's first
+    /// `shell.ledger_apdu`. `schema.json` writes it `"device"`, apart from
+    /// `null`.
+    Device,
+}
+
+/// The deadline on one APDU's exchange under [`Deadline::Device`] that the
+/// user doesn't confirm: hw-transport's own `unresponsiveTimeout`, 15 s
+/// (design 0016, deviation `device-deadlines`). Past it, the operation
+/// ends `LEDGER_UNRESPONSIVE`.
+pub const DEVICE_APDU_MS: u64 = 15_000;
+
+/// The deadline on the one APDU's exchange the user confirms on the
+/// device: 5 minutes, as a phone job's (design 0016, deviation
+/// `device-deadlines`). Past it, the operation ends `LEDGER_TIMEOUT`.
+pub const DEVICE_CONFIRM_MS: u64 = 300_000;
+
+/// An APDU's deadline under [`Deadline::Device`], in milliseconds: the
+/// user's 5 minutes when it waits for them to `confirm`, else 15 s. Main
+/// enforces it on the exchange; the core's own timer is 1 s longer.
+pub const fn device_apdu_ms(confirm: bool) -> u64 {
+    if confirm {
+        DEVICE_CONFIRM_MS
+    } else {
+        DEVICE_APDU_MS
+    }
 }
 
 impl Deadline {
     /// The default total deadline, in milliseconds; `None` when answered
-    /// at once, or when only idle bounds end the request
-    /// ([`Deadline::Idle`]).
+    /// at once, when only idle bounds end the request ([`Deadline::Idle`]),
+    /// or when each APDU has its own ([`Deadline::Device`]).
     pub fn default_ms(self) -> Option<u64> {
         match self {
-            Deadline::Immediate | Deadline::Idle => None,
+            Deadline::Immediate | Deadline::Idle | Deadline::Device => None,
             Deadline::Vault => Some(30_000),
             Deadline::Session => Some(120_000),
             Deadline::Head => Some(360_000),
@@ -116,12 +162,14 @@ impl Deadline {
     }
 
     /// Its `deadline_ms` in `schema.json`: the default in milliseconds,
-    /// `null` when answered at once, and `"idle"` when only idle bounds end
-    /// the request, so main's table tells it from an immediate method,
-    /// whose hang watchdog is a short total one.
+    /// `null` when answered at once, `"idle"` when only idle bounds end the
+    /// request, and `"device"` when it may drive a Ledger, so main's table
+    /// tells each from an immediate method, whose hang watchdog is a short
+    /// total one.
     pub fn schema_value(self) -> String {
         match (self, self.default_ms()) {
             (Deadline::Idle, _) => "\"idle\"".to_owned(),
+            (Deadline::Device, _) => "\"device\"".to_owned(),
             (_, Some(ms)) => ms.to_string(),
             (_, None) => "null".to_owned(),
         }
@@ -167,8 +215,8 @@ use Callers::{
     PageOrShell as PS, Shell as SHELL,
 };
 use Deadline::{
-    Head as HEAD, Idle as IDLE, Immediate as NOW, Session as SESSION, Steps as STEPS,
-    Swarm as SWARM, Vault as VAULT,
+    Device as DEVICE, Head as HEAD, Idle as IDLE, Immediate as NOW, Session as SESSION,
+    Steps as STEPS, Swarm as SWARM, Vault as VAULT,
 };
 
 /// Every method, in `core.hello`'s capability order, then the `chain.*`
@@ -233,10 +281,11 @@ pub const METHODS: &[Method] = &[
     // Design 0012: a page signs as `page`, with its `PageContext`, and an
     // authorization is checked when one is present (APR-3). A SOC is a
     // page's or main's own: the chrome lost it at SWM-4 (design 0015's
-    // amendment to 0002), and the row goes at SWM-9.
-    row("sign.transaction", PCS, false, NOW),
-    row("sign.message", PCS, false, NOW),
-    row("sign.typed_data", PCS, false, NOW),
+    // amendment to 0002), and the row goes at SWM-9. A `sign.*` request
+    // may drive a Ledger (design 0016, LDG-2): the `device` class.
+    row("sign.transaction", PCS, false, DEVICE),
+    row("sign.message", PCS, false, DEVICE),
+    row("sign.typed_data", PCS, false, DEVICE),
     row("swarm.sign_soc", PS, false, NOW),
     row("typed_data.hash", CS, false, NOW),
     row("naming.configure", CS, false, NOW),
@@ -275,9 +324,10 @@ pub const METHODS: &[Method] = &[
     row("phone.sent", PCS, false, NOW),
     row("phone.result", PCS, false, SESSION),
     // Design 0012, "x402" (X402-1): main's own, as its x402 interception
-    // is; no renderer channel reaches them.
+    // is; no renderer channel reaches them. A settle may sign on a Ledger
+    // (design 0016, LDG-2): the `device` class.
     row("x402.authorize", SHELL, false, NOW),
-    row("x402.settle", SHELL, false, NOW),
+    row("x402.settle", SHELL, false, DEVICE),
     // Core #392: a cap's narrowing, from the activity pane (or main); a
     // page names no cap of its own (Q11 keys a cap on the seller).
     row("x402.update", CS, false, NOW),
@@ -749,11 +799,12 @@ mod tests {
             Deadline::Head,
             Deadline::Swarm,
             Deadline::Idle,
+            Deadline::Device,
         ];
         for (i, a) in kinds.iter().enumerate() {
             let value: serde_json::Value = serde_json::from_str(&a.schema_value()).unwrap();
             assert!(
-                value.is_null() || value.is_u64() || value == "idle",
+                value.is_null() || value.is_u64() || value == "idle" || value == "device",
                 "{a:?}"
             );
             for b in &kinds[i + 1..] {
@@ -764,6 +815,66 @@ mod tests {
             Deadline::Steps.schema_value(),
             Deadline::Session.schema_value()
         );
+    }
+
+    /// Design 0016 (LDG-2): the `device` class has no total deadline, as an
+    /// immediate method, but `schema.json` writes it `"device"`, apart from
+    /// `null` and `"idle"`; each APDU has its own, 15 s or the user's 5
+    /// minutes. The rows that may drive a Ledger carry it, and no other:
+    /// `sign.*`, `ledger.*`, `x402.settle` and `safe.sign_owner`, of which
+    /// the table has `sign.*` and `x402.settle` so far.
+    #[test]
+    fn the_device_deadline_class() {
+        assert_eq!(Deadline::Device.default_ms(), None);
+        assert_eq!(Deadline::Device.schema_value(), r#""device""#);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&Deadline::Device.schema_value()).unwrap(),
+            "device"
+        );
+        assert_eq!((DEVICE_APDU_MS, DEVICE_CONFIRM_MS), (15_000, 300_000));
+        assert_eq!(device_apdu_ms(false), 15_000);
+        assert_eq!(device_apdu_ms(true), 300_000);
+        let drives = |name: &str| {
+            name.starts_with("sign.")
+                || name.starts_with("ledger.")
+                || matches!(name, "x402.settle" | "safe.sign_owner")
+        };
+        let device: Vec<&str> = METHODS
+            .iter()
+            .filter(|m| m.deadline == Deadline::Device)
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(
+            device,
+            [
+                "sign.transaction",
+                "sign.message",
+                "sign.typed_data",
+                "x402.settle"
+            ]
+        );
+        for m in METHODS {
+            assert_eq!(m.deadline == Deadline::Device, drives(m.name), "{}", m.name);
+        }
+        // The class changes no caller: each row keeps who reaches it.
+        for (name, callers) in [
+            ("sign.transaction", Callers::PageChromeOrShell),
+            ("sign.message", Callers::PageChromeOrShell),
+            ("sign.typed_data", Callers::PageChromeOrShell),
+            ("x402.settle", Callers::Shell),
+        ] {
+            let row = method(name).unwrap();
+            assert_eq!(
+                (row.callers, row.mutates, row.since),
+                (callers, false, crate::PROTOCOL_VERSION)
+            );
+        }
+        // `schema.json` writes each row's class.
+        let schema: serde_json::Value = serde_json::from_str(&schema_json()).unwrap();
+        for row in schema["methods"].as_array().unwrap() {
+            let name = row["name"].as_str().unwrap();
+            assert_eq!(row["deadline_ms"] == "device", drives(name), "{name}");
+        }
     }
 
     #[test]

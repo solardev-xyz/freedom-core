@@ -19,6 +19,35 @@ pub fn set_cloexec(fd: i32) -> io::Result<()> {
     }
 }
 
+/// Ends the process at once with `code`, after one write of `line` to
+/// standard error: a fail-stop that allocates nothing, takes no lock,
+/// starts no thread and runs no `atexit` handler, destructor or flush, so
+/// that it works with the heap exhausted (design 0010, "The memory cap": a
+/// service's out-of-memory backstop, as libradicle's hooks end the process).
+/// A short or failed write is ignored: the exit code is what the parent
+/// reads.
+pub fn fail_stop(code: i32, line: &'static [u8]) -> ! {
+    write_stderr(line);
+    exit_now(code)
+}
+
+/// One `write(2, line)`.
+#[allow(unsafe_code)]
+fn write_stderr(line: &'static [u8]) {
+    // SAFETY: write reads at most `line.len()` bytes from `line`, a live
+    // static buffer of that length, and touches no other memory of ours;
+    // descriptor 2 is only written to, and a closed one fails harmlessly.
+    let _ = unsafe { libc::write(2, line.as_ptr().cast(), line.len()) };
+}
+
+/// `_exit(code)`: the process ends here, with no handler run.
+#[allow(unsafe_code)]
+fn exit_now(code: i32) -> ! {
+    // SAFETY: `_exit` takes an integer and never returns: the process ends
+    // at once, so no invariant of it can be observed broken after.
+    unsafe { libc::_exit(code) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

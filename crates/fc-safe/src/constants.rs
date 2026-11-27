@@ -48,10 +48,20 @@ pub const PROXY_CREATION_CODE: [u8; 486] = bytes(concat!(
 pub const PROXY_CREATION_CODE_HASH: [u8; 32] =
     bytes("1856e0ee08399d74e0ea0b03adca210aeade6f748969ac023cdcb4dd62dcaf5f");
 
+/// The sentinel, `0x…01`, that heads and ends Safe's linked lists of owners
+/// (`OwnerManager`'s `SENTINEL_OWNERS`) and modules (`ModuleManager`'s
+/// `SENTINEL_MODULES`): `setup` refuses it as an owner, and an empty module
+/// list is the sentinel pointing at itself.
+pub const SENTINEL: [u8; 20] = {
+    let mut sentinel = [0u8; 20];
+    sentinel[19] = 1;
+    sentinel
+};
+
 /// Lowercase hex digits as bytes, at compile time only: a digit outside
 /// `0-9a-f` reads as zero, and text of the wrong length fails the build.
 /// The tests compare each constant with the vectors.
-const fn bytes<const N: usize>(hex: &str) -> [u8; N] {
+pub(crate) const fn bytes<const N: usize>(hex: &str) -> [u8; N] {
     const fn nibble(digit: u8) -> u8 {
         match digit {
             b'0'..=b'9' => digit - b'0',

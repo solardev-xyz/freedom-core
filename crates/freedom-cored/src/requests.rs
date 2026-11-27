@@ -74,6 +74,14 @@ pub enum Owner {
     /// The Swarm thread's `shell.swarm_*` asks (design 0015), whose parts
     /// and node bodies stream to it ([`StreamRoutes`]).
     Swarm,
+    /// The device lane's `shell.ledger_apdu`s (design 0016, LDG-2): one
+    /// APDU each, for the operation's parent. Each is sent with
+    /// [`crate::ledger::reply::REPLY_BOUND`] as its reply's bound (584
+    /// bytes: the largest answer an operation takes, 260 bytes as hex, in
+    /// its response's envelope), and its reply read strictly
+    /// ([`crate::ledger::reply::read`]). Nothing streams.
+    #[allow(dead_code)] // the device lane's, which L3 and L4 drive
+    Ledger,
 }
 
 /// What the gate registers for a request beside its owner (design 0015,

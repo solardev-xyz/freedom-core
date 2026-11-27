@@ -229,9 +229,16 @@ impl Quarantined {
         *self.lock() = count;
     }
 
-    /// Counts `record` again.
+    /// Counts `record` again: unknown if it doesn't answer, and out of
+    /// memory ends the process ([`crate::oom`]).
     pub fn recount(&self, record: &Quarantine) {
-        self.set(record.count().ok());
+        match record.count() {
+            Ok(count) => self.set(Some(count)),
+            Err(e) => {
+                crate::oom::check_heartwood(&e);
+                self.set(None);
+            }
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<usize>> {

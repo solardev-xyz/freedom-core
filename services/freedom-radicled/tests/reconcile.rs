@@ -344,7 +344,7 @@ fn a_throwaway_run_keeps_the_real_identitys_name_for_its_next_run() {
     assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));
 }
 
-/// The process starts, `main` having called `libradicle::isolate_git_config`
+/// The process starts, `main` having called `libradicle::process_init`
 /// while it had one thread, and reconciliation runs with the token that
 /// returned: the repository's open reads no git configuration outside the
 /// repository. A malformed `.gitconfig` and XDG configuration in the

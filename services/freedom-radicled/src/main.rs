@@ -21,12 +21,15 @@
 //! 1. the panic hook, before any other work, and the entry's one re-exec if
 //!    a descriptor is inherited (`fc_service::confine::clean_entry`);
 //! 2. hardening;
-//! 3. libgit2's configuration search paths emptied
-//!    (`libradicle::isolate_git_config`, libradicle item 9), while the
-//!    process has one thread: no git configuration outside a repository
-//!    applies, and confinement, which leaves `/etc/gitconfig` unreadable,
-//!    fails no repository's open; then libgit2's object cache turned off
-//!    ([`reads::uncache`]), so that nothing a read loads outlives its walk;
+//! 3. libradicle's process setup (`libradicle::process_init`), while the
+//!    process has one thread: libgit2's allocator and SQLite's allocation
+//!    wrappers, so that out of memory in either ends the process with 71
+//!    ([`oom`]; design 0010, "The memory cap"), and libgit2's configuration
+//!    search paths emptied (libradicle item 9): no git configuration
+//!    outside a repository applies, and confinement, which leaves
+//!    `/etc/gitconfig` unreadable, fails no repository's open; then
+//!    libgit2's object cache turned off ([`reads::uncache`]), so that
+//!    nothing a read loads outlives its walk;
 //! 4. the arguments, `--network` among them;
 //! 5. the environment main cleared, checked ([`env`]);
 //! 6. the gate, `<lock-dir>/radicle-<sha256(canonical home)>.lock`, before
@@ -57,13 +60,15 @@
 //! including an environment main should have cleared; 70 for a panic
 //! outside a request, a repair unit's overrun (`unit_overrun`), the node
 //! thread's end while the node should run (`node_down`), an import past its
-//! 300 s (`import_deadline`), or a service that
-//! can't start (libgit2's search paths, the OS's randomness,
-//! or the unit watchdog's thread); 74 for storage; 75 when the gate is
-//! held; 76 for a protocol error, the handshake's deadline, `rad.identity`'s
-//! deadline or the writer stall; 77 when confinement refuses the process
-//! (`confinement`: a thread or descriptor it didn't expect, or its own rules
-//! refused).
+//! 300 s (`import_deadline`), or a service that can't start (the OS's
+//! randomness, or the unit watchdog's thread); 71 for out of memory in a
+//! native library (`out_of_memory`: [`oom`]); 74 for storage; 75 when the
+//! gate is held; 76 for a protocol error, the handshake's deadline,
+//! `rad.identity`'s deadline or the writer stall; 77 when confinement
+//! refuses the process (`confinement`: a thread or descriptor it didn't
+//! expect, or its own rules refused), or libradicle's process setup fails,
+//! which leaves the memory cap's fail-stop and libgit2's isolation from git
+//! configuration uninstalled.
 
 mod args;
 mod build_info;
@@ -76,6 +81,7 @@ mod marker;
 mod nat64;
 mod network;
 mod node;
+mod oom;
 mod output;
 mod pools;
 mod quarantine;
@@ -119,24 +125,29 @@ fn main() -> ExitCode {
     let entry = fc_service::confine::clean_entry();
     fc_service::hardening::harden();
     // The process's one unsafe call (AGENTS.md rule 6, and Cargo.toml's
-    // lints; tests/unsafe_code.rs holds the crate to it). libgit2's search
-    // paths are process-wide options with no sound safe setter. After
-    // `clean_entry`, not before, so that libgit2's initialization, which can
-    // open `/dev/urandom` for its seed, comes after the check for inherited
-    // descriptors.
+    // lints; tests/unsafe_code.rs holds the crate to it). libgit2's
+    // allocator and search paths, and SQLite's allocator, are process-wide
+    // settings with no sound safe setter. After `clean_entry`, not before,
+    // so that libgit2's initialization, which can open `/dev/urandom` for
+    // its seed, comes after the check for inherited descriptors.
     //
-    // `remove_git_config_env`, its companion, isn't needed: `serve` refuses
-    // every `GIT_*` variable (`env::check`) before anything opens a
-    // repository, and nothing here opens one from the environment.
+    // `remove_git_config_env`, the search paths' companion, isn't needed:
+    // `serve` refuses every `GIT_*` variable (`env::check`) before anything
+    // opens a repository, and nothing here opens one from the environment.
     #[allow(unsafe_code)]
-    // SAFETY: `isolate_git_config` must run before any thread can use
-    // libgit2. None can: no other thread of this program exists yet, and
-    // nothing has called libgit2. The panic hook, the entry's re-exec and
-    // hardening, all that runs before this, start no thread and don't touch
-    // libgit2, and every thread the process starts, logging's writer and
-    // reconciliation's among them, starts from `serve`, after this returns.
-    let isolated = unsafe { libradicle::isolate_git_config() };
-    let exit = match isolated {
+    // SAFETY: `process_init`'s first call must come before any other thread
+    // can use libgit2 or SQLite, and before any use of SQLite at all. This
+    // is its first and only call, and both hold: no other thread of this
+    // program exists yet, and nothing has called libgit2 or SQLite. The
+    // panic hook, the entry's re-exec and hardening, all that runs before
+    // this, start no thread and touch neither library, nothing runs before
+    // `main`, and every thread the process starts, logging's writer and
+    // reconciliation's among them, starts from `serve` or `serve_import`,
+    // after this returns. The process accepts ending at once, with exit 71
+    // and nothing else run, at any allocation either library can't get
+    // (design 0010, "The memory cap"): main restarts it as after a crash.
+    let initialized = unsafe { libradicle::process_init() };
+    let exit = match initialized {
         Ok(git_config) => {
             // libgit2's object cache off, another process-wide option, set
             // while the process still has one thread: so that what a read
@@ -145,12 +156,19 @@ fn main() -> ExitCode {
             testhooks::object_cache();
             run(started, &entry, git_config)
         }
+        // Without it, out of memory in libgit2 or SQLite would be answered
+        // as a request's error, which 0010's memory cap forbids, or git
+        // configuration outside a repository would apply. Each cause is
+        // this binary's own and fails again at every start (libgit2 isn't
+        // the 1.9.6 whose allocator libradicle declares; SQLite was used
+        // first; libgit2 refused an option), so it is refused as
+        // confinement's own policy is: exit 77, which main doesn't restart.
         Err(e) => {
             log::error(
-                "cannot isolate libgit2 from git configuration",
-                json!({ "error": e.to_string() }),
+                "libradicle's process setup failed: out of memory can't end the process, or git configuration would apply",
+                json!({ "reason": "confinement", "error": e.to_string() }),
             );
-            Exit::Internal
+            Exit::Confinement
         }
     };
     // The process's exit is this thread's from here, unless a hook's or a
