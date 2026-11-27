@@ -20,12 +20,12 @@
 //!   does by default.
 //!
 //! **Nothing on the way out allocates,** since the heap may be exhausted:
-//! the error is classified borrowed, by a `match`, and the exit writes a
-//! static line with std's unbuffered stderr, then calls
-//! `std::process::exit`. No line is formatted, no JSON is built, and the log
-//! queue isn't used.
-
-use std::io::Write;
+//! the error is classified borrowed, by a `match`, and a counted one ends
+//! the process through `fc_service::exit::fail_stop`, one write of the
+//! site's static line to stderr, then `_exit(71)` (`TerminateProcess` on
+//! Windows): no lock, no thread, no `atexit` handler or other teardown, as
+//! after the store's hook. No line is formatted, no JSON is built, and the
+//! log queue isn't used.
 
 use fc_service::Exit;
 use freedom_ipfs_store::StoreError;
@@ -57,15 +57,10 @@ pub fn exit_on(error: &StoreError, at: At) {
     }
 }
 
-/// Ends the process with exit 71, after `at`'s line. The first exit to
-/// begin wins ([`fc_service::exit::claim`]): if another has, it ends the
-/// process, and this thread waits for it.
+/// Ends the process with exit 71, after `at`'s line, allocating nothing.
+/// It doesn't wait for an exit already begun: the fail-stop is immediate.
 fn exit(at: At) -> ! {
-    fc_service::exit::claim();
-    // Unbuffered, and its lock is a static one: a short or failed write is
-    // ignored, since the exit code is what main reads.
-    let _ = std::io::stderr().write_all(at.line());
-    std::process::exit(i32::from(Exit::OutOfMemory.code()))
+    fc_service::exit::fail_stop(Exit::OutOfMemory, at.line())
 }
 
 #[cfg(test)]
