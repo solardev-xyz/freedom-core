@@ -2496,10 +2496,6 @@ impl Core {
                         Flow::Exit(Exit::Internal)
                     }
                 }
-                // A user's Swarm grant change (design 0015, D17), after the
-                // reply and the events that made it: the swarm thread, which
-                // holds the manifest store, detaches it. With no thread
-                // (protocol 1) the core holds no manifest store.
                 // A Ledger key's signature, authorized (design 0016, L4): its
                 // operation waits its turn on the device lane.
                 Out::Ledger(id, device) => {
@@ -2513,6 +2509,10 @@ impl Core {
                     );
                     self.ledger_ended(ended)
                 }
+                // A user's Swarm grant change (design 0015, D17), after the
+                // reply and the events that made it: the swarm thread, which
+                // holds the manifest store, detaches it. With no thread
+                // (protocol 1) the core holds no manifest store.
                 Out::SwarmChange(change) => match self.swarm.as_ref() {
                     Some(thread)
                         if !thread.send(
