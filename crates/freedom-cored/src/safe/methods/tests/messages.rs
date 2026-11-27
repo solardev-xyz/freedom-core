@@ -879,3 +879,323 @@ fn a_session_main_could_not_learn_is_not_opened() {
     let answer = h.message_started(S2, &request);
     assert_eq!(result(&answer)["state"]["complete"], true);
 }
+
+// --- The session ID, never left behind ----------------------------------
+
+/// The unit tests' allocator on Linux: the system's, through
+/// `tracking-allocator`, which tells [`Freed`] of each release once
+/// tracking is on. Only [`no_unwiped_copy_of_a_presented_session_id`]'s
+/// child process turns it on; everywhere else each call passes through.
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static ALLOCATOR: tracking_allocator::Allocator<std::alloc::System> =
+    tracking_allocator::Allocator::system();
+
+/// What [`Freed`] looks for in each block freed: 16-byte pieces of the
+/// session IDs watched (each one's text in two halves, and its bytes).
+#[cfg(target_os = "linux")]
+struct Watch {
+    pieces: [[u8; 16]; 6],
+    len: usize,
+    /// The pieces found, and the sizes of the first blocks found holding
+    /// one.
+    found: usize,
+    sizes: [usize; 8],
+}
+
+#[cfg(target_os = "linux")]
+static WATCH: std::sync::Mutex<Watch> = std::sync::Mutex::new(Watch {
+    pieces: [[0; 16]; 6],
+    len: 0,
+    found: 0,
+    sizes: [0; 8],
+});
+
+/// This process's memory (`/proc/self/mem`), opened before anything is
+/// watched.
+#[cfg(target_os = "linux")]
+static MEMORY: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+
+/// Looks in each block as it is freed for the pieces watched.
+#[cfg(target_os = "linux")]
+struct Freed;
+
+#[cfg(target_os = "linux")]
+impl tracking_allocator::AllocationTracker for Freed {
+    fn allocated(&self, _: usize, _: usize, _: usize, _: tracking_allocator::AllocationGroupId) {}
+
+    /// The block was released just before this call, nothing in between:
+    /// its bytes are all still there but the system allocator's links in
+    /// its first 16 (the wrapper's header and the object's first 8), which
+    /// leave a 32-byte ID's second half. Allocates nothing, which could
+    /// reuse the block.
+    fn deallocated(
+        &self,
+        addr: usize,
+        size: usize,
+        _: usize,
+        _: tracking_allocator::AllocationGroupId,
+        _: tracking_allocator::AllocationGroupId,
+    ) {
+        let (Some(memory), Ok(mut watch)) = (MEMORY.get(), WATCH.try_lock()) else {
+            return;
+        };
+        if watch.len == 0 {
+            return;
+        }
+        let found = pieces_in(memory, addr, size, &watch.pieces[..watch.len]);
+        if found > 0 {
+            let blocks = watch.sizes.iter().take_while(|size| **size > 0).count();
+            if let Some(slot) = watch.sizes.get_mut(blocks) {
+                *slot = size;
+            }
+            watch.found += found;
+        }
+    }
+}
+
+/// How often any of `pieces` occurs in the `size` bytes at `addr`, read
+/// through `memory` in chunks on the stack.
+#[cfg(target_os = "linux")]
+fn pieces_in(memory: &std::fs::File, addr: usize, size: usize, pieces: &[[u8; 16]]) -> usize {
+    use std::os::unix::fs::FileExt as _;
+    use zeroize::Zeroize as _;
+    let mut chunk = [0u8; 4096];
+    let (mut at, end) = (addr as u64, (addr as u64).saturating_add(size as u64));
+    let mut found = 0;
+    while at < end {
+        let want = (end - at).min(chunk.len() as u64) as usize;
+        // A mapping released with the block can't be read: nothing of it
+        // is left.
+        let Ok(got) = memory.read_at(&mut chunk[..want], at) else {
+            break;
+        };
+        if got < 16 {
+            break;
+        }
+        found += chunk[..got]
+            .windows(16)
+            .filter(|window| pieces.iter().any(|piece| piece.as_slice() == *window))
+            .count();
+        if at + got as u64 >= end {
+            break;
+        }
+        // Overlapping, so a piece across two chunks is seen once.
+        at += (got - 15) as u64;
+    }
+    chunk.zeroize();
+    found
+}
+
+/// Watches for `session`'s text, in halves, and its bytes too.
+#[cfg(target_os = "linux")]
+fn watch(session: &str) {
+    let text = session.as_bytes();
+    assert_eq!(text.len(), 32);
+    let mut bytes = [0u8; 16];
+    for (byte, pair) in bytes.iter_mut().zip(text.chunks(2)) {
+        *byte = u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap();
+    }
+    let mut halves = [[0u8; 16]; 2];
+    halves[0].copy_from_slice(&text[..16]);
+    halves[1].copy_from_slice(&text[16..]);
+    let mut watch = WATCH.lock().unwrap();
+    let len = watch.len;
+    watch.pieces[len..len + 3].copy_from_slice(&[halves[0], halves[1], bytes]);
+    watch.len += 3;
+}
+
+/// The pieces found since the last call, and the sizes of the blocks.
+#[cfg(target_os = "linux")]
+fn found() -> (usize, [usize; 8]) {
+    let mut watch = WATCH.lock().unwrap();
+    let found = (watch.found, watch.sizes);
+    watch.found = 0;
+    watch.sizes = [0; 8];
+    found
+}
+
+/// Runs this module's test `name` again, alone, in a child process, and
+/// checks that it passed there; true in the child.
+#[cfg(target_os = "linux")]
+fn in_child(name: &str) -> bool {
+    const CHILD: &str = "FREEDOM_CORED_TEST_SESSION_COPY_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        return true;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            &format!("safe::methods::tests::messages::{name}"),
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD, "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "child failed:\n{stdout}\n{stderr}"
+    );
+    false
+}
+
+impl Harness {
+    /// Minted and started for `text` to the Safe at `index`: its ID, taken
+    /// out of the answer into a buffer wiped when dropped.
+    fn session_started(&mut self, index: u64, text: &str) -> Zeroizing<String> {
+        let mut answer = self.message_started(index, &personal(index, text));
+        let Value::String(session) = answer["result"]["session"].take() else {
+            panic!("{answer}");
+        };
+        Zeroizing::new(session)
+    }
+
+    /// [`Harness::board`], its params written into a buffer wiped when
+    /// dropped, `session` in them as given (escapes included).
+    fn board_raw(&mut self, method: &str, index: u64, session: &str, owner: Option<u64>) -> Value {
+        let mut params = Zeroizing::new(String::with_capacity(256));
+        params.push_str(&format!("{{\"safe\":{index},"));
+        if let Some(owner) = owner {
+            params.push_str(&format!("\"owner\":{owner},"));
+        }
+        params.push_str("\"session\":\"");
+        params.push_str(session);
+        params.push_str("\"}");
+        assert_eq!(params.capacity(), 256, "no copy left by a reallocation");
+        let context = caller(CallerKind::Shell);
+        let outs = self
+            .safes
+            .request(9, method, Some(params.as_str()), &context, ctx!(self));
+        self.drive(outs).expect("no reply")
+    }
+}
+
+/// A presented session ID leaves no unwiped copy behind: each board call
+/// reads it in the request's own bytes (a frame's in the core, wiped when
+/// it drops; the test's buffer here) straight into a buffer wiped when
+/// dropped, escaped or not, and a session keeps its ID in its own buffer,
+/// wiped when the session drops. A parse into a value left the text in a
+/// freed string (and an escaped one in serde_json's scratch too), and the
+/// sessions' map the bytes of a session it dropped. Watched in a child
+/// process whose allocator looks in each block it frees, from the first
+/// board call to the harness's drop.
+#[cfg(target_os = "linux")]
+#[test]
+fn no_unwiped_copy_of_a_presented_session_id() {
+    use tracking_allocator::AllocationRegistry;
+    if !in_child("no_unwiped_copy_of_a_presented_session_id") {
+        return;
+    }
+    MEMORY
+        .set(std::fs::File::open("/proc/self/mem").unwrap())
+        .unwrap();
+    AllocationRegistry::set_global_tracker(Freed).unwrap();
+    AllocationRegistry::enable_tracking();
+
+    // S3, 2 of 3: a session opened with the vault locked, nothing signed.
+    let mut h = world(S3, 3);
+    h.state = VaultState::new();
+    let first = h.session_started(S3, "Hello, Safe");
+    watch(&first);
+    let state = h.board_raw("safe.message_state", S3, &first, None);
+    assert_eq!(result(&state)["collected"], 0);
+    // The same ID, its first digit escaped: the same session.
+    let mut escaped = Zeroizing::new(String::with_capacity(64));
+    escaped.push(char::from(0x5c));
+    escaped.push_str(&format!("u{:04x}", first.as_bytes()[0]));
+    escaped.push_str(&first[1..]);
+    assert_eq!(escaped.len(), 37);
+    let again = h.board_raw("safe.message_state", S3, &escaped, None);
+    assert_eq!(again, state);
+    // C, then the sweep's A, after the eight reads each.
+    h.state = unlocked();
+    let reply = h.board_raw("safe.message_sign", S3, &first, Some(2));
+    assert_eq!(result(&reply)["collected"], 1);
+    let reply = h.board_raw("safe.message_sign", S3, &escaped, None);
+    assert_eq!(result(&reply)["complete"], true);
+    let done = h.board_raw("safe.message_complete", S3, &first, None);
+    assert!(result(&done)["signature"].is_string());
+    // Another, cancelled.
+    let second = h.session_started(S3, "Hello again");
+    watch(&second);
+    let state = h.board_raw("safe.message_state", S3, &second, None);
+    assert_eq!(result(&state)["complete"], true);
+    let cancelled = h.board_raw("safe.message_cancel", S3, &second, None);
+    assert_eq!(result(&cancelled), &json!({}));
+    let gone = h.board_raw("safe.message_state", S3, &second, None);
+    assert_eq!(result(&gone), &Value::Null);
+    drop(h);
+    let (copies, sizes) = found();
+    assert_eq!(
+        copies, 0,
+        "unwiped copies of a session ID, in blocks of {sizes:?}"
+    );
+
+    // The watch sees a copy freed unwiped.
+    drop(std::hint::black_box(String::from(second.as_str())));
+    assert!(found().0 > 0, "the watch sees nothing");
+}
+
+/// A presented ID, read from the request's bytes, is the string serde_json
+/// reads there (as `members` read it): escaped digits, in either case, are
+/// the same ID; any other string is none (`null`); a lone surrogate, which
+/// serde_json refuses in a string, is `invalid_argument`.
+#[test]
+fn a_presented_id_reads_as_its_json_string() {
+    let mut h = world(S2, 3);
+    let session = h.session_started(S2, "Hello, Safe");
+    let state = h.board_raw("safe.message_state", S2, &session, None);
+    assert_eq!(result(&state)["complete"], true);
+    let bs = char::from(0x5c);
+    let cases: Vec<(String, &str)> = vec![
+        (
+            session.bytes().map(|b| format!("{bs}u{b:04X}")).collect(),
+            "state",
+        ),
+        (
+            format!("{}{bs}u{:04x}", &session[..31], session.as_bytes()[31]),
+            "state",
+        ),
+        (format!("A{}", &session[1..]), "null"),
+        (format!("{bs}n{}", &session[1..]), "null"),
+        (format!("{bs}/{}", &session[1..]), "null"),
+        (format!("{bs}u0130{}", &session[1..]), "null"),
+        (format!("{}0", session.as_str()), "null"),
+        (session[1..].to_owned(), "null"),
+        (format!("{}{bs}uD83D{bs}uDE00", &session[..31]), "null"),
+        (String::new(), "null"),
+        (format!("{bs}uDC00{}", session.as_str()), "invalid"),
+        (format!("{bs}uD800{}", session.as_str()), "invalid"),
+        (format!("{}{bs}uD800", session.as_str()), "invalid"),
+        (format!("{bs}uD800{bs}u0030{}", &session[1..]), "invalid"),
+        (
+            format!("{bs}uD800{bs}uD800{bs}uDC00{}", &session[1..]),
+            "invalid",
+        ),
+        (format!("{bs}uD800{bs}n{}", &session[1..]), "invalid"),
+    ];
+    for (text, expected) in cases {
+        // serde_json's reading of the string agrees.
+        let reference = match serde_json::from_str::<Value>(&format!("\"{text}\"")) {
+            Err(_) => "invalid",
+            Ok(Value::String(read)) if read == *session => "state",
+            Ok(_) => "null",
+        };
+        assert_eq!(reference, expected, "{text}");
+        let reply = h.board_raw("safe.message_state", S2, &text, None);
+        match expected {
+            "state" => assert_eq!(reply, state, "{text}"),
+            "null" => assert_eq!(result(&reply), &Value::Null, "{text}"),
+            _ => assert_eq!(
+                reply["error"]["code"], "invalid_argument",
+                "{text}: {reply}"
+            ),
+        }
+    }
+}

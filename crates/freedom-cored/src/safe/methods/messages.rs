@@ -25,7 +25,9 @@
 //!   (`collectFreeSignatures`), and the session opens. `session` is its ID,
 //!   16 random bytes as 32 lowercase hex digits (today's UUID's place): a
 //!   bearer secret, the capability the board's calls present, sent once,
-//!   compared in constant time, wiped when dropped and never logged.
+//!   compared in constant time, wiped when dropped and never logged. A
+//!   presented one is decoded from the request's own bytes straight into a
+//!   buffer wiped when dropped, never parsed into a value ([`presented`]).
 //! - **`safe.message_sign { safe, session, owner? }`** → the state
 //!   (`signSafeMessage`): without `owner`, the vault owners that haven't
 //!   signed, until the threshold; with one, that owner, once (one that
@@ -103,8 +105,10 @@ const ID_LEN: usize = 16;
 
 /// One Safe's open session (the reference's `entry`).
 pub(super) struct Session {
-    /// Its ID: a bearer secret, wiped when dropped.
-    id: Zeroizing<[u8; ID_LEN]>,
+    /// Its ID: a bearer secret, in a buffer of its own, wiped when dropped.
+    /// Boxed, so the sessions' map moves only the pointer: one of its slots
+    /// would keep the bytes of a session it dropped.
+    id: Box<Zeroizing<[u8; ID_LEN]>>,
     /// Which session this is, to tell a step's from a later one's.
     pub(super) serial: u64,
     /// The Safe's address it was opened for.
@@ -175,27 +179,108 @@ struct Started<'a> {
     state: &'a RawValue,
 }
 
-/// A session ID as presented: `Some` only for 32 lowercase hex digits; any
-/// other text is an ID no session has, wiped when dropped. A missing or
-/// non-string one is `invalid_argument`.
-fn presented(
-    params: &serde_json::Map<String, Value>,
-) -> Result<Option<Zeroizing<[u8; ID_LEN]>>, ErrorBody> {
-    let text = params
-        .get("session")
-        .and_then(Value::as_str)
-        .ok_or_else(invalid)?;
-    let bytes = text.as_bytes();
-    if bytes.len() != 2 * ID_LEN || !bytes.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
-        return Ok(None);
+/// A board call's members (`safe.message_sign`, `_state`, `_cancel`,
+/// `_complete`), read in the request's own bytes: its `session` as its raw
+/// text there, the others parsed into values.
+struct Board<'a> {
+    params: serde_json::Map<String, Value>,
+    session: Option<&'a RawValue>,
+}
+
+/// The request's members, an object holding only `allowed`, as
+/// [`super::members`] reads them (the last of a repeated name), but the
+/// `session` member is never parsed into a value: its text would be copied
+/// into a string freed unwiped (and an escaped one into serde_json's
+/// scratch as well). Skipping it as raw JSON copies nothing.
+fn board_members<'a>(raw: Option<&'a str>, allowed: &[&str]) -> Result<Board<'a>, ErrorBody> {
+    let members: BTreeMap<String, &'a RawValue> =
+        serde_json::from_str(raw.unwrap_or("{}")).map_err(|_| invalid())?;
+    let mut board = Board {
+        params: serde_json::Map::new(),
+        session: None,
+    };
+    for (name, value) in members {
+        if !allowed.contains(&name.as_str()) {
+            return Err(invalid());
+        }
+        if name == "session" {
+            board.session = Some(value);
+        } else {
+            let value = serde_json::from_str(value.get()).map_err(|_| invalid())?;
+            board.params.insert(name, value);
+        }
     }
-    let digit = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
+    Ok(board)
+}
+
+/// A session ID as presented: the `session` member's raw text, in the
+/// request's own bytes (a frame's, wiped when it drops), decoded straight
+/// into a buffer wiped when dropped, with no other copy. `Some` only for a
+/// string of 32 lowercase hex digits, escaped or not; any other string is
+/// an ID no session has. A missing or non-string one is `invalid_argument`,
+/// and so is a lone surrogate, as serde_json refuses one in a string value.
+fn presented(token: Option<&RawValue>) -> Result<Option<Zeroizing<[u8; ID_LEN]>>, ErrorBody> {
+    // A JSON string, as serde_json skipped it: quoted, valid escapes.
+    let mut rest = token
+        .map(RawValue::get)
+        .and_then(|token| token.strip_prefix('"'))
+        .and_then(|token| token.strip_suffix('"'))
+        .ok_or_else(invalid)?
+        .as_bytes();
     let mut id = Zeroizing::new([0u8; ID_LEN]);
-    let (pairs, _) = bytes.as_chunks::<2>();
-    for (byte, [high, low]) in id.iter_mut().zip(pairs) {
-        *byte = (digit(*high) << 4) | digit(*low);
+    // The digits so far, while every character has been one.
+    let mut digits = Some(0usize);
+    while let Some((&first, tail)) = rest.split_first() {
+        rest = tail;
+        // The character as an ASCII byte, `None` for any other (each byte
+        // of a multi-byte one is none of the digits either).
+        let ascii = if first != b'\\' {
+            Some(first)
+        } else if let Some(tail) = rest.strip_prefix(b"u") {
+            rest = tail;
+            match hex_escape(&mut rest)? {
+                0xDC00..=0xDFFF => return Err(invalid()),
+                // A leading surrogate: its trailing one next, or refused.
+                0xD800..=0xDBFF => {
+                    rest = rest.strip_prefix(b"\\u").ok_or_else(invalid)?;
+                    if !(0xDC00..=0xDFFF).contains(&hex_escape(&mut rest)?) {
+                        return Err(invalid());
+                    }
+                    None
+                }
+                unit => u8::try_from(unit).ok(),
+            }
+        } else {
+            // `\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t`.
+            rest = rest.get(1..).ok_or_else(invalid)?;
+            None
+        };
+        let digit = ascii.and_then(|b| match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            _ => None,
+        });
+        digits = match (digits, digit) {
+            (Some(n), Some(digit)) if n < 2 * ID_LEN => {
+                if let Some(byte) = id.get_mut(n / 2) {
+                    *byte |= if n % 2 == 0 { digit << 4 } else { digit };
+                }
+                Some(n + 1)
+            }
+            _ => None,
+        };
     }
-    Ok(Some(id))
+    Ok((digits == Some(2 * ID_LEN)).then_some(id))
+}
+
+/// A `\u` escape's four hex digits, either case.
+fn hex_escape(rest: &mut &[u8]) -> Result<u16, ErrorBody> {
+    let (digits, tail) = rest.split_at_checked(4).ok_or_else(invalid)?;
+    *rest = tail;
+    digits.iter().try_fold(0u16, |unit, b| {
+        let digit = char::from(*b).to_digit(16).ok_or_else(invalid)?;
+        Ok((unit << 4) | digit as u16)
+    })
 }
 
 /// The session's state, `sessionState`'s fields but its token.
@@ -415,7 +500,8 @@ impl Safes {
         }
         let mut signatures = Signatures::new();
         let signed = sweep(state, &records, &safe, &opening.hash, &mut signatures);
-        let mut session_id = Zeroizing::new([0u8; ID_LEN]);
+        // Filled in place, on the heap.
+        let mut session_id = Box::new(Zeroizing::new([0u8; ID_LEN]));
         {
             use rand_core::TryRng as _;
             crate::rng::OsRng
@@ -468,10 +554,10 @@ impl Safes {
         records: &Records,
         ctx: &mut Ctx,
     ) -> Result<Vec<Out>, ErrorBody> {
-        let mut params = Value::Null;
-        let p = members(raw, &["safe", "session", "owner"], &mut params)?;
+        let board = board_members(raw, &["safe", "session", "owner"])?;
+        let p = &board.params;
         let index = index_of(p, "safe")?;
-        let presented = presented(p)?;
+        let presented = presented(board.session)?;
         let owner = match p.get("owner") {
             None | Some(Value::Null) => None,
             Some(_) => Some(index_of(p, "owner")?),
@@ -598,10 +684,9 @@ impl Safes {
         raw: Option<&str>,
         records: &Records,
     ) -> Result<Vec<Out>, ErrorBody> {
-        let mut params = Value::Null;
-        let p = members(raw, &["safe", "session"], &mut params)?;
-        let index = index_of(p, "safe")?;
-        let presented = presented(p)?;
+        let board = board_members(raw, &["safe", "session"])?;
+        let index = index_of(&board.params, "safe")?;
+        let presented = presented(board.session)?;
         let state = match self.sessions.open.get(&index) {
             Some(session) if session.is(presented.as_deref()) && !session.ended => {
                 state_of(records, index, session)?
@@ -618,10 +703,9 @@ impl Safes {
         id: u64,
         raw: Option<&str>,
     ) -> Result<Vec<Out>, ErrorBody> {
-        let mut params = Value::Null;
-        let p = members(raw, &["safe", "session"], &mut params)?;
-        let index = index_of(p, "safe")?;
-        let presented = presented(p)?;
+        let board = board_members(raw, &["safe", "session"])?;
+        let index = index_of(&board.params, "safe")?;
+        let presented = presented(board.session)?;
         let busy = self.busy(index);
         let Some(session) = self.sessions.open.get_mut(&index) else {
             return Ok(vec![reply(id, &json!({}))]);
@@ -646,10 +730,9 @@ impl Safes {
         id: u64,
         raw: Option<&str>,
     ) -> Result<Vec<Out>, ErrorBody> {
-        let mut params = Value::Null;
-        let p = members(raw, &["safe", "session"], &mut params)?;
-        let index = index_of(p, "safe")?;
-        let presented = presented(p)?;
+        let board = board_members(raw, &["safe", "session"])?;
+        let index = index_of(&board.params, "safe")?;
+        let presented = presented(board.session)?;
         if self.busy(index) {
             return Err(refused("SAFE_BUSY", BUSY_TEXT));
         }

@@ -271,3 +271,10 @@ ed25519-dalek = { version = "3.0", default-features = false }
 # and features fc-swarm-provider links.
 k256 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdsa"] }
 tempfile = "3"
+
+# The message tests' allocator (Linux): every release reported, so the
+# session-ID test finds an unwiped copy where it is freed. fc-dweb's memory
+# tests' version and features, already in the lock; its unsafe stays inside
+# it.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+tracking-allocator = { version = "=0.4.0", default-features = false }
