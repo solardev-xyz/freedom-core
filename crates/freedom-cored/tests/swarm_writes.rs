@@ -1116,9 +1116,28 @@ impl Gate {
         }
     }
 
+    /// Waits until the swarm thread holds no parked vault answer. A run
+    /// that ends with its signature parked (a cancel or the deadline) has
+    /// it dropped only once the thread, polling every 10 ms, sees the
+    /// release; one still parked when the release goes would park the next
+    /// run's answers behind it with no line on the marker, and that run
+    /// would wait out its 300 s deadline.
+    fn unparked(&mut self) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while self.main.world(json!({ "parked": true }))["parked"] != 0 {
+            assert!(
+                std::time::Instant::now() < until,
+                "parked vault answers left"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     /// The case's world afresh, the hold armed: main's script and the raw
-    /// SOC's params.
+    /// SOC's params. The last run's parked answers go first, while its
+    /// release is still there.
     fn arm(&mut self) -> (Script, String) {
+        self.unparked();
         let _ = std::fs::remove_file(&self.parked);
         let _ = std::fs::remove_file(&self.release);
         let vectors = Vectors::read();
@@ -1302,22 +1321,19 @@ fn gate_cancel_deadline_and_a_failed_write_during_the_hold() {
             request = request.replacen(r#""params""#, r#""deadline_ms":1500,"params""#, 1);
         }
         let parked = gate.parked.clone();
-        let mut stage = 0;
         let mut taken = 0;
-        let mut idle: Idle<'_> = Box::new(|main: &mut Main| match stage {
-            0 if parked.exists() => {
-                stage = 1;
-                taken = main.send_feed_change(take_index());
-                Some(taken)
+        let mut idle: Idle<'_> = Box::new(|main: &mut Main| {
+            if taken != 0 || !parked.exists() {
+                return None;
             }
-            1 if how == "cancel" => {
-                stage = 2;
-                // The page gives up: main's cancel of its request.
+            taken = main.send_feed_change(take_index());
+            if how == "cancel" {
+                // The page gives up: main's cancel of its request, which
+                // the swarm thread reads after the change, deferred.
                 let id = main.last_request();
                 main.core.send(&json!({ "type": "cancel", "id": id }));
-                None
             }
-            _ => None,
+            Some(taken)
         });
         let played = gate
             .main
@@ -1337,24 +1353,21 @@ fn gate_cancel_deadline_and_a_failed_write_during_the_hold() {
     // A deferred change whose write fails.
     let (mut script, request) = gate.arm();
     let (parked, release, fail) = (gate.parked.clone(), gate.release.clone(), gate.fail.clone());
-    let mut stage = 0;
     let mut taken = 0;
     let mut written = String::new();
     let feeds = feeds_file.clone();
-    let mut idle: Idle<'_> = Box::new(|main: &mut Main| match stage {
-        0 if parked.exists() => {
-            stage = 1;
-            written = std::fs::read_to_string(&feeds).unwrap();
-            taken = main.send_feed_change(take_index());
-            Some(taken)
+    let mut idle: Idle<'_> = Box::new(|main: &mut Main| {
+        if taken != 0 || !parked.exists() {
+            return None;
         }
-        1 => {
-            stage = 2;
-            std::fs::write(&fail, "swarm_feeds:rename\n").unwrap();
-            std::fs::write(&release, "").unwrap();
-            None
-        }
-        _ => None,
+        written = std::fs::read_to_string(&feeds).unwrap();
+        taken = main.send_feed_change(take_index());
+        // Taken by the swarm thread, deferred (its answer would have come
+        // before this one), before the write fails and the hold ends.
+        main.world(json!({}));
+        std::fs::write(&fail, "swarm_feeds:rename\n").unwrap();
+        std::fs::write(&release, "").unwrap();
+        Some(taken)
     });
     let played = gate
         .main
