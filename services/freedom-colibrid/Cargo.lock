@@ -164,21 +164,21 @@ dependencies = [
 
 [[package]]
 name = "fc-colibri"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "fc-json",
 ]
 
 [[package]]
 name = "fc-json"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "fc-protocol"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "base64",
  "serde",
@@ -189,7 +189,7 @@ dependencies = [
 
 [[package]]
 name = "fc-service"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "fc-protocol",
  "fc-sys",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "fc-sys"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "libc",
  "windows-sys",
