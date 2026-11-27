@@ -4,9 +4,10 @@
 //!
 //! - [`evidence`] (S1): the eight setup reads through the chain machine,
 //!   each verified, and the setup check on their answers.
-//! - [`methods`] (S2, S3): `safe.create`, `.status`, `.deploy`,
+//! - [`methods`] (S2, S3, S4): `safe.create`, `.status`, `.deploy`,
 //!   `.deployed`, `.pending` and `.discard`; `safe.prepare` and
-//!   `.propose`.
+//!   `.propose`; `safe.execute` and `.executed`, the executor's prepared
+//!   send and its `executor-send` token.
 //! - [`tx`] (S3): the SafeTx `safe.prepare` builds and keeps, its token's
 //!   payload (D6), and the vault owners' signatures.
 //! - [`entry`] (S3): a pending SafeTx's entry in `safe-pending.json`,
