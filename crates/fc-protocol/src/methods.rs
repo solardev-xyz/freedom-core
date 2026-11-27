@@ -587,6 +587,8 @@ mod tests {
                 "phone.job",
                 "phone.sent",
                 "phone.result",
+                "safe.prepare",
+                "safe.propose",
                 "eip1193.request",
                 "swarm.request",
             ]
