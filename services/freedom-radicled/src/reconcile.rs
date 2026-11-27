@@ -126,7 +126,8 @@ impl Paths {
 
 /// Runs the reconciliation of `run.home`, telling `watch` of each unit.
 ///
-/// Only after `libradicle::isolate_git_config`, which `_git_config` proves.
+/// Only after libgit2's search paths are emptied (`libradicle::process_init`,
+/// which does what `isolate_git_config` does), which `_git_config` proves.
 /// Otherwise libgit2 would look for the system's git configuration with
 /// every repository it opens, and confinement leaves an `/etc/gitconfig`
 /// unreadable: every open would fail, and every repository would be
@@ -152,19 +153,30 @@ pub fn run(
         alias: radicle::node::Alias::new(ALIAS),
         key: run.own,
     };
-    let storage =
-        Storage::open(&paths.storage, info).map_err(|e| failed("the storage", kind_of(&e)))?;
+    // Out of memory in any of these ends the process, never
+    // `recovery_failed` ([`crate::oom`]).
+    let storage = Storage::open(&paths.storage, info).map_err(|e| {
+        crate::oom::check_heartwood(&e);
+        failed("the storage", kind_of(&e))
+    })?;
     // The COB cache's own tables, migrated as a node start migrates them: a
     // home whose node never started has none, and a repair rebuilds a
     // repository's COBs into them (#306). A no-op on a migrated cache.
     // It is the reconcile state's own database, so a failure is named so.
     radicle::cob::cache::StoreWriter::open(&paths.progress)
         .and_then(|db| db.with_migrations(radicle::cob::cache::migrate::ignore))
-        .map_err(|_| failed("the reconcile state", "its database doesn't open or answer"))?;
-    let mut state =
-        State::open(&paths.progress).map_err(|e| failed("the reconcile state", state_error(&e)))?;
-    let mut quarantine = Quarantine::open(&paths.record)
-        .map_err(|e| failed("the quarantine record", record_error(&e)))?;
+        .map_err(|e| {
+            crate::oom::check_heartwood(&e);
+            failed("the reconcile state", "its database doesn't open or answer")
+        })?;
+    let mut state = State::open(&paths.progress).map_err(|e| {
+        crate::oom::check_heartwood(&e);
+        failed("the reconcile state", state_error(&e))
+    })?;
+    let mut quarantine = Quarantine::open(&paths.record).map_err(|e| {
+        crate::oom::check_heartwood(&e);
+        failed("the quarantine record", record_error(&e))
+    })?;
     let stop = Stop {
         cancel: run.cancel.clone(),
         cutoff: run.admitted.checked_add(run.cutoff),
@@ -178,7 +190,10 @@ pub fn run(
         stop: &stop,
         watch,
     };
-    let report = driver::run(&mut cx, dirty.as_ref()).map_err(|e| failure(&e))?;
+    let report = driver::run(&mut cx, dirty.as_ref()).map_err(|e| {
+        crate::oom::check_heartwood(&e);
+        failure(&e)
+    })?;
     match report.ending {
         Ending::Done => {
             // Every earlier identity is checked, or its repositories

@@ -24,7 +24,7 @@ fn hello_names_this_starts_recipient_and_the_libradicle_it_links() {
     assert_eq!(result["service_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(
         result["libradicle"],
-        json!({ "version": "0.8.0", "git_commit": "36b176bc3e2667c8c1500bf0eb6fc80407bd9d84" })
+        json!({ "version": "0.8.0", "git_commit": "6a991c4d28e3e1c92ceb006ac208c02de990031e" })
     );
     let recipient = STANDARD
         .decode(result["recipient"].as_str().unwrap())

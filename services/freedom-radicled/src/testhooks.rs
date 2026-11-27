@@ -151,6 +151,28 @@
 //!   TCP, or connects to the Unix socket, and logs `test hook: probe` with
 //!   what it tried and whether it worked (`ok`, else the error's kind), so
 //!   that a test shows what confinement refuses.
+//! - `FREEDOM_RADICLED_TEST_MEMORY_CAP=<bytes>` replaces the memory cap's
+//!   2 GiB in the service's policy and the import process's
+//!   ([`crate::confine`]; design 0010, "The memory cap"), so that a test
+//!   reaches it: confinement sets it, reads it back and reports it as it
+//!   does the cap.
+//! - `FREEDOM_RADICLED_TEST_ALLOCATE=<bytes>` makes `rad.identity`'s
+//!   handler allocate that many bytes through Rust's allocator before
+//!   anything else ([`crate::steps`]): past the memory cap, Rust's
+//!   allocator aborts the process, and nothing is answered. With
+//!   `exhaust`, the handler instead makes libgit2's `GIT_ERROR_NOMEMORY`
+//!   as libradicle's `Error::Git`, then takes every block the allocator
+//!   will still give, with fallible reservations, down to a byte (at most
+//!   4 GiB, should no cap be in place), and asks the backstop about the
+//!   error ([`crate::oom::check`]) with the heap exhausted: it must end the
+//!   process with 71 and its fixed line, allocating nothing.
+//! - `FREEDOM_RADICLED_TEST_READ_ERROR=<class>` makes every `rad.read`'s
+//!   build return libgit2's error of that class, as libradicle's
+//!   `Error::Git`, before it reads anything ([`crate::reads`]): `nomemory`
+//!   (`GIT_ERROR_NOMEMORY`, as zlib's out of memory comes back from a
+//!   stream), which ends the process with 71 unanswered ([`crate::oom`]),
+//!   or `zlib` (`GIT_ERROR_ZLIB`, as a corrupt object's inflate comes
+//!   back), which is the read's `failed`.
 //! - With `FREEDOM_RADICLED_TEST_HOLD_WRITE` or
 //!   `FREEDOM_RADICLED_TEST_HOLD_REPAIR` set, the stop logs `test hook: the
 //!   stop has fenced the pools` once every pool is fenced, before their
@@ -325,6 +347,91 @@ pub fn work_deadline(default: Duration) -> Duration {
         return Duration::from_millis(ms);
     }
     default
+}
+
+/// The memory cap in the confinement policy.
+pub fn memory_cap(default: u64) -> u64 {
+    #[cfg(feature = "testhooks")]
+    if let Some(bytes) = millis("FREEDOM_RADICLED_TEST_MEMORY_CAP") {
+        return bytes;
+    }
+    default
+}
+
+/// At `rad.identity`'s handler: allocates the bytes asked, through Rust's
+/// allocator, and holds them until it returns; or exhausts the heap and
+/// asks the backstop, if asked.
+pub fn allocate() {
+    #[cfg(feature = "testhooks")]
+    if std::env::var("FREEDOM_RADICLED_TEST_ALLOCATE").is_ok_and(|asked| asked == "exhaust") {
+        use radicle::git::raw::{Error, ErrorClass, ErrorCode};
+        // Made while the heap has room: libgit2's error holds its message.
+        let error = libradicle::Error::Git(Error::new(
+            ErrorCode::GenericError,
+            ErrorClass::NoMemory,
+            "test hook: out of memory",
+        ));
+        fc_service::log::info("test hook: the heap is exhausted", serde_json::json!({}));
+        exhaust();
+        crate::oom::check(&error);
+        // Not reached: the backstop has ended the process.
+        return;
+    }
+    #[cfg(feature = "testhooks")]
+    if let Some(bytes) =
+        millis("FREEDOM_RADICLED_TEST_ALLOCATE").and_then(|bytes| usize::try_from(bytes).ok())
+    {
+        fc_service::log::info(
+            "test hook: an allocation",
+            serde_json::json!({ "bytes": bytes }),
+        );
+        // Past the cap, the allocator's failure aborts here.
+        let held: Vec<u8> = Vec::with_capacity(bytes);
+        fc_service::log::info(
+            "test hook: the allocation was made",
+            serde_json::json!({ "bytes": held.capacity() }),
+        );
+    }
+}
+
+/// Takes every block the allocator still gives, each size from 1 GiB
+/// halved down to a byte, with fallible reservations, which return an
+/// error rather than abort, and keeps them: at most 4 GiB in all.
+#[cfg(feature = "testhooks")]
+fn exhaust() {
+    const MOST: usize = 4 << 30;
+    let mut size = 1 << 30;
+    let mut taken = 0usize;
+    while size > 0 && taken < MOST {
+        let mut block: Vec<u8> = Vec::new();
+        if block.try_reserve_exact(size).is_ok() {
+            taken += size;
+            // Held for the process's life: the heap stays exhausted.
+            std::mem::forget(block);
+        } else {
+            size /= 2;
+        }
+    }
+}
+
+/// libgit2's error for a `rad.read`'s build to return in place of its
+/// read, if asked.
+pub fn read_error() -> Option<libradicle::Error> {
+    #[cfg(feature = "testhooks")]
+    if let Ok(asked) = std::env::var("FREEDOM_RADICLED_TEST_READ_ERROR") {
+        use radicle::git::raw::{Error, ErrorClass, ErrorCode};
+        let class = match asked.as_str() {
+            "nomemory" => ErrorClass::NoMemory,
+            "zlib" => ErrorClass::Zlib,
+            _ => return None,
+        };
+        return Some(libradicle::Error::Git(Error::new(
+            ErrorCode::GenericError,
+            class,
+            "test hook: libgit2's error",
+        )));
+    }
+    None
 }
 
 /// The output budget's size.

@@ -173,8 +173,12 @@ fn sized(node: &Embedded, rid: RepoId, head: Oid, bounds: &Bounds) -> Result<(),
         Ok(header) if header.size > DOCUMENT => Err(Failure::Answered(over())),
         Ok(_) => Ok(()),
         Err(libradicle::Error::Cancelled) => Err(Refused::Cancelled.into()),
-        // libradicle's read meets it again, and answers it as today.
-        Err(_) => Ok(()),
+        // libradicle's read meets it again, and answers it as today. Out of
+        // memory ends the process first ([`crate::oom`]).
+        Err(e) => {
+            crate::oom::check(&e);
+            Ok(())
+        }
     }
 }
 

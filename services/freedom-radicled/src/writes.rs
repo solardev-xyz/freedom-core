@@ -56,7 +56,8 @@
 //!
 //! **Past it, only a success is proven.** A libradicle error is
 //! `outcome_unknown`, its text logged with the code and never with the
-//! write's content; and the pool answers a panic, main's cancel, the
+//! write's content, but for out of memory, which ends the process with 71
+//! unanswered ([`crate::oom`]), as a crash; and the pool answers a panic, main's cancel, the
 //! deadline, the stop and the node's end so. A COB write commits a git
 //! object, moves a ref, re-signs `rad/sigrefs`, updates the COB cache and
 //! announces: an error at a later step doesn't prove that an earlier one
@@ -319,8 +320,11 @@ pub(crate) fn closed(home: &Path, rid: RepoId, state: RepoState) -> ErrorBody {
 }
 
 /// Past the boundary, libradicle's error: `outcome_unknown`, its text
-/// logged with the code, never the write's content.
+/// logged with the code, never the write's content. Out of memory isn't
+/// answered: it ends the process ([`crate::oom`]), and main answers the
+/// write as it does after any crash.
 fn failed_past_start(conn: &Connection, id: u64, op: &str, rid: RepoId, e: &libradicle::Error) {
+    crate::oom::check(e);
     let why = "libradicle's call failed";
     if conn.reply_error(id, &pools::outcome_unknown(why)).is_ok() {
         pools::unknown_logged(id, why);
