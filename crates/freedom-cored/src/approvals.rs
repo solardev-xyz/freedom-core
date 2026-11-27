@@ -1443,7 +1443,11 @@ impl Approvals {
     /// open (which it then ends). Otherwise the signature isn't used:
     /// `not_authorized`, `unknown_token` (the approval ended since) or
     /// `mismatch` (another owner fixed another SafeTx since).
-    pub fn device_signed(&mut self, after: After, clocks: Clocks) -> Result<Option<Value>, ErrorBody> {
+    pub fn device_signed(
+        &mut self,
+        after: After,
+        clocks: Clocks,
+    ) -> Result<Option<Value>, ErrorBody> {
         match after {
             After::Owner(check) => self
                 .safes

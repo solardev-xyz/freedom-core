@@ -292,9 +292,9 @@ fn ledger_key(value: &Value) -> Result<LedgerKey, ErrorBody> {
     let index = index(fields.get("index"))?;
     let path = match fields.get("path") {
         None => None,
-        Some(Value::String(text)) => {
-            Some(LedgerPath::parse(text).map_err(|_| invalid("path: not a Ledger account's path"))?)
-        }
+        Some(Value::String(text)) => Some(
+            LedgerPath::parse(text).map_err(|_| invalid("path: not a Ledger account's path"))?,
+        ),
         Some(_) => return Err(invalid("path: expected a string")),
     };
     let address = match fields.get("address") {
@@ -320,7 +320,10 @@ fn ledger_record(checks: &Checks<'_>, key: &LedgerKey) -> Result<fc_ledger::Acco
     if key.path.as_ref().is_some_and(|path| *path != account.path) {
         return Err(invalid("path: not the Ledger account's"));
     }
-    if key.address.is_some_and(|address| address != account.address) {
+    if key
+        .address
+        .is_some_and(|address| address != account.address)
+    {
         return Err(invalid("address: not the Ledger account's"));
     }
     Ok(account)
