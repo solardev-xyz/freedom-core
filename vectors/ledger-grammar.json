@@ -186,6 +186,12 @@
       "waits": true
     },
     {
+      "row": "x402.settle",
+      "apdus": "as sign.typed_data, over the reserved authorization",
+      "from": "main's own rebuild of it, which it sent as typed_data (x402.settle { reservation, typed_data }, a Ledger account, D2)",
+      "waits": true
+    },
+    {
       "row": "safe.sign_owner",
       "apdus": "as sign.typed_data, over the core's SafeTx",
       "from": "the approved SafeTx, which main derives from its own record",
@@ -230,6 +236,7 @@
       "sign.typed_data.values": 1030,
       "sign.typed_data.sign": 80,
       "hash-only": 2,
+      "x402.settle": 85,
       "safe.sign_owner": 31,
       "safe.message_sign": 13
     }

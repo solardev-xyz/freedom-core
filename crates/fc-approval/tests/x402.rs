@@ -226,3 +226,88 @@ fn device_payloads_byte_for_byte() {
         "{paid} {refused:?} {inferred}"
     );
 }
+
+/// Design 0016's D10, checked as its LDG-2 L5 asks: `vectors/approvals.json`,
+/// which every case above replays, was built over `@x402/evm` 2.28.0, and
+/// `vectors/ledger.json`'s three x402 forms over the lockfile's 2.29.0. The
+/// three agree: for each of `ledger.json`'s x402 cases, the core builds,
+/// under the case's clock and nonce for the record's address, the very
+/// typed data 2.29.0 handed the Ledger's signer (the same text, members in
+/// its order) and the hash the user confirmed; and the payload around the
+/// device's signature is the one the case's client wrote (for version 2 its
+/// scheme payload, which the case records alone; for version 1 the whole).
+#[test]
+fn ledger_s_three_forms_are_the_same_under_2_29_0() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vectors/ledger.json");
+    let ledger: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(ledger["meta"]["packages"]["@x402/evm"], "2.29.0");
+    let mut forms = Vec::new();
+    for case in ledger["cases"].as_array().unwrap() {
+        if case["family"] != "x402" {
+            continue;
+        }
+        let id = case["id"].as_str().unwrap();
+        let x402 = &case["x402"];
+        let accept = x402["requirements"].clone();
+        let requirements = match x402["version"].as_u64().unwrap() {
+            1 => serde_json::json!({ "x402Version": 1, "accepts": [accept] }),
+            _ => serde_json::json!({
+                "x402Version": 2,
+                "resource": { "url": "https://paid.example/a" },
+                "accepts": [accept],
+            }),
+        };
+        let payment = Payment::new(Requirements::parse(&requirements).unwrap(), 0).unwrap();
+        let from: [u8; 20] = hex(case["record"]["address"].as_str().unwrap())
+            .try_into()
+            .unwrap();
+        let nonce: [u8; 32] = hex(&format!("0x{}", x402["nonce"].as_str().unwrap()))
+            .try_into()
+            .unwrap();
+        let built = payment
+            .build(&from, x402["now_s"].as_u64().unwrap(), &nonce)
+            .unwrap();
+        let typed = &case["request"]["typed_data"];
+        assert_eq!(
+            built.typed_data(),
+            serde_json::to_string(typed).unwrap(),
+            "{id}"
+        );
+        assert_eq!(
+            fc_evm::to_hex(&built.digest),
+            case["request"]["expected_hash"].as_str().unwrap(),
+            "{id}"
+        );
+        // The device's signature, as the case's client wrote it into the
+        // payload.
+        let theirs: Value =
+            serde_json::from_str(case["result"]["payload"].as_str().unwrap()).unwrap();
+        let signature = theirs["payload"]["signature"].as_str().unwrap();
+        let text = Value::String(signature.to_owned());
+        assert_eq!(
+            check_signature(&text, &built.digest, &from).map_err(|e| e.reason()),
+            Ok(signature),
+            "{id}"
+        );
+        let ours: Value = serde_json::from_str(&built.payload_with(signature)).unwrap();
+        if x402["version"] == 1 {
+            assert_eq!(
+                built.payload_with(signature),
+                case["result"]["payload"].as_str().unwrap(),
+                "{id}"
+            );
+        } else {
+            assert_eq!(theirs["x402Version"], 2, "{id}");
+            assert_eq!(
+                serde_json::to_string(&ours["payload"]).unwrap(),
+                serde_json::to_string(&theirs["payload"]).unwrap(),
+                "{id}"
+            );
+        }
+        forms.push(id.to_owned());
+    }
+    assert_eq!(
+        forms,
+        ["x402-eip3009-v2", "x402-eip3009-v1", "x402-permit2-v2"]
+    );
+}

@@ -5,9 +5,9 @@
 //!
 //! - **One operation at a time.** Each belongs to one core request, its
 //!   parent, whose envelope ID each of its APDUs names in `for`, and
-//!   carries what the parent does with its end (`T`: L3's and L4's). It
-//!   runs from its first APDU to its end, one APDU out at a time; then the
-//!   next one starts.
+//!   carries what the parent does with its end (`T`: L3's, L4's and
+//!   L5's). It runs from its first APDU to its end, one APDU out at a time;
+//!   then the next one starts.
 //! - **The queue:** at most [`MAX_WAITING`] wait, in order, and one more is
 //!   refused `LEDGER_BUSY` at once ([`LaneEnd::Busy`]). Discovery doesn't
 //!   wait ([`Turn::Now`], deviation `discovery-busy`): while an operation

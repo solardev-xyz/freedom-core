@@ -29,6 +29,7 @@ const ROWS = [
   { row: 'sign.typed_data.sign', apdus: [{ header: 'e00c0001', data: 'P', times: 1 }], from: "the record's path", waits: true },
   { row: 'hash-only', apdus: [{ header: 'e00c0000', data: 'P ‖ domainSeparator ‖ hashStruct(message)', times: 1 }],
     from: "fc-evm's hashes of the bound typed data; only after 6D00 answered the operation's first E0 1A and main answered hash_only: \"shown\"", waits: true },
+  { row: 'x402.settle', apdus: 'as sign.typed_data, over the reserved authorization', from: 'main\'s own rebuild of it, which it sent as typed_data (x402.settle { reservation, typed_data }, a Ledger account, D2)', waits: true },
   { row: 'safe.sign_owner', apdus: 'as sign.typed_data, over the core\'s SafeTx', from: 'the approved SafeTx, which main derives from its own record', waits: true },
   { row: 'safe.message_sign', apdus: 'as sign.typed_data, over the core\'s SafeMessage', from: 'the session\'s SafeMessage, which main derives from the page\'s request it holds', waits: true },
 ];
@@ -448,6 +449,7 @@ function buildGrammarFile(env, meta, recorded, x402Other) {
       reached[row] += 1;
       if (c.id === 'typed-safe-tx') reached['safe.sign_owner'] += 1;
       if (c.id === 'typed-safe-message') reached['safe.message_sign'] += 1;
+      if (c.family === 'x402') reached['x402.settle'] += 1;
     });
     honest.push({ case: c.id, operation: c.operation, apdus: stream });
   }

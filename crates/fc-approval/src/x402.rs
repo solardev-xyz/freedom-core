@@ -10,6 +10,17 @@
 //! `ethereum`, and `sign-flow.js` asks it for the payload of exactly the
 //! chosen entry. `vectors/approvals.json`'s `x402` pins every decision here.
 //!
+//! **The version** (design 0016, D10): 2.28.0 is the install
+//! `approvals.json` was built over, and each text holds for its own
+//! vectors. Design 0016 pins the lockfile's 2.29.0, over which
+//! `vectors/ledger.json` records the three forms a Ledger signs (EIP-3009
+//! versions 2 and 1, and Permit2); LDG-2's L5 checked that this module
+//! builds each of them, typed data, hash and payload, exactly as 2.29.0 did
+//! (`tests/x402.rs`). Between the two, `exact/client` changed only in the
+//! EIP-2612 and ERC-20 approval gas-sponsoring extensions, which need a
+//! signer that reads the chain, which Freedom's hasn't; `exact/v1/client`
+//! didn't change.
+//!
 //! What the client refuses, the core refuses: an entry of another scheme or
 //! network, an unknown `extra.paymentFlow`, the client's default spend
 //! controls (only its default assets, at most $1 a payment: 10^decimals

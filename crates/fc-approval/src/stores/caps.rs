@@ -168,15 +168,33 @@ impl CapStore {
     /// isn't atomic units ends the search with none, as the reference's
     /// `BigInt` throws there or its `charge` then refuses.
     pub fn covering(&self, origin: &str, accepts: &[Value], now_s: u64) -> Option<(usize, Tuple)> {
+        self.covering_beyond(origin, accepts, now_s, |_| U256::ZERO)
+    }
+
+    /// [`Self::covering`], with `held(key)` more of each cap taken already:
+    /// charges the caller holds without having written them (design 0016's
+    /// D2: a Ledger payment's, until its signature), so what is left is
+    /// `capAmount - spentAmount - held`.
+    pub fn covering_beyond(
+        &self,
+        origin: &str,
+        accepts: &[Value],
+        now_s: u64,
+        held: impl Fn(&str) -> U256,
+    ) -> Option<(usize, Tuple)> {
         for (index, accept) in accepts.iter().enumerate() {
             let Some(tuple) = tuple(accept) else {
                 continue;
             };
-            let Some(cap) = self.active(origin, &tuple.key(), now_s) else {
+            let key = tuple.key();
+            let Some(cap) = self.active(origin, &key, now_s) else {
                 continue;
             };
             let amount = atomic(&tuple.amount)?;
-            let next = cap.spent.checked_add(&amount);
+            let next = cap
+                .spent
+                .checked_add(&held(&key))
+                .and_then(|taken| taken.checked_add(&amount));
             if next.is_some_and(|next| next <= cap.cap) {
                 return Some((index, tuple));
             }
@@ -225,17 +243,32 @@ impl CapStore {
         amount: &str,
         now_s: u64,
     ) -> Applied<Option<Charge>> {
+        self.charge_beyond(origin, key, amount, now_s, U256::ZERO)
+    }
+
+    /// [`Self::charge`], with `held` more of the cap taken already (charges
+    /// the caller holds without having written them,
+    /// [`Self::covering_beyond`]): the charge goes only while `spentAmount +
+    /// held + amount` stays within `capAmount`, and `spentAmount` gains
+    /// `amount` alone.
+    pub fn charge_beyond(
+        &mut self,
+        origin: &str,
+        key: &str,
+        amount: &str,
+        now_s: u64,
+        held: U256,
+    ) -> Applied<Option<Charge>> {
         let not = Applied::new(None, Effect::Unchanged);
         let (Some(cap), Some(taken)) = (self.active(origin, key, now_s), atomic(amount)) else {
             return not;
         };
-        let Some(next) = cap
-            .spent
-            .checked_add(&taken)
-            .filter(|next| *next <= cap.cap)
-        else {
+        let Some(next) = cap.spent.checked_add(&taken) else {
             return not;
         };
+        if next.checked_add(&held).is_none_or(|all| all > cap.cap) {
+            return not;
+        }
         self.set_spent(origin, key, next);
         Applied::new(
             Some(Charge {
@@ -566,6 +599,36 @@ mod tests {
         assert_eq!(
             store.covering("https://other.example", &[entry("0xabc", "1")], NOW_S),
             None
+        );
+    }
+
+    /// Charges held and not written (design 0016, D2) count against the
+    /// cap as spent ones do; a charge adds only its own amount.
+    #[test]
+    fn held_charges_count_against_the_cap() {
+        let (mut store, key) = granted("100", NOW_S);
+        let entry =
+            serde_json::json!({ "network": "eip155:8453", "asset": "0xabc", "amount": "40" });
+        let held = |amount: u64| move |_: &str| U256::from_u64(amount);
+        let accepts = [entry];
+        assert!(
+            store
+                .covering_beyond(SITE, &accepts, NOW_S, held(60))
+                .is_some()
+        );
+        assert_eq!(store.covering_beyond(SITE, &accepts, NOW_S, held(61)), None);
+        assert_eq!(
+            store.covering_beyond(SITE, &accepts, NOW_S, |_| U256::MAX),
+            None
+        );
+        let refused = store.charge_beyond(SITE, &key, "40", NOW_S, U256::from_u64(61));
+        assert_eq!(refused.value, None);
+        assert_eq!(store.active(SITE, &key, NOW_S).unwrap().spent, U256::ZERO);
+        let taken = store.charge_beyond(SITE, &key, "40", NOW_S, U256::from_u64(60));
+        assert!(taken.value.is_some());
+        assert_eq!(
+            store.active(SITE, &key, NOW_S).unwrap().spent,
+            U256::from_u64(40)
         );
     }
 
