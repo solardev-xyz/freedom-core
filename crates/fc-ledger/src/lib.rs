@@ -9,7 +9,8 @@
 //!   read within its length: `E0 02`'s key and address, the address the
 //!   key derives (deviation `key-check`), `B0 01`'s format, name and
 //!   version, a signature's `v ‖ r ‖ s`.
-//! - **The operations** ([`Operation`]): `ledger.accounts`, `ledger.add`
+//! - **The operations** ([`Operation`]): `ledger.accounts` (with its check
+//!   of the records no device has matched, D1), `ledger.add`
 //!   (with the display, deviation `address-from-device`),
 //!   `sign.transaction`, `sign.message` and `sign.typed_data`, each a
 //!   machine that yields the next APDU and is handed main's reply. Every
@@ -44,7 +45,7 @@ mod typed;
 pub use apdu::{AnswerFault, Apdu, MAX_ANSWER, MAX_DATA, MIN_ANSWER};
 pub use code::{Failed, LedgerCode};
 pub use machine::{
-    Account, Cause, ETHEREUM_APP, Exchange, Failure, MAX_ACCOUNTS, Operation, ProtocolFault,
-    Refusal, Reply, Retained, SignatureFault, Signed, Step,
+    Account, Cause, Discovered, ETHEREUM_APP, Exchange, Failure, Lapse, MAX_ACCOUNTS, MAX_CHECKS,
+    Operation, ProtocolFault, Refusal, Reply, Retained, SignatureFault, Signed, Step,
 };
 pub use path::{LedgerPath, MAX_INDEX, PathError, Scheme};

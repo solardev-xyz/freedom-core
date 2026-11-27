@@ -14,6 +14,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const http = require('node:http');
+const os = require('node:os');
 const https = require('node:https');
 const path = require('node:path');
 const Module = require('node:module');
@@ -191,21 +192,48 @@ async function runCase(env, c) {
     Object.assign(console, saved);
   }
   const out = { exchanges: log.exchanges, transport: { opened: log.opened, closed: log.closed }, result };
+  if (world.records?.length) out.records = world.records;
   if (events.length) out.events = events;
   return out;
 }
 
 const OPERATIONS = {
-  /** `ledger:get-accounts` through ipc.js, with account-checks.js's record check over the world's records. */
+  /**
+   * `ledger:get-accounts` through ipc.js, with account-checks.js's check of
+   * the Ledger records no device has matched (#1065, design 0016's D1):
+   * identity-manager.js's own getLedgerRecordsToCheck reads the case's
+   * vault-meta.json (`meta`), and its recordLedgerAddressCheck asks the
+   * scripted core, which answers as the core's codec does for a record no
+   * device has matched (or throws, `core.fault: 'record'`).
+   */
   'ledger.accounts': async (env, c, requireRef, world, handlers, events) => {
-    world.stubs['src/main/identity-manager.js'] = {
-      getLedgerRecordsToCheck: () => [],
-      recordLedgerAddressCheck: async (index, matched) => { events.push({ address_check: { index, matched } }); return matched ? 'matched' : 'mismatched'; },
-      ADDRESS_CHECK: { UNCHECKED: 'unchecked', MATCHED: 'matched', MISMATCHED: 'mismatched' },
-    };
-    requireRef('./ipc.js').registerLedgerIpc();
-    const answer = await handlers.get('ledger:get-accounts')({}, c.request);
-    return answer.success ? { status: 'success', ...answer } : { status: 'error', code: answer.code ?? null, message: answer.error };
+    world.unscripted = true;
+    for (const rel of ['src/main/identity-manager.js', 'src/main/wallet/ledger/errors.js', 'src/main/wallet/ledger/transport.js',
+      'src/main/wallet/ledger/ipc.js', 'src/main/wallet/ledger/account-checks.js', 'src/main/wallet/remote/errors.js',
+      'src/shared/ipc-channels.js']) world.real.add(rel);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-ledger-meta-'));
+    try {
+      if (c.meta) fs.writeFileSync(path.join(dir, 'vault-meta.json'), JSON.stringify(c.meta, null, 2));
+      world.stubs['src/main/profile-paths.js'] = { getIdentityDataDir: () => dir };
+      world.stubs['src/main/core/vault-backend.js'] = {
+        vaultBackend: {
+          accounts: {
+            recordAddressCheck: async (type, index, matched) => {
+              events.push({ core: { method: 'accounts.record_address_check', params: { type, index, matched } } });
+              if (c.core?.fault === 'record') throw new Error('Storage error');
+              return matched ? 'matched' : 'mismatched';
+            },
+          },
+        },
+      };
+      requireRef('./ipc.js').registerLedgerIpc();
+      // The records the check reads, as the reference lists them.
+      world.records = requireRef('../../identity-manager.js').getLedgerRecordsToCheck();
+      const answer = await handlers.get('ledger:get-accounts')({}, c.request);
+      return answer.success ? { status: 'success', ...answer } : { status: 'error', code: answer.code ?? null, message: answer.error };
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   },
   /** identity-manager.js's addLedgerWallet: the device read, the compare, and the record it hands the core. */
   'ledger.add': async (env, c, requireRef, world, handlers, events) => {
@@ -361,7 +389,7 @@ async function x402OtherForms(env, cases) {
 
 // Design 0016's Ledger deviations, each with the cases that record it, or why none can.
 const DEVIATION_IDS = ['signature-check', 'field-pieces', 'device-bounds', 'blind-typed-data', 'app-check', 'key-check', 'empty-message',
-  'path-strict', 'address-from-device', 'device-deadlines', 'cancel', 'discovery-busy', 'name-ascii', 'chain-id-width', 'no-device'];
+  'path-strict', 'address-from-device', 'device-deadlines', 'cancel', 'discovery-busy', 'check-bound', 'name-ascii', 'chain-id-width', 'no-device'];
 const NO_CASE = {
   'device-deadlines': 'no case: the reference sets no deadline (hw-transport\'s 15 s only emits "unresponsive"); LDG-2 tests both deadlines under a fixed clock',
   cancel: 'no case: the reference has no way to cancel an exchange; LDG-2 cancels before the first APDU, between two and during the user\'s wait',
@@ -393,7 +421,7 @@ function markSignatureFault(c, run) {
 // Which of a case's deviations it names first: a refusal before any APDU,
 // then what changes its answer, then what changes its stream.
 const PRIORITY = ['path-strict', 'empty-message', 'name-ascii', 'device-bounds', 'no-device', 'chain-id-width', 'signature-check',
-  'key-check', 'blind-typed-data', 'field-pieces', 'address-from-device', 'app-check'];
+  'key-check', 'blind-typed-data', 'field-pieces', 'address-from-device', 'app-check', 'check-bound'];
 
 /** The case's marks: its own (what its stream can't show) and those its stream shows. */
 function markCase(env, c, run) {
@@ -418,6 +446,9 @@ function vectorOf(env, c, run) {
     out.request = c.request;
   }
   if (c.record) out.record = c.record;
+  if (c.meta) out.meta = c.meta;
+  if (run.records) out.records = run.records;
+  if (c.core) out.core = c.core;
   const device = { app: c.device?.app ?? env.app };
   if (c.device?.fields === false) device.fields = false;
   if (c.device?.fault) device.fault = c.device.fault.disconnect ? { at: c.device.fault.at, disconnect: true } : { at: c.device.fault.at, status: c.device.fault.status.toString(16).padStart(4, '0') };
@@ -466,9 +497,9 @@ async function buildLedger(checkout, meta, keysJson) {
 }
 
 const LEDGER_FORMATS = {
-  reference: 'freedom-browser at meta.freedomBrowserCommit (integration/rust-core, the swarm reference\'s checkout), its src/main/wallet/ledger/signer.js, transport.js, errors.js, ipc.js and account-checks.js and identity-manager.js\'s addLedgerWallet, loaded fresh for each case with Electron stubbed, over meta.packages exactly (hw-app-eth builds every APDU). TransportNodeHid.open hands transport.js a recording transport, a subclass of the Transport class hw-transport-node-hid\'s transport extends (hw-transport 6.35.5, -noevents\' copy), so send\'s framing, its 255-byte limit and its status check are the package\'s. No case reaches the network.',
+  reference: 'freedom-browser at meta.freedomBrowserCommit (integration/rust-core, the swarm reference\'s checkout), its src/main/wallet/ledger/signer.js, transport.js, errors.js, ipc.js and account-checks.js and identity-manager.js\'s addLedgerWallet, getLedgerRecordsToCheck and recordLedgerAddressCheck, loaded fresh for each case with Electron stubbed, over meta.packages exactly (hw-app-eth builds every APDU). TransportNodeHid.open hands transport.js a recording transport, a subclass of the Transport class hw-transport-node-hid\'s transport extends (hw-transport 6.35.5, -noevents\' copy), so send\'s framing, its 255-byte limit and its status check are the package\'s. No case reaches the network.',
   device: 'the scripted device (generator/ledger-device.js) holds keys.json\'s abandon-12 mnemonic. E0 02: 65 ‖ the uncompressed key at the path (65 bytes) ‖ 40 ‖ its EIP-55 address without 0x (40 ASCII) ‖ 9000. B0 01: `device.b001` with the case\'s app. A transaction: 9000 until the RLP it was sent is whole, then v ‖ r ‖ s ‖ 9000 over keccak256 of the bytes after the path, v the parity for a typed one and (chainId\' · 2 + 35 + parity) mod 256 for type 0, chainId\' the chain ID\'s first four bytes. A message: 9000 until it has the announced length, then 27 + parity ‖ r ‖ s over its EIP-191 hash. E0 1A and E0 1C: 9000 (6D00 for a device with `fields: false`, a Nano S). E0 0C 00 01: a signature over the case\'s `expected_hash` (the device can\'t hash fields; LDG-3\'s recordings check that a real one gets the same hash); E0 0C 00 00 over keccak256(19 01 ‖ the two hashes). Every signature is RFC 6979\'s, low s. `fault`: at APDU `at` (0-based, the case\'s) the device answers `status` alone, or throws DisconnectedDeviceDuringOperation (node-hid\'s read failure). `answer_fault` at APDU `at` (`signature`: the APDU the device signs at): other-address (another seed\'s key and address), key-not-address (the path\'s address text beside another key), other-key (keys.json\'s account 1 signs), other-digest (a signature over keccak256 of the digest), high-s (n − s, the parity flipped), flip-v (the parity flipped), long (one byte more), short (one byte less), v-27 (27 + parity for a type 0). `open`: no-device (the transport\'s own TransportError NoDevice), cannot-open (node-hid\'s "cannot open device with path").',
-  case: '{ id, family, operation (the core\'s method), request (the core\'s wire form: ledger.accounts { scheme, start, count }; ledger.add { name, address, path }, the reference\'s wallet:add-ledger-wallet arguments; sign.transaction { tx } in 0002\'s form; sign.message { message } the bytes; sign.typed_data { typed_data, expected_hash }, the hash the user confirmed, over which the reference recovers), record { path, address } for a signature, x402 { version, requirements, now_s, nonce } where @x402/evm 2.29.0 built the typed data under that clock and nonce, device (above), fault_step (the step a fault is at), exchanges [{ apdu, answer } | { apdu, thrown: { name, message } }] in order (hex), transport { opened, closed }, events (the record\'s address check as onAddressCheck heard it, the core call addLedgerWallet made, the reference\'s console), result, deviation, also }. result: { status: success, accounts, mismatched } for discovery (ipc.js\'s answer), { status: success, wallet } for an add, { status: success, raw | signature | payload }, or { status: error, code, message, cause }.',
+  case: '{ id, family, operation (the core\'s method), request (the core\'s wire form: ledger.accounts { scheme, start, count }, with the vault-meta.json the world holds as `meta` and the Ledger records no device has matched as identity-manager.js\'s getLedgerRecordsToCheck lists them from it as `records`, which account-checks.js reads at their paths after discovery, its record calls answered by a scripted core (`core.fault: record`: the core\'s write fails); ledger.add { name, address, path }, the reference\'s wallet:add-ledger-wallet arguments; sign.transaction { tx } in 0002\'s form; sign.message { message } the bytes; sign.typed_data { typed_data, expected_hash }, the hash the user confirmed, over which the reference recovers), record { path, address } for a signature, x402 { version, requirements, now_s, nonce } where @x402/evm 2.29.0 built the typed data under that clock and nonce, device (above), fault_step (the step a fault is at), exchanges [{ apdu, answer } | { apdu, thrown: { name, message } }] in order (hex), transport { opened, closed }, events (the record\'s address check as onAddressCheck heard it, the core calls addLedgerWallet and recordLedgerAddressCheck made, the reference\'s console), result, deviation, also }. result: { status: success, accounts, mismatched } for discovery (ipc.js\'s answer: `mismatched` the records the check found the device doesn\'t hold, [] when the check failed), { status: success, wallet } for an add, { status: success, raw | signature | payload }, or { status: error, code, message, cause }.',
   deviation: 'a case the core answers differently names its deviation (design 0016\'s table) in `deviation`, and any other in `also`; the result is the reference\'s. `deviations` lists each Ledger deviation with its cases, or why none can show it. ledger-grammar.json gives the core\'s stream for each case (`honest`) or its refusal (`refused`).',
   typed_data_excluded: '0002\'s typed-data cases ethers and the core sign that no Ledger case carries, and why.',
 };

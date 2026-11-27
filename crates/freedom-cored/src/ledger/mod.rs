@@ -6,11 +6,10 @@
 //!   operation, under the lane's queue, deadlines and cancel.
 //! - [`reply`]: `shell.ledger_apdu`'s replies, read strictly, and the bound
 //!   each reply is read within.
+//! - [`methods`]: `ledger.accounts` and `ledger.add` (L3), which drive it.
 //!
-//! No method drives the lane yet: `ledger.*` comes with L3, a Ledger key in
-//! `sign.*` with L4.
+//! A Ledger key in `sign.*` comes with L4.
 
-#[allow(dead_code)] // driven by ledger.* (L3) and sign.* (L4)
 pub mod lane;
-#[allow(dead_code)] // the device lane's
+pub mod methods;
 pub mod reply;

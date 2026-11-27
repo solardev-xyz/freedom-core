@@ -693,6 +693,9 @@ pub struct Vault {
     approvals: Approvals,
     /// Phone jobs and the payments' records (design 0012, PHN-1).
     phone: crate::phone::Phone,
+    /// The `safe.*` requests in flight and the Safes reported deployed for
+    /// the session (design 0016, SAFE-2).
+    safes: crate::safe::methods::Safes,
     queue: VecDeque<Pending>,
     running: Option<Running>,
     next_job: u64,
@@ -945,6 +948,7 @@ impl Vault {
             clock: Clock::new(),
             approvals: Approvals::new(),
             phone: crate::phone::Phone::new(),
+            safes: crate::safe::methods::Safes::new(),
             queue: VecDeque::new(),
             running: None,
             next_job: 1,
@@ -1077,6 +1081,8 @@ impl Vault {
     /// ([`crate::accounts::Records`]).
     fn refresh_records(&mut self) {
         self.approvals.set_records(self.accounts.snapshot());
+        // The Safes' session reports follow the records (design 0016, D4).
+        self.safes.records_changed(self.approvals.account_records());
     }
 
     /// An RPC-key request's job, at admission: `not_moved` until the store
@@ -1515,10 +1521,23 @@ impl Vault {
         self.approvals.fee_answered(id, payload);
     }
 
-    /// The chain thread answered one of the core's own reads: a phone
-    /// payment's (design 0012, "Phone jobs").
-    pub fn chain_read(&mut self, tag: u64, payload: &[u8]) -> Vec<Out> {
+    /// The chain thread answered one of the core's own reads: a Safe
+    /// method's (design 0016, SAFE-2), by its tag's bit, or a phone
+    /// payment's (design 0012, "Phone jobs"). `past_due`: it failed at or
+    /// after its deadline.
+    pub fn chain_read(&mut self, tag: u64, payload: &[u8], past_due: bool) -> Vec<Out> {
         let clocks = self.clocks();
+        if crate::safe::evidence::is_safe_tag(tag) {
+            let mut ctx = crate::safe::methods::Ctx {
+                approvals: &mut self.approvals,
+                pending: &self.safe_pending,
+                clocks,
+                now: Instant::now(),
+            };
+            let mut out = self.safes.chain_read(tag, payload, past_due, &mut ctx);
+            self.run_safe_marks(&mut out);
+            return out;
+        }
         let mut out = self
             .phone
             .chain_read(tag, payload, &mut self.approvals, clocks);
@@ -1565,6 +1584,7 @@ impl Vault {
             || crate::safe_pending::METHODS.contains(&method)
             || crate::intents::METHODS.contains(&method)
             || crate::payments_store::METHODS.contains(&method)
+            || crate::safe::methods::METHODS.contains(&method)
     }
 
     /// Handles a request. Inline methods reply at once; KDF methods are
@@ -1674,6 +1694,21 @@ impl Vault {
                     .and_then(|params| self.approvals.request(id, method, &params, context, clocks))
                     .map(Some)
             }
+            // Design 0016, SAFE-2: the Safe methods that read the chain or
+            // the pending store run here; `safe.create` writes the record on
+            // the vault queue, as `accounts.add_safe`.
+            _ if crate::safe::methods::Safes::handles(method) => {
+                let clocks = self.clocks();
+                let mut ctx = crate::safe::methods::Ctx {
+                    approvals: &mut self.approvals,
+                    pending: &self.safe_pending,
+                    clocks,
+                    now: Instant::now(),
+                };
+                out.extend(self.safes.request(id, method, raw, &mut ctx));
+                self.run_safe_marks(&mut out);
+                return out;
+            }
             _ => match self.enqueue(id, method, raw) {
                 Ok(()) => {
                     self.start_next(&mut out);
@@ -1712,7 +1747,7 @@ impl Vault {
     /// Cancels a queued request, or abandons the running one if it hasn't
     /// committed. A committed one replies with its success.
     pub fn cancel(&mut self, id: u64) -> Vec<Out> {
-        let mut out = Vec::new();
+        let mut out = self.safes.cancel(id);
         if let Some(position) = self.queue.iter().position(|p| p.id == id) {
             self.queue.remove(position);
             self.reply_error(&mut out, id, cancelled());
@@ -1752,9 +1787,11 @@ impl Vault {
         }
         while self.queue.front().is_some_and(|p| instant >= p.deadline) {
             if let Some(pending) = self.queue.pop_front() {
-                self.reply_error(&mut out, pending.id, deadline_exceeded());
+                self.refuse_queued(&mut out, pending, deadline_exceeded());
             }
         }
+        // The Safe methods' bounds.
+        out.extend(self.safes.tick(instant));
         // Phone payments' rechecks, and the events a start left.
         let clocks = self.clocks();
         out.extend(self.phone.tick(instant, clocks));
@@ -1778,7 +1815,8 @@ impl Vault {
         // The queue is in admission order, so its front expires first.
         let queued = self.queue.front().map(|p| p.deadline);
         let phone = self.phone.next_wakeup();
-        [auto_lock, running, queued, phone]
+        let safes = self.safes.next_wakeup();
+        [auto_lock, running, queued, phone, safes]
             .into_iter()
             .flatten()
             .min()
@@ -1833,7 +1871,7 @@ impl Vault {
             out.push(Out::Send(error_payload(running.request, &locked())));
         }
         for pending in std::mem::take(&mut self.queue) {
-            self.reply_error(out, pending.id, locked());
+            self.refuse_queued(out, pending, locked());
         }
     }
 
@@ -2149,6 +2187,7 @@ impl Vault {
             _ if crate::accounts::METHODS.contains(&method) => {
                 Kind::Accounts(self.accounts.op(method, raw)?)
             }
+            "safe.create" => Kind::Accounts(self.accounts.create_safe_op(raw)?),
             "nodes.op_status" => {
                 let p = params::<OpStatusParams>(raw)?;
                 if !journal::valid_op_id(&p.op_id) {
@@ -2218,7 +2257,7 @@ impl Vault {
                 return;
             };
             if Instant::now() >= pending.deadline {
-                self.reply_error(out, pending.id, deadline_exceeded());
+                self.refuse_queued(out, pending, deadline_exceeded());
                 continue;
             }
             // `accounts.*` runs here, on the loop, behind the jobs queued
@@ -2299,18 +2338,30 @@ impl Vault {
     /// grant events and narrowings passed on, as an approval method's are.
     fn run_accounts(&mut self, out: &mut Vec<Out>, id: u64, op: crate::accounts::Op) {
         // A vault write's metadata journal is finished first: while it
-        // can't be, the call fails `storage` (design 0013, "Recovery").
-        let answer = crate::vault_meta_journal::recover(&self.dir, self.secrets.as_deref())
-            .map_err(|e| crate::accounts::storage(crate::secrets::io_kind(&e)))
-            .and_then(|()| {
+        // can't be, the call fails `storage` (design 0013, "Recovery"), and
+        // discovery's check keeps nothing (design 0016, D1).
+        let fallback = op.fallback();
+        let recovered = crate::vault_meta_journal::recover(&self.dir, self.secrets.as_deref())
+            .map_err(|e| crate::accounts::storage(crate::secrets::io_kind(&e)));
+        let answer = match (recovered, fallback) {
+            (Ok(()), _) => {
                 self.accounts
                     .run(op, &self.state, &mut self.approvals, &self.safe_pending)
-            })
-            .and_then(|answer| {
-                let raw = serde_json::value::RawValue::from_string(answer.stringify())
-                    .map_err(|_| internal())?;
-                json_result(id, &raw).ok_or_else(internal)
-            });
+            }
+            (Err(error), Some(fallback)) => {
+                crate::log::warn(
+                    "the Ledger record check can't be kept: mismatched is empty",
+                    serde_json::json!({ "code": error.code }),
+                );
+                Ok(fallback)
+            }
+            (Err(error), None) => Err(error),
+        };
+        let answer = answer.and_then(|answer| {
+            let raw = serde_json::value::RawValue::from_string(answer.stringify())
+                .map_err(|_| internal())?;
+            json_result(id, &raw).ok_or_else(internal)
+        });
         match answer {
             Ok(payload) => out.push(Out::Send(payload)),
             Err(error) => self.reply_error(out, id, error),
@@ -2554,12 +2605,69 @@ impl Vault {
 
     /// A worker job finished.
     pub fn job_done(&mut self, job: u64, finished: Finished) -> Vec<Out> {
-        let out = self.job_finished(job, finished);
+        let mut out = self.job_finished(job, finished);
         // The job's files and the state the loop installed for it, one pair
         // (G20). The next job, if one started, hasn't run yet: its
         // `Out::Job` is in `out`.
         self.refresh_records();
+        // A Safe's mark that waited for the job (design 0016, SAFE-2).
+        self.run_safe_marks(&mut out);
         out
+    }
+
+    /// The Safe methods' marks that are due, written where no vault job is
+    /// running, as an `accounts.*` write runs at the queue's head: each only
+    /// while the record at its index is still that Safe, after the vault
+    /// write's metadata journal is finished. Each request then goes on.
+    fn run_safe_marks(&mut self, out: &mut Vec<Out>) {
+        if self.running.is_some() {
+            return;
+        }
+        for (id, index, address) in self.safes.take_marks() {
+            let written = crate::vault_meta_journal::recover(&self.dir, self.secrets.as_deref())
+                .map_err(|e| crate::accounts::storage(crate::secrets::io_kind(&e)))
+                .and_then(|()| {
+                    let same = self
+                        .accounts
+                        .snapshot()
+                        .map(|records| records.record(index as f64))
+                        .transpose()?
+                        .flatten()
+                        .is_some_and(|record| {
+                            record.get("type").and_then(fc_json::JsValue::as_str) == Some("safe")
+                                && record
+                                    .get("address")
+                                    .and_then(fc_wallet_state::value_address_bytes)
+                                    == Some(address)
+                        });
+                    if !same {
+                        return Err(ErrorBody::new(
+                            ErrorCode::InvalidArgument,
+                            format!("Wallet {index} is not a Safe account"),
+                        ));
+                    }
+                    self.accounts
+                        .run(
+                            crate::accounts::Op::MarkSafeDeployed {
+                                index: index as f64,
+                                chain_id: fc_safe::constants::CHAIN_ID as f64,
+                            },
+                            &self.state,
+                            &mut self.approvals,
+                            &self.safe_pending,
+                        )
+                        .map(|_| ())
+                });
+            self.refresh_records();
+            let clocks = self.clocks();
+            let mut ctx = crate::safe::methods::Ctx {
+                approvals: &mut self.approvals,
+                pending: &self.safe_pending,
+                clocks,
+                now: Instant::now(),
+            };
+            out.extend(self.safes.marked(id, written, &mut ctx));
+        }
     }
 
     fn job_finished(&mut self, job: u64, finished: Finished) -> Vec<Out> {
@@ -2877,6 +2985,64 @@ impl Vault {
     fn reply_error(&self, out: &mut Vec<Out>, id: u64, error: ErrorBody) {
         out.push(Out::Send(error_payload(id, &error)));
     }
+
+    /// A queued request that won't run (the lock, its deadline): its error,
+    /// but for one whose end has an answer of its own when the store can't
+    /// keep its result (discovery's check, design 0016's D1: its accounts,
+    /// `mismatched` empty).
+    fn refuse_queued(&self, out: &mut Vec<Out>, pending: Pending, error: ErrorBody) {
+        match &pending.kind {
+            Kind::Accounts(op) => match op
+                .fallback()
+                .and_then(|answer| answered(pending.id, &answer))
+            {
+                Some(payload) => {
+                    crate::log::warn(
+                        "the Ledger record check can't be kept: mismatched is empty",
+                        serde_json::json!({ "code": error.code }),
+                    );
+                    out.push(Out::Send(payload));
+                }
+                None => self.reply_error(out, pending.id, error),
+            },
+            _ => self.reply_error(out, pending.id, error),
+        }
+    }
+
+    /// Whether `vault_meta` is in `store_moved`: the core writes the wallet
+    /// list (design 0013).
+    pub fn accounts_moved(&self) -> bool {
+        self.accounts.moved()
+    }
+
+    /// The Ledger records `ledger.accounts`' check reads (design 0016, D1),
+    /// from the loop's snapshot of the records: none before `vault_meta` is
+    /// moved.
+    pub fn ledger_checks(&self) -> Option<Result<Vec<crate::accounts::LedgerCheck>, ErrorBody>> {
+        self.approvals
+            .account_records()
+            .map(crate::accounts::Records::ledger_checks)
+    }
+
+    /// A Ledger operation's end for the accounts store (design 0016,
+    /// "Accounts"): queued as an `accounts.*` request is, behind the jobs
+    /// before it, and answered when it runs. A full queue refuses it
+    /// `busy`, but discovery's check, which then keeps nothing.
+    pub fn ledger_end(&mut self, id: u64, op: crate::accounts::Op) -> Vec<Out> {
+        let mut out = Vec::new();
+        let pending = Pending {
+            id,
+            kind: Kind::Accounts(op),
+            deadline: Instant::now() + self.kdf_deadline,
+        };
+        if self.queue.len() >= MAX_QUEUED {
+            self.refuse_queued(&mut out, pending, ErrorBody::new(ErrorCode::Busy, "Busy"));
+            return out;
+        }
+        self.queue.push_back(pending);
+        self.start_next(&mut out);
+        out
+    }
 }
 
 /// A committed reconcile: `status`, the addresses (create, import) and the
@@ -3082,6 +3248,12 @@ fn radicle_did(id: u64, public_key: &str) -> Result<Option<Zeroizing<Vec<u8>>>, 
         id,
         &serde_json::json!({ "did": multiformats::did_key(&key) }),
     ))
+}
+
+/// A request's answer from its JS value.
+fn answered(id: u64, answer: &fc_json::JsValue) -> Option<Zeroizing<Vec<u8>>> {
+    let raw = serde_json::value::RawValue::from_string(answer.stringify()).ok()?;
+    json_result(id, &raw)
 }
 
 fn json_result<R: Serialize>(id: u64, result: &R) -> Option<Zeroizing<Vec<u8>>> {

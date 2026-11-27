@@ -48,6 +48,10 @@ name = "x402"
 required-features = ["testhooks"]
 
 [[test]]
+name = "ledger_accounts"
+required-features = ["testhooks"]
+
+[[test]]
 name = "fragments"
 required-features = ["testhooks"]
 

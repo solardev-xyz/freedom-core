@@ -14,6 +14,7 @@ const assert = require('node:assert/strict');
 const HARD = 0x80000000;
 const MAX_INDEX = 2 ** 31 - 1;
 const MAX_APDUS = 2048;
+const MAX_CHECKS = 20;
 const MAX_VALUE = 65535;
 const NAME = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 
@@ -63,6 +64,39 @@ function accountsStream({ scheme, start, count }) {
   assert.ok(build && count >= 1 && count <= 20);
   return Array.from({ length: count }, (_, k) => apdu(0xe0, 0x02, 0x00, 0x00, schemePath(build(start + k))));
 }
+
+/**
+ * `ledger.accounts`' check of the Ledger records no device has matched
+ * (D1): `E0 02 00 00 P(path_j)` at each record's path, in the wallet list's
+ * order, display off. Only a scheme's path is read (path-strict), and at
+ * most 20 (check-bound): `skipped` names the deviations that left a record
+ * unread.
+ */
+function checkStream(paths) {
+  const apdus = [];
+  const skipped = new Set();
+  for (const p of paths) {
+    let bytes;
+    try {
+      bytes = schemePath(p);
+    } catch (err) {
+      if (!(err instanceof Refused)) throw err;
+      skipped.add(err.deviation);
+      continue;
+    }
+    if (apdus.length === MAX_CHECKS) {
+      skipped.add('check-bound');
+      continue;
+    }
+    apdus.push(apdu(0xe0, 0x02, 0x00, 0x00, bytes));
+  }
+  return { apdus, skipped };
+}
+
+/** The paths account-checks.js reads: each listed record's with a path and an address, both strings. */
+const checkedPaths = (records = []) => records
+  .filter((r) => typeof r.path === 'string' && r.path && typeof r.address === 'string')
+  .map((r) => r.path);
 
 /** `ledger.add`: `E0 02 01 00 P`, the display on (question 3). */
 const addStream = (path) => [apdu(0xe0, 0x02, 0x01, 0x00, schemePath(path))];
@@ -290,6 +324,6 @@ function hashOnlyApdu(ethers, path, typedData) {
 const header = (a) => a.subarray(0, 4).toString('hex');
 
 module.exports = {
-  Refused, schemePath, SCHEMES, apdu, accountsStream, addStream, signatureHead, transactionStream, messageStream,
-  typedDataStream, typedPayload, hashOnlyApdu, parseType, descriptor, header, NAME, MAX_APDUS, MAX_VALUE,
+  Refused, schemePath, SCHEMES, apdu, accountsStream, checkStream, checkedPaths, addStream, signatureHead, transactionStream, messageStream,
+  typedDataStream, typedPayload, hashOnlyApdu, parseType, descriptor, header, NAME, MAX_APDUS, MAX_VALUE, MAX_CHECKS,
 };

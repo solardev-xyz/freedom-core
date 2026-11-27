@@ -49,11 +49,20 @@
 //!   `approval.check`'s `account_kind`, `x402.authorize`'s `device` and
 //!   `phone.job`'s `address`, which refuse a claim that disagrees. Before
 //!   the move main owns the file, and its word stands there, as before.
+//! - **A Ledger's methods** (design 0016, "Accounts"; LDG-2's L3), once
+//!   moved: `ledger.accounts`' check reads the records no device has
+//!   matched from that snapshot ([`Records::ledger_checks`]), and keeps
+//!   what the device answered on each ([`Op::LedgerChecked`]); `ledger.add`
+//!   writes the record of the address the device showed
+//!   ([`Op::LedgerAdd`]). Each end queues here like an `accounts.*` request,
+//!   behind the vault's jobs, so no write meets a vault create's or
+//!   import's.
 
 use std::path::PathBuf;
 
 use fc_approval::standing::AccountKind;
 use fc_json::JsValue;
+use fc_ledger::LedgerPath;
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_store::file::{Read, read_file, set_aside, write_file};
 use fc_store::fsx::{self, Done};
@@ -123,6 +132,14 @@ pub enum Op {
         index: f64,
         chain_id: f64,
     },
+    /// `safe.create` (design 0016, SAFE-2): `createSafeAccount`, whose
+    /// owners' addresses, salt and address the core resolves, draws and
+    /// computes itself, then `addSafeWallet` as `accounts.add_safe`.
+    CreateSafe {
+        name: JsValue,
+        owners: JsValue,
+        threshold: JsValue,
+    },
     SetActive {
         index: f64,
     },
@@ -135,12 +152,95 @@ pub enum Op {
         /// The origins of the Swarm feeds main found naming the account.
         swarm_origins: Vec<String>,
     },
+    /// `ledger.accounts`' end (design 0016, D1): discovery's accounts, as
+    /// answered, and each record the check read with the address the
+    /// device holds at its path, for the store to keep.
+    LedgerChecked {
+        accounts: JsValue,
+        checks: Vec<(LedgerCheck, [u8; 20])>,
+    },
+    /// `ledger.add`'s end, once moved: the record of the address the device
+    /// showed at the path, as `addLedgerWallet` adds it (`matched`).
+    LedgerAdd {
+        name: JsValue,
+        path: String,
+        address: String,
+    },
 }
 
 impl Op {
     fn writes(&self) -> bool {
         !matches!(self, Op::List | Op::Meta | Op::Active)
     }
+
+    /// The answer when the store can't keep the result: for discovery's
+    /// check, its accounts with `mismatched` empty, as a failed check
+    /// leaves it (`ipc.js:24–33`). Every other request answers its error.
+    pub fn fallback(&self) -> Option<JsValue> {
+        match self {
+            Op::LedgerChecked { accounts, .. } => Some(discovery(accounts.clone(), Vec::new())),
+            _ => None,
+        }
+    }
+}
+
+/// `ledger.accounts`' answer: `{ accounts, mismatched }`.
+fn discovery(accounts: JsValue, mismatched: Vec<JsValue>) -> JsValue {
+    let mut answer = JsValue::Object(Vec::new());
+    answer.set("accounts", accounts);
+    answer.set("mismatched", JsValue::Array(mismatched));
+    answer
+}
+
+/// A Ledger record discovery's check reads (design 0016, D1): its index,
+/// its path and address as the record holds them, and the path parsed.
+#[derive(Debug, Clone)]
+pub struct LedgerCheck {
+    pub index: f64,
+    pub path: JsValue,
+    pub address: JsValue,
+    pub at: LedgerPath,
+}
+
+/// The records discovery's check reads in `meta` (design 0016, D1):
+/// `getLedgerRecordsToCheck`'s, those `account-checks.js` reads (a path
+/// that is a non-empty string, an address that is a string), each at one of
+/// the schemes' paths (deviation `path-strict`: the core reads no other), in
+/// the wallet list's order, at most 20 (deviation `check-bound`).
+fn ledger_checks(meta: &VaultMeta) -> Vec<LedgerCheck> {
+    meta.ledger_records_to_check()
+        .into_iter()
+        .filter_map(|record| {
+            let index = match record.get("index") {
+                Some(JsValue::Number(index)) => *index,
+                _ => return None,
+            };
+            let path = record.get("path")?.clone();
+            let address = record.get("address")?.clone();
+            address.as_js_string()?;
+            let at = match &path {
+                JsValue::String(text) if !text.is_empty() && text.is_well_formed() => {
+                    LedgerPath::parse(text.as_str()).ok()?
+                }
+                _ => return None,
+            };
+            Some(LedgerCheck {
+                index,
+                path,
+                address,
+                at,
+            })
+        })
+        .take(fc_ledger::MAX_CHECKS)
+        .collect()
+}
+
+/// Whether the device holds a record's address: `account-checks.js`'s
+/// comparison, the record's text in lower case against the device's.
+fn device_holds(address: &JsValue, held: &[u8; 20]) -> bool {
+    address
+        .as_js_string()
+        .is_some_and(|text| text.as_str().to_lowercase() == fc_evm::to_hex(held))
 }
 
 /// `vault-meta.json` in the identity directory, and whether it is moved.
@@ -394,6 +494,20 @@ impl Store {
         })
     }
 
+    /// `safe.create`'s operation, at admission: `not_moved` until the store
+    /// is named (the core writes the record), the parameters checked.
+    pub fn create_safe_op(&self, raw: Option<&str>) -> Result<Op, ErrorBody> {
+        if !self.moved {
+            return Err(not_moved());
+        }
+        let p = members(raw, &["name", "owners", "threshold"])?;
+        Ok(Op::CreateSafe {
+            name: any(&p, "name"),
+            owners: any(&p, "owners"),
+            threshold: any(&p, "threshold"),
+        })
+    }
+
     fn path(&self) -> PathBuf {
         self.dir.join(vault_meta::FILE_NAME)
     }
@@ -457,6 +571,12 @@ impl Store {
         approvals: &mut Approvals,
         pending: &SafePending,
     ) -> Result<JsValue, ErrorBody> {
+        let op = match op {
+            Op::LedgerChecked { accounts, checks } => {
+                return Ok(self.ledger_checked(accounts, &checks));
+            }
+            op => op,
+        };
         if op.writes() && !self.moved {
             return Err(not_moved());
         }
@@ -535,17 +655,102 @@ impl Store {
                     .map_err(refused)?
                     .wrote
             }
+            Op::CreateSafe {
+                name,
+                owners,
+                threshold,
+            } => {
+                let (address, salt_nonce) =
+                    crate::safe::methods::created(&meta, &owners, &threshold)?;
+                let params = SafeParams {
+                    address: &address,
+                    owners: &owners,
+                    threshold: &threshold,
+                    salt_nonce: &salt_nonce,
+                };
+                let changed = meta.add_safe(&name, params).map_err(refused)?;
+                answer.set("wallet", changed.value);
+                changed.wrote
+            }
             Op::SetActive { index } => meta.set_active(index).map_err(refused)?.wrote,
             Op::Rename { index, name } => meta.rename(index, &name).map_err(refused)?.wrote,
             Op::Remove {
                 index,
                 swarm_origins,
             } => return self.remove(meta, index, &swarm_origins, approvals, pending),
+            Op::LedgerAdd {
+                name,
+                path,
+                address,
+            } => {
+                let changed = meta
+                    .add_ledger(
+                        &name,
+                        &JsValue::string(address.as_str()),
+                        &JsValue::string(path.as_str()),
+                    )
+                    .map_err(refused)?;
+                answer.set("path", JsValue::string(path));
+                answer.set("address", JsValue::string(address));
+                answer.set("wallet", changed.value);
+                changed.wrote
+            }
+            Op::LedgerChecked { .. } => return Err(crate::vault::internal()),
         };
         if wrote && !self.save(&meta)? {
             answer.set("durable", JsValue::Bool(false));
         }
         Ok(answer)
+    }
+
+    /// `ledger.accounts`' check kept (design 0016, D1): each record the
+    /// check read, still a Ledger's at its index with the path and the
+    /// address it was read with (D9: a record's path and address must be
+    /// the ones asked), takes the device's answer as
+    /// `accounts.record_address_check` does, a `matched` one staying
+    /// matched; the ones left `mismatched` come back. A result the store
+    /// can't keep (the file unreadable and not set aside, a failed write,
+    /// the store not moved) is a failed check: logged, `mismatched` empty.
+    fn ledger_checked(&self, accounts: JsValue, checks: &[(LedgerCheck, [u8; 20])]) -> JsValue {
+        let kept = self.load().and_then(|mut meta| {
+            let mut mismatched = Vec::new();
+            let mut wrote = false;
+            for (check, held) in checks {
+                let Some(record) = meta.record(check.index) else {
+                    continue;
+                };
+                let same = record.get("type").and_then(JsValue::as_str) == Some("ledger")
+                    && record.get("path") == Some(&check.path)
+                    && record.get("address") == Some(&check.address);
+                if !same {
+                    continue;
+                }
+                let matched = device_holds(&check.address, held);
+                let changed = meta.record_address_check(Device::Ledger, check.index, matched);
+                wrote |= changed.wrote;
+                if changed.value == Some("mismatched") {
+                    let mut entry = JsValue::Object(Vec::new());
+                    for key in ["index", "name", "address", "path"] {
+                        entry.set(key, record.get(key).cloned().unwrap_or(JsValue::Undefined));
+                    }
+                    mismatched.push(entry);
+                }
+            }
+            if wrote {
+                self.save(&meta)?;
+            }
+            Ok(mismatched)
+        });
+        match kept {
+            Ok(mismatched) => discovery(accounts, mismatched),
+            Err(error) => {
+                crate::log::warn(
+                    "the Ledger record check can't be kept: mismatched is empty",
+                    json!({ "code": error.code }),
+                );
+                discovery(accounts, Vec::new())
+            }
+        }
     }
 
     /// `accounts.remove`: the refusals; a Safe's approvals ended and its
@@ -690,6 +895,16 @@ pub enum Records {
 }
 
 impl Records {
+    /// `getWalletRecord(index)` as the snapshot holds it, normalized
+    /// ([`VaultMeta::record`]): the Safe methods' records (design 0016,
+    /// SAFE-2).
+    pub fn record(&self, index: f64) -> Result<Option<JsValue>, ErrorBody> {
+        match self {
+            Records::Pending => Err(storage("other")),
+            Records::Read(meta) => Ok(meta.record(index)),
+        }
+    }
+
     /// Account `index` as the snapshot records it.
     pub fn account(&self, index: u32) -> Result<Account, ErrorBody> {
         match self {
@@ -717,6 +932,15 @@ impl Records {
         // The codec loads no file whose `activeWalletIndex` isn't an
         // integer, so `?? 0` is `active_index`'s number.
         (listed, Some(JsValue::Number(meta.active_index())))
+    }
+
+    /// The Ledger records discovery's check reads (design 0016, D1):
+    /// `storage` while a vault journal holds the records back.
+    pub fn ledger_checks(&self) -> Result<Vec<LedgerCheck>, ErrorBody> {
+        match self {
+            Records::Pending => Err(storage("other")),
+            Records::Read(meta) => Ok(ledger_checks(meta)),
+        }
     }
 
     /// Whether the vault signs for account `index` ([`vault_signs`]): the

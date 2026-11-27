@@ -80,7 +80,6 @@ pub enum Owner {
     /// bytes: the largest answer an operation takes, 260 bytes as hex, in
     /// its response's envelope), and its reply read strictly
     /// ([`crate::ledger::reply::read`]). Nothing streams.
-    #[allow(dead_code)] // the device lane's, which L3 and L4 drive
     Ledger,
 }
 

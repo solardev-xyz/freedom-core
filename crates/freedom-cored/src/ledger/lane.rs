@@ -28,6 +28,12 @@
 //!   core's own timer is [`MARGIN`], 1 s, longer: past it with no answer,
 //!   the lane ends the operation with the same code itself
 //!   ([`LaneEnd::NoAnswer`]) and cancels the APDU.
+//! - **Discovery's check** (D1): where the lane itself ends an APDU of
+//!   `ledger.accounts`' check of its records (no answer, or one that
+//!   couldn't go), only the check fails, as main's `{ failed }` there would:
+//!   the operation ends with discovery's accounts ([`Outcome::Done`],
+//!   fc-ledger's [`Operation::lapsed`]). At any other APDU, discovery's own
+//!   among them, it ends with the [`LaneEnd`].
 //! - **A wait in the queue and the 5 minutes** (D7's open part, 0016's
 //!   question 5, the user's to decide) are [`QUEUE_WAIT`], one place. As
 //!   0016 is written ([`QueueWait::Counts`]), the wait counts against the
@@ -63,7 +69,7 @@
 //!   whatever is due by then, so an answer past its APDU's time is late
 //!   however the calls interleave, and a fixed clock drives the tests.
 //!
-//! **The event loop holds the lane** (L3 and L4 wire it): main's answers to
+//! **The event loop holds the lane** (`serve.rs`, from L3): main's answers to
 //! [`Owner::Ledger`]'s requests go to [`Lane::answered`], a parent's cancel
 //! to [`Lane::cancel`]; it waits no longer than [`Lane::next_wakeup`], and
 //! calls [`Lane::tick`] then and whenever the lane's `wake` says an APDU or
@@ -74,7 +80,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
-use fc_ledger::{Exchange, Failure, LedgerCode, Operation, Signed, Step};
+use fc_ledger::{Exchange, Failure, Lapse, LedgerCode, Operation, Signed, Step};
 use fc_protocol::methods::{DEVICE_CONFIRM_MS, device_apdu_ms};
 
 use super::reply::{self, Answered, Asked, Fault};
@@ -115,7 +121,8 @@ pub enum QueueWait {
     Counts,
     /// Question 5's proposal: the wait is capped on its own at 5 minutes,
     /// and every confirmation has its full 5, so a request may take 10 in
-    /// all.
+    /// all. Only the lane's tests run it until the user answers.
+    #[cfg_attr(not(test), allow(dead_code))]
     Apart,
 }
 
@@ -181,7 +188,9 @@ impl LaneEnd {
 pub enum Outcome {
     /// Its own end, fc-ledger's: the result, every check passed, or the
     /// failure (a status, main's `{ failed }` or refusal, an answer it
-    /// can't read, a signature that doesn't recover).
+    /// can't read, a signature that doesn't recover). A discovery the lane
+    /// ended in its records' check ends here too, with its accounts and
+    /// the check failed ([`Operation::lapsed`]).
     Done(Result<Signed, Failure>),
     /// The lane ended it.
     Lane(LaneEnd),
@@ -491,7 +500,7 @@ impl<T> Lane<T> {
         if let Some((at, end)) = self.running.as_ref().map(Running::deadline)
             && now >= at
         {
-            self.end_running(Outcome::Lane(end), now, &mut ended);
+            self.lapse(end, now, &mut ended);
         }
         self.next(now, &mut ended);
         ended
@@ -587,9 +596,31 @@ impl<T> Lane<T> {
             // Main's gate, or the lane's share of the writer, wakes it.
             Dispatch::Full | Dispatch::NoRoom => {}
             Dispatch::TooLarge | Dispatch::Late | Dispatch::Closed | Dispatch::WriterGone => {
-                self.end_running(Outcome::Lane(LaneEnd::Unsent), now, ended);
+                self.lapse(LaneEnd::Unsent, now, ended);
             }
         }
+    }
+
+    /// The lane itself ends the running operation, `end`: its APDU out at
+    /// main, if one is, is cancelled. A discovery that was reading its
+    /// records' check ends with its accounts, the check failed (D1,
+    /// [`Operation::lapsed`]); every other operation ends `end`.
+    fn lapse(&mut self, end: LaneEnd, now: Instant, ended: &mut Vec<Ended<T>>) {
+        let lapse = match end {
+            LaneEnd::NoAnswer { .. } => Lapse::NoAnswer,
+            // A running operation's APDU that didn't go: its first, or a
+            // later one. Busy is only ever an operation's as it comes.
+            LaneEnd::QueueLimit | LaneEnd::Unsent | LaneEnd::Busy => Lapse::Unsent,
+        };
+        let lapsed = self
+            .running
+            .as_mut()
+            .map(|running| running.operation.lapsed(end.code(), lapse));
+        let outcome = match lapsed {
+            Some(Ok(signed)) => Outcome::Done(Ok(signed)),
+            _ => Outcome::Lane(end),
+        };
+        self.end_running(outcome, now, ended);
     }
 
     /// The running operation ends with `outcome`: its APDU out at main, if
