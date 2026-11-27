@@ -4,8 +4,15 @@
 //!
 //! - [`evidence`] (S1): the eight setup reads through the chain machine,
 //!   each verified, and the setup check on their answers.
-//! - [`methods`] (S2): `safe.create`, `.status`, `.deploy`, `.deployed`,
-//!   `.pending` and `.discard`.
+//! - [`methods`] (S2, S3): `safe.create`, `.status`, `.deploy`,
+//!   `.deployed`, `.pending` and `.discard`; `safe.prepare` and
+//!   `.propose`.
+//! - [`tx`] (S3): the SafeTx `safe.prepare` builds and keeps, its token's
+//!   payload (D6), and the vault owners' signatures.
+//! - [`entry`] (S3): a pending SafeTx's entry in `safe-pending.json`,
+//!   written as the reference writes it and checked when it is read.
 
+pub mod entry;
 pub mod evidence;
 pub mod methods;
+pub mod tx;

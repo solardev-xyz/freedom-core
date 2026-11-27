@@ -224,6 +224,29 @@ impl SafePending {
             .map(|(_, durable)| durable)
     }
 
+    /// `setPending(index, entry)` only where `vacant` takes the index's
+    /// entry as it stands (none, or a falsy one, is `None`), read and
+    /// written under one lock, so no other write lands between the check
+    /// and the set: `safe.propose`'s (design 0016, SAFE-2's S3). `None`
+    /// when `vacant` refused it, with nothing written; otherwise whether
+    /// the write was durable.
+    pub fn set_where(
+        &self,
+        index: u64,
+        entry: JsValue,
+        vacant: impl FnOnce(Option<&JsValue>) -> bool,
+    ) -> Result<Option<bool>, Failure> {
+        let mut refused = false;
+        let (_, durable) = self.change(|store| {
+            if !vacant(store.get(index)) {
+                refused = true;
+                return Ok(false);
+            }
+            store.set(index, entry).map(|()| true)
+        })?;
+        Ok((!refused).then_some(durable))
+    }
+
     /// `clearPending(index)`: the clear `safe_pending.clear` makes, and
     /// `accounts.remove`'s for a Safe once both stores are moved. Before
     /// `safe_pending` is named, [`Failure::NotMoved`], and nothing is

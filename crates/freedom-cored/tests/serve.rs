@@ -922,6 +922,8 @@ fn only_protocol_2_is_spoken() {
         "safe.deployed",
         "safe.pending",
         "safe.discard",
+        "safe.prepare",
+        "safe.propose",
         "payments.append",
         "payments.update",
         "payments.mark_confirmed",
