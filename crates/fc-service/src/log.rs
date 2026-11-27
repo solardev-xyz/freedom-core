@@ -35,10 +35,21 @@ pub fn init() {
                 let dropped = DROPPED.swap(0, Ordering::Relaxed);
                 let mut stderr = std::io::stderr().lock();
                 if dropped > 0 {
-                    let _ = writeln!(
-                        stderr,
+                    // One write, as every other line is, so that no other
+                    // writer's bytes (the allocator's failure message, which
+                    // doesn't take this lock) can land inside it. Formatted
+                    // on the stack: nothing is allocated here.
+                    let mut warn = [0u8; 96];
+                    let mut at = std::io::Cursor::new(&mut warn[..]);
+                    if writeln!(
+                        at,
                         r#"{{"level":"warn","msg":"log lines dropped","count":{dropped}}}"#
-                    );
+                    )
+                    .is_ok()
+                    {
+                        let end = usize::try_from(at.position()).unwrap_or(0);
+                        let _ = stderr.write_all(warn.get(..end).unwrap_or_default());
+                    }
                 }
                 let _ = stderr.write_all(&line);
             }

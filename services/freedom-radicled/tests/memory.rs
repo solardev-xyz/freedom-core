@@ -154,16 +154,60 @@ fn ended(radicled: &mut Radicled) -> (ExitStatus, String) {
 }
 
 /// Whether `log` holds Rust's allocation-failure message for `bytes`. The
-/// allocator writes it in two pieces, "memory allocation of N" and then
-/// " bytes failed", and the log's writer can land a whole line between them
-/// (as on CI: "memory allocation of 536870912{...}\n bytes failed"). Only
-/// the allocator writes either piece, so the two in order are the message,
-/// whatever came between.
+/// allocator writes it in three pieces, "memory allocation of ", the size
+/// and " bytes failed", each its own write, and the service's log writer
+/// can land whole lines between any two (CI has shown both: "memory
+/// allocation of 536870912{...}\n bytes failed" and "memory allocation of
+/// {...}\n536870912 bytes failed"). Each log line is one write of a JSON
+/// object and its newline, so after the first piece, whole lines at the
+/// start are skipped before each of the others.
 #[cfg(any(target_os = "linux", windows))]
 fn allocation_failed(log: &str, bytes: u64) -> bool {
-    let head = format!("memory allocation of {bytes}");
-    log.find(&head)
-        .is_some_and(|at| log[at + head.len()..].contains(" bytes failed"))
+    const HEAD: &str = "memory allocation of ";
+    let size = bytes.to_string();
+    log.match_indices(HEAD).any(|(at, _)| {
+        past_log_lines(&log[at + HEAD.len()..])
+            .strip_prefix(size.as_str())
+            .map(past_log_lines)
+            .is_some_and(|rest| rest.starts_with(" bytes failed"))
+    })
+}
+
+/// `text` past the whole log lines at its start.
+#[cfg(any(target_os = "linux", windows))]
+fn past_log_lines(mut text: &str) -> &str {
+    while text.starts_with('{') {
+        match text.find('\n') {
+            Some(end) => text = &text[end + 1..],
+            None => break,
+        }
+    }
+    text
+}
+
+/// The message read through whole log lines at each of its two seams, as
+/// CI has shown them, and nothing else read as it.
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn the_allocation_message_is_read_through_log_lines() {
+    let line = "{\"bytes\":512,\"level\":\"info\",\"msg\":\"test hook: an allocation\"}\n";
+    for log in [
+        "memory allocation of 512 bytes failed\n".to_owned(),
+        format!("memory allocation of 512{line} bytes failed\n"),
+        format!("memory allocation of {line}512 bytes failed\n"),
+        format!("{line}memory allocation of {line}{line}512{line} bytes failed\n"),
+    ] {
+        assert!(allocation_failed(&log, 512), "{log}");
+    }
+    for log in [
+        "memory allocation of 5120 bytes failed\n".to_owned(),
+        "memory allocation of 51 bytes failed\n".to_owned(),
+        format!("memory allocation of {line} bytes failed\n"),
+        format!("{line}512 bytes failed\n"),
+        format!("memory allocation of x{line}512 bytes failed\n"),
+    ] {
+        assert!(!allocation_failed(&log, 512), "{log}");
+    }
 }
 
 /// Whether `status` is `std::process::abort`'s: `SIGABRT` on Unix, and
