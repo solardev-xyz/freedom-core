@@ -227,6 +227,11 @@ fn every_apdu_matches_its_row_and_every_row_is_reached() {
                 if id == "typed-safe-message" {
                     *reached.entry("safe.message_sign".into()).or_default() += 1;
                 }
+                // x402.settle's row (design 0016, D2; LDG-2's L5): as
+                // sign.typed_data, over the reserved authorization.
+                if case["family"] == "x402" {
+                    *reached.entry("x402.settle".into()).or_default() += 1;
+                }
             }
         }
         if let Some(stream) = honest.get(id) {
