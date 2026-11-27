@@ -2978,4 +2978,7 @@ fn too_large_payload(
 }
 
 #[cfg(test)]
+pub(crate) mod scripted;
+
+#[cfg(test)]
 mod tests;

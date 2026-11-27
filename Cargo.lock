@@ -829,6 +829,7 @@ dependencies = [
  "fc-naming",
  "fc-profile",
  "fc-protocol",
+ "fc-safe",
  "fc-seal",
  "fc-service",
  "fc-store",
