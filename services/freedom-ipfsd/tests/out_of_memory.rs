@@ -64,24 +64,68 @@ fn unanswered(ipfsd: &mut Ipfsd, id: u64) -> String {
     ipfsd.stderr()
 }
 
+/// Whether `stderr` holds Rust's allocation-failure message for `bytes`. The
+/// allocator writes it in three pieces, "memory allocation of ", the size
+/// and " bytes failed", each its own write, and the service's log writer
+/// can land whole lines between any two (CI has shown both: "memory
+/// allocation of 536870912{...}\n bytes failed" and "memory allocation of
+/// {...}\n536870912 bytes failed"). Each log line is one write of a JSON
+/// object and its newline, so after the first piece, whole lines at the
+/// start are skipped before each of the others.
+#[cfg(target_os = "linux")]
+fn allocation_failed(stderr: &str, bytes: u64) -> bool {
+    const HEAD: &str = "memory allocation of ";
+    let size = bytes.to_string();
+    stderr.match_indices(HEAD).any(|(at, _)| {
+        past_log_lines(&stderr[at + HEAD.len()..])
+            .strip_prefix(size.as_str())
+            .map(past_log_lines)
+            .is_some_and(|rest| rest.starts_with(" bytes failed"))
+    })
+}
+
+/// `text` past the whole log lines at its start.
+#[cfg(target_os = "linux")]
+fn past_log_lines(mut text: &str) -> &str {
+    while text.starts_with('{') {
+        match text.find('\n') {
+            Some(end) => text = &text[end + 1..],
+            None => break,
+        }
+    }
+    text
+}
+
+/// The message read through whole log lines at each of its two seams, as
+/// CI has shown them, and nothing else read as it.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_allocation_message_is_read_through_log_lines() {
+    let line = "{\"bytes\":512,\"level\":\"info\",\"msg\":\"test hook: an allocation\"}\n";
+    for log in [
+        "memory allocation of 512 bytes failed\n".to_owned(),
+        format!("memory allocation of 512{line} bytes failed\n"),
+        format!("memory allocation of {line}512 bytes failed\n"),
+        format!("{line}memory allocation of {line}{line}512{line} bytes failed\n"),
+    ] {
+        assert!(allocation_failed(&log, 512), "{log}");
+    }
+    for log in [
+        "memory allocation of 5120 bytes failed\n".to_owned(),
+        "memory allocation of 51 bytes failed\n".to_owned(),
+        format!("memory allocation of {line} bytes failed\n"),
+        format!("{line}512 bytes failed\n"),
+        format!("memory allocation of x{line}512 bytes failed\n"),
+    ] {
+        assert!(!allocation_failed(&log, 512), "{log}");
+    }
+}
+
 /// The ephemeral process with its cap lowered, and the out-of-memory hook
 /// `mode`. Under `socks5`, so that no NAT64 discovery runs beside the hook
 /// and allocates as memory runs out: in these cases nothing else in the
 /// process works meanwhile. The proxy is never asked: routing is offline,
 /// and the start ends in its build.
-/// Whether `stderr` holds Rust's allocation-failure message for `bytes`. The
-/// allocator writes it in two pieces, "memory allocation of N" and then
-/// " bytes failed", and the service's log writer can land a whole line
-/// between them (as on radicled's CI). Only the allocator writes either
-/// piece, so the two in order are its message, whatever came between.
-#[cfg(target_os = "linux")]
-fn allocation_failed(stderr: &str, bytes: u64) -> bool {
-    let head = format!("memory allocation of {bytes}");
-    stderr
-        .find(&head)
-        .is_some_and(|at| stderr[at + head.len()..].contains(" bytes failed"))
-}
-
 #[cfg(target_os = "linux")]
 fn capped(mode: &str, env: &[(&str, &str)]) -> Ipfsd {
     let proxy = std::net::SocketAddr::from(([127, 0, 0, 1], 9));
