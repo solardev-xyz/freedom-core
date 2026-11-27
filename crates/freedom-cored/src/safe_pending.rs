@@ -247,6 +247,27 @@ impl SafePending {
         Ok((!refused).then_some(durable))
     }
 
+    /// `clearPending(index)` only where `still` takes the index's entry as
+    /// it stands (none, or a falsy one, is `None`), read and cleared under
+    /// one lock: `safe.executed`'s (design 0016, SAFE-2's S4), which clears
+    /// only the SafeTx it names. `None` when `still` refused it, with
+    /// nothing written; otherwise the clear's outcome.
+    pub fn clear_where(
+        &self,
+        index: u64,
+        still: impl FnOnce(Option<&JsValue>) -> bool,
+    ) -> Result<Option<Cleared>, Failure> {
+        let mut refused = false;
+        let (had, durable) = self.change(|store| {
+            if !still(store.get(index)) {
+                refused = true;
+                return Ok(false);
+            }
+            Ok(store.clear(index))
+        })?;
+        Ok((!refused).then_some(Cleared { had, durable }))
+    }
+
     /// `clearPending(index)`: the clear `safe_pending.clear` makes, and
     /// `accounts.remove`'s for a Safe once both stores are moved. Before
     /// `safe_pending` is named, [`Failure::NotMoved`], and nothing is

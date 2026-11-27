@@ -317,6 +317,9 @@ const CAPABILITIES: &[&str] = &[
     // Design 0016: a Safe transaction prepared and proposed (SAFE-2's S3).
     "safe.prepare",
     "safe.propose",
+    // Design 0016: the pending SafeTx executed (SAFE-2's S4).
+    "safe.execute",
+    "safe.executed",
     // Design 0013: the payment history (PRF-5g-2).
     "payments.append",
     "payments.update",

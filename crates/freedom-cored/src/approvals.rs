@@ -1920,6 +1920,34 @@ impl Approvals {
         Ok(issued.token.to_text())
     }
 
+    /// An `executor-send` token the core mints itself for the executor's
+    /// send it prepared (design 0016, "The executor"; SAFE-2's S4): `tx`
+    /// in `sign.transaction`'s form without its nonce, for the account at
+    /// wallet index `account`, a wallet kind minted as `shell`'s, so that
+    /// main's `sign.transaction` spends it as `{ token, kind:
+    /// "executor-send" }`, its nonce unbound and every other field
+    /// compared. The core's own fee check came first.
+    pub fn executor_token(
+        &mut self,
+        account: u64,
+        tx: &Value,
+        clocks: Clocks,
+    ) -> Result<Zeroizing<String>, ErrorBody> {
+        let account = json!(account);
+        let payload = json!({ "tx": tx });
+        let request = Request {
+            kind: Kind::ExecutorSend,
+            account: Some(&account),
+            payload: &payload,
+            page: None,
+        };
+        let issued = self
+            .tokens
+            .issue_as(Minter::Shell, &request, clocks.vault_ms, &mut OsRng)
+            .map_err(approval_error)?;
+        Ok(issued.token.to_text())
+    }
+
     /// Whether the chain's fee evidence was asked for at most
     /// [`EVIDENCE_MAX_AGE_MS`] ago on the vault's clock: a page's send asks
     /// for new evidence otherwise, as the reference's `evidenceFor` does

@@ -1088,8 +1088,11 @@ impl Vault {
     /// ([`crate::accounts::Records`]).
     fn refresh_records(&mut self) {
         self.approvals.set_records(self.accounts.snapshot());
-        // The Safes' session reports follow the records (design 0016, D4).
-        self.safes.records_changed(self.approvals.account_records());
+        // The Safes' session reports follow the records (design 0016, D4),
+        // and so do their prepared sends: a removed Safe's token is burnt.
+        for token in self.safes.records_changed(self.approvals.account_records()) {
+            self.approvals.burn(&token);
+        }
     }
 
     /// An RPC-key request's job, at admission: `not_moved` until the store

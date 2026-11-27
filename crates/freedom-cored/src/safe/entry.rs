@@ -65,11 +65,9 @@ impl SetAside {
 /// An entry read back for the record's Safe.
 #[derive(Debug, Clone)]
 pub struct Entry {
-    /// The SafeTx and its hash, which S4 executes and S6 has a Ledger
-    /// owner sign: until they land only the tests read them.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The SafeTx and its hash, which `safe.execute` executes (S4) and S6
+    /// has a Ledger owner sign.
     pub tx: SafeTx,
-    #[cfg_attr(not(test), allow(dead_code))]
     pub hash: [u8; 32],
     /// The signatures that count: checked, one per owner.
     pub signatures: Signatures,

@@ -17,19 +17,19 @@ const ABANDON: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 /// The flows' owners (`vectors/safe.json`'s `owners`): A, B and C the
 /// vault's accounts 0 to 2, D a Ledger, E a phone.
-const OA: &str = "0x9858EfFD232B4033E47d90003D41EC34EcaEda94";
-const OB: &str = "0x78839F6054d7ed13918bAe0473BA31b1Ca9D7265";
-const OC: &str = "0x07B5FdfEB4E11826D233403Fe8Db0611CCF4c231";
-const OD: &str = "0x58A57ed9d8d624cBD12e2C467D34787555bB1b25";
-const OE: &str = "0x44f649fc8Dc77694E6ABEF1aA966983Dd6ED7C64";
+pub(super) const OA: &str = "0x9858EfFD232B4033E47d90003D41EC34EcaEda94";
+pub(super) const OB: &str = "0x78839F6054d7ed13918bAe0473BA31b1Ca9D7265";
+pub(super) const OC: &str = "0x07B5FdfEB4E11826D233403Fe8Db0611CCF4c231";
+pub(super) const OD: &str = "0x58A57ed9d8d624cBD12e2C467D34787555bB1b25";
+pub(super) const OE: &str = "0x44f649fc8Dc77694E6ABEF1aA966983Dd6ED7C64";
 /// The flows' Safes, at these indices.
-const S2: u64 = 1_000_002;
-const S3: u64 = 1_000_003;
-const S4: u64 = 1_000_004;
+pub(super) const S2: u64 = 1_000_002;
+pub(super) const S3: u64 = 1_000_003;
+pub(super) const S4: u64 = 1_000_004;
 const HANDLE: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
 
 /// The eight reads of a step that signs, the nonce last.
-const SIGNING_READS: [&str; 8] = [
+pub(super) const SIGNING_READS: [&str; 8] = [
     "code",
     "singleton",
     "owners",
@@ -45,7 +45,7 @@ fn vectors() -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
-fn flow(id: &str) -> Value {
+pub(super) fn flow(id: &str) -> Value {
     vectors()["flows"]
         .as_array()
         .unwrap()
@@ -56,10 +56,10 @@ fn flow(id: &str) -> Value {
 }
 
 /// A Safe's owners and threshold, with its salt.
-struct Flows;
+pub(super) struct Flows;
 
 impl Flows {
-    fn owners(index: u64) -> (Vec<&'static str>, usize, &'static str) {
+    pub(super) fn owners(index: u64) -> (Vec<&'static str>, usize, &'static str) {
         match index {
             S2 => (vec![OA, OB], 1, "0"),
             S3 => (vec![OA, OB, OC], 2, "1"),
@@ -68,12 +68,12 @@ impl Flows {
         }
     }
 
-    fn setup(index: u64) -> Setup {
+    pub(super) fn setup(index: u64) -> Setup {
         let (owners, threshold, _) = Flows::owners(index);
         setup_of(&owners, threshold)
     }
 
-    fn address(index: u64) -> [u8; 20] {
+    pub(super) fn address(index: u64) -> [u8; 20] {
         let (_, _, salt) = Flows::owners(index);
         Flows::setup(index).address(&parse_salt(salt).unwrap())
     }
@@ -81,7 +81,7 @@ impl Flows {
 
 /// `vault-meta.json` with the flows' owners and Safes, each marked
 /// deployed unless `unmarked`.
-fn flows_meta(unmarked: bool) -> Value {
+pub(super) fn flows_meta(unmarked: bool) -> Value {
     let index_of = |owner: &str| match owner {
         OA => 0,
         OB => 1,
@@ -119,7 +119,7 @@ fn flows_meta(unmarked: bool) -> Value {
 }
 
 /// Gnosis with the Safe at `index` as Freedom made it, at `nonce`.
-fn chain_for(index: u64, nonce: u64) -> Chain {
+pub(super) fn chain_for(index: u64, nonce: u64) -> Chain {
     let setup = Flows::setup(index);
     Chain::deployed()
         .with("owners", owner_list(setup.owners()))
@@ -127,7 +127,7 @@ fn chain_for(index: u64, nonce: u64) -> Chain {
         .with("nonce", hex_words(&[uint(nonce)]))
 }
 
-fn unlocked() -> VaultState {
+pub(super) fn unlocked() -> VaultState {
     let mut state = VaultState::new();
     let ticket = state.ticket();
     let prepared = fc_vault::state::Prepared::new(fc_keys::Mnemonic::parse(ABANDON).unwrap());
@@ -136,7 +136,7 @@ fn unlocked() -> VaultState {
 }
 
 /// The flows' world, the vault unlocked, the Safe at `index` at `nonce`.
-fn world(index: u64, nonce: u64) -> Harness {
+pub(super) fn world(index: u64, nonce: u64) -> Harness {
     let mut h = Harness::new(flows_meta(false), chain_for(index, nonce));
     h.state = unlocked();
     h
@@ -217,7 +217,7 @@ impl Harness {
     }
 
     /// The file's entry at `index`, as JSON.
-    fn entry_at(&self, index: u64) -> Option<Value> {
+    pub(super) fn entry_at(&self, index: u64) -> Option<Value> {
         let text = std::fs::read_to_string(self.path()).ok()?;
         let file: Value = serde_json::from_str(&text).unwrap();
         file.get(index.to_string()).cloned()
