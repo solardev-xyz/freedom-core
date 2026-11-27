@@ -13,8 +13,8 @@ use common::*;
 use fc_evm::{Transaction, typed_data_parse};
 use fc_ledger::bounds::Bound;
 use fc_ledger::{
-    Cause, Failed, LedgerCode, LedgerPath, Operation, ProtocolFault, Refusal, Reply, Retained,
-    Scheme, SignatureFault, Signed, Step,
+    Cause, Failed, Lapse, LedgerCode, LedgerPath, Operation, ProtocolFault, Refusal, Reply,
+    Retained, Scheme, SignatureFault, Signed, Step,
 };
 use serde_json::{Value, json};
 
@@ -989,6 +989,54 @@ fn a_failed_check_leaves_discovery_answered() {
         panic!()
     };
     assert_eq!(found.checks.unwrap()[1], *other_key().address().as_bytes());
+}
+
+/// The caller's own end of an APDU (LDG-2's lane: no answer by its timer,
+/// or one that couldn't go) at a check's APDU ends the check, never
+/// discovery; at a discovery APDU, or in any other operation, it fails the
+/// operation with the caller's code. Either way the operation has ended.
+#[test]
+fn the_callers_own_end_of_a_check_leaves_discovery_answered() {
+    for lapse in [Lapse::NoAnswer, Lapse::Unsent] {
+        for at in 0..4 {
+            let (mut op, _) = checking();
+            let mut device = Device::default();
+            let mut step = op.start();
+            for index in 0..at {
+                let Step::Send(exchange) = step else {
+                    panic!("{lapse:?} at {at}: {step:?}")
+                };
+                let apdu = exchange.apdu.into_bytes();
+                step = op.answer(relay(index, &apdu, device.answer(&apdu)).as_reply());
+            }
+            assert!(matches!(step, Step::Send(_)), "{lapse:?} at {at}");
+            let done = op.lapsed(LedgerCode::Unresponsive, lapse);
+            let failure = if at < 2 {
+                done.unwrap_err()
+            } else {
+                let Ok(Signed::Accounts(found)) = done else {
+                    panic!("{lapse:?} at {at}: {done:?}")
+                };
+                assert_eq!(found.accounts.len(), 2, "{lapse:?} at {at}");
+                found.checks.unwrap_err()
+            };
+            assert_eq!(failure.code, LedgerCode::Unresponsive, "{lapse:?} at {at}");
+            assert_eq!(failure.cause, Cause::Lapsed(lapse), "{lapse:?} at {at}");
+            let late = op.answer(Reply::Failed(Failed::Unresponsive));
+            assert!(
+                matches!(&late, Step::Done(Err(f)) if f.cause == Cause::Protocol(ProtocolFault::Order)),
+                "{lapse:?} at {at}: {late:?}"
+            );
+        }
+    }
+    // Every other operation, at its first APDU.
+    for (name, make) in steps() {
+        let (mut op, _) = make();
+        assert!(matches!(op.start(), Step::Send(_)), "{name}");
+        let failure = op.lapsed(LedgerCode::Unknown, Lapse::Unsent).unwrap_err();
+        assert_eq!(failure.code, LedgerCode::Unknown, "{name}");
+        assert_eq!(failure.cause, Cause::Lapsed(Lapse::Unsent), "{name}");
+    }
 }
 
 #[test]

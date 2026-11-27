@@ -6,6 +6,7 @@
 //! both answers to question 5; no request queued past the lane's limit;
 //! cancel before the first APDU, between two and during the user's wait; a
 //! late answer dropped; an unplug at each APDU; a stale signature refused;
+//! the lane's own end of discovery's check, which ends only the check (D1);
 //! and the `deadline_ms` each APDU carries.
 //!
 //! The device is `vectors/ledger.json`'s: each case's recorded answers, by
@@ -654,6 +655,151 @@ fn fifteen_seconds_without_an_answer_give_unresponsive() {
     assert!(ends.is_empty());
     let (_, ends) = run_device(&mut main, MSG, 1, CORE_APDU - 1);
     assert_eq!(summary(&ends), [(1, "signed")]);
+}
+
+/// Discovery with its check of the records no device has matched (D1).
+const RECORDS: &str = "discovery-records-mixed";
+
+/// [`RECORDS`]' operation as L3 builds it: discovery's two paths, then the
+/// path of each of its four records at a scheme's path.
+fn submit_checking(main: &mut Main, parent: u64, ms: u64) -> Ends {
+    let paths: Vec<LedgerPath> = case(RECORDS)["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|record| LedgerPath::parse(record["path"].as_str()?).ok())
+        .collect();
+    assert_eq!(paths.len(), 4);
+    let operation = operation(RECORDS).checking(paths).unwrap();
+    let at = main.at(ms);
+    main.lane.submit(parent, operation, RECORDS, Turn::Now, at)
+}
+
+/// `end` is discovery's accounts, as recorded, its check failed with
+/// `code` by the lane's own end of an APDU (D1).
+fn check_lapsed(end: &Ended<&'static str>, code: LedgerCode, lapse: Lapse) {
+    let Outcome::Done(Ok(signed)) = &end.outcome else {
+        panic!("{:?}", end.outcome);
+    };
+    assert!(as_recorded(RECORDS, signed), "{signed:?}");
+    let Signed::Accounts(found) = signed else {
+        panic!("{signed:?}");
+    };
+    let failure = found.checks.as_ref().unwrap_err();
+    assert_eq!(
+        (failure.code, &failure.cause),
+        (code, &Cause::Lapsed(lapse))
+    );
+}
+
+/// The lane's own end of an APDU of discovery's check (D1) ends only the
+/// check, as main's `{ failed }` there would: no answer by the core's
+/// timer, or an APDU that couldn't go, ends discovery with its accounts.
+/// At discovery's own APDUs the operation ends with the lane's end, as
+/// before, and a cancel during the check is a cancel.
+#[test]
+fn the_lanes_own_end_of_a_check_leaves_discovery_answered() {
+    // Main silent at each APDU: discovery's two, then the check's four.
+    for silent in 0..6 {
+        let mut main = Main::new(QUEUE_WAIT);
+        assert!(submit_checking(&mut main, 1, 0).is_empty());
+        let (sent, ends) = run(&mut main, RECORDS, 1, 0, |index, _| {
+            if index == silent {
+                Act::Silent
+            } else {
+                Act::Device
+            }
+        });
+        assert!(ends.is_empty());
+        assert_eq!(sent.len(), silent + 1);
+        let out = sent[silent].clone();
+        assert_eq!(main.wakeup(), Some(CORE_APDU));
+        assert!(main.tick(CORE_APDU - 1).is_empty());
+        let ends = main.tick(CORE_APDU);
+        let [end] = ends.as_slice() else {
+            panic!("{silent}: {ends:?}");
+        };
+        assert_eq!((end.parent, end.then), (1, RECORDS));
+        if silent < 2 {
+            assert_eq!(
+                end.outcome,
+                Outcome::Lane(LaneEnd::NoAnswer { confirm: false }),
+                "{silent}"
+            );
+            assert_eq!(summary(&ends), [(1, "LEDGER_UNRESPONSIVE")]);
+        } else {
+            check_lapsed(end, LedgerCode::Unresponsive, Lapse::NoAnswer);
+        }
+        // Either way its APDU is cancelled, and nothing more goes.
+        assert_eq!(main.wrote(), [Wrote::Cancel(out.core)], "{silent}");
+        assert_eq!(main.wakeup(), None);
+    }
+
+    // An APDU main's gate has no room for, past its 15 s and the margin:
+    // discovery's second fails the operation, a check's only the check.
+    // Nothing was out, so nothing is cancelled.
+    for blocked in [1, 2, 5] {
+        let mut main = Main::with_room(QUEUE_WAIT, 1);
+        assert!(submit_checking(&mut main, 1, 0).is_empty());
+        let (sent, _) = run(&mut main, RECORDS, 1, 0, |index, _| {
+            if index + 1 == blocked {
+                Act::Silent
+            } else {
+                Act::Device
+            }
+        });
+        let last = sent[blocked - 1].clone();
+        // Main answers the one before; another owner's request takes the
+        // slot first.
+        assert_eq!(main.requests.answered(last.core), Some(Owner::Ledger));
+        let (_slot, _rx) = filler(&main);
+        let answer = json!({ "answer": hex(&device(RECORDS, &last.apdu)) }).to_string();
+        let at = main.at(10);
+        assert!(
+            main.lane
+                .answered(last.core, Ok(&answer), at)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(main.wrote().is_empty());
+        assert_eq!(main.wakeup(), Some(10 + CORE_APDU));
+        assert!(main.tick(10 + CORE_APDU - 1).is_empty());
+        let ends = main.tick(10 + CORE_APDU);
+        let [end] = ends.as_slice() else {
+            panic!("{blocked}: {ends:?}");
+        };
+        if blocked < 2 {
+            assert_eq!(end.outcome, Outcome::Lane(LaneEnd::Unsent), "{blocked}");
+        } else {
+            check_lapsed(end, LedgerCode::Unknown, Lapse::Unsent);
+        }
+        assert!(main.wrote().is_empty(), "{blocked}");
+    }
+
+    // The core exiting as a check's APDU would go: only the check fails.
+    let mut main = Main::new(QUEUE_WAIT);
+    assert!(submit_checking(&mut main, 1, 0).is_empty());
+    let (sent, _) = run(&mut main, RECORDS, 1, 0, |index, _| {
+        if index == 1 { Act::Silent } else { Act::Device }
+    });
+    main.requests.close();
+    let ends = main.answer(sent[1].core, &device(RECORDS, &sent[1].apdu), 10);
+    let [end] = ends.as_slice() else {
+        panic!("{ends:?}");
+    };
+    check_lapsed(end, LedgerCode::Unknown, Lapse::Unsent);
+
+    // The parent's cancel during the check: cancelled, its APDU cancelled.
+    let mut main = Main::new(QUEUE_WAIT);
+    assert!(submit_checking(&mut main, 1, 0).is_empty());
+    let (sent, _) = run(&mut main, RECORDS, 1, 0, |index, _| {
+        if index == 3 { Act::Silent } else { Act::Device }
+    });
+    let ends = main.cancel(1, 10);
+    assert_eq!(summary(&ends), [(1, "cancelled")]);
+    assert_eq!(ends[0].outcome, Outcome::Cancelled);
+    assert_eq!(main.wrote(), [Wrote::Cancel(sent[3].core)]);
+    assert_eq!(main.wakeup(), None);
 }
 
 /// Case `id` run to the APDU the user confirms, at `ms`, left out.

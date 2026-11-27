@@ -104,7 +104,7 @@ pub struct Discovered {
     /// the paths were given ([`Operation::checking`]); or how the check
     /// failed, which doesn't fail discovery (`ipc.js:24–33`): a status, main's
     /// `{ failed }` or refusal, or an answer the core can't read, at any of
-    /// its APDUs.
+    /// its APDUs, or the caller's own end of one ([`Operation::lapsed`]).
     pub checks: Result<Vec<[u8; 20]>, Failure>,
 }
 
@@ -144,6 +144,10 @@ pub enum Cause {
     HashOnlyNotShown,
     #[error("{0}")]
     Protocol(ProtocolFault),
+    /// The caller ended the APDU itself, with no answer to it
+    /// ([`Operation::lapsed`]).
+    #[error("{0}")]
+    Lapsed(Lapse),
     /// The core couldn't build its next APDU: never, every bound is checked
     /// before the first.
     #[error("no next APDU")]
@@ -178,6 +182,18 @@ pub enum ProtocolFault {
     /// `start` twice, or a reply with no APDU pending.
     #[error("a reply with no APDU pending")]
     Order,
+}
+
+/// How the caller (LDG-2's lane) itself ended the APDU last sent, before
+/// any answer to it ([`Operation::lapsed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum Lapse {
+    /// No answer by the caller's own timer.
+    #[error("no answer by the core's timer")]
+    NoAnswer,
+    /// It couldn't be handed to main.
+    #[error("the APDU couldn't go")]
+    Unsent,
 }
 
 /// Why an operation is refused before its first APDU.
@@ -577,6 +593,29 @@ impl Operation {
             // A failed check ends the operation with discovery's accounts.
             Step::Done(Err(failure)) if checking => self.discovered(Err(failure)),
             step => step,
+        }
+    }
+
+    /// The caller ended the APDU last sent itself, with `code`, before any
+    /// answer: no answer by its own timer, or it couldn't go (LDG-2's lane).
+    /// At a check's APDU only the check fails, and `ledger.accounts` ends
+    /// with discovery's accounts, as main's `{ failed }` there would
+    /// ([`Discovered::checks`], D1); anywhere else the operation fails.
+    pub fn lapsed(&mut self, code: LedgerCode, lapse: Lapse) -> Result<Signed, Failure> {
+        let checking = self.pending == Some(Pending::Check) && !self.ended;
+        self.ended = true;
+        self.pending = None;
+        let failure = Failure {
+            code,
+            cause: Cause::Lapsed(lapse),
+            app_version: self.app_version.clone(),
+        };
+        match &mut self.kind {
+            Kind::Accounts { found, .. } if checking => Ok(Signed::Accounts(Discovered {
+                accounts: std::mem::take(found),
+                checks: Err(failure),
+            })),
+            _ => Err(failure),
         }
     }
 

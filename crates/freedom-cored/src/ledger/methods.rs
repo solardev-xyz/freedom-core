@@ -19,10 +19,11 @@
 //!   doesn't hold come back in `mismatched`. A failed check is logged and
 //!   leaves `mismatched` empty; it never fails discovery (`ipc.js:24–33`):
 //!   a status, main's `{ failed }` or refusal, or an answer the core can't
-//!   read at one of its APDUs, or a result the core can't keep. Before
-//!   `vault_meta` is moved the core keeps no result (D9: a Ledger record
-//!   needs the store moved), so it reads none: discovery's APDUs alone, and
-//!   `mismatched` empty.
+//!   read at one of its APDUs, the lane's own end of one (no answer by the
+//!   core's timer, or an APDU that couldn't go), or a result the core can't
+//!   keep. A cancel still ends it `cancelled`. Before `vault_meta` is moved
+//!   the core keeps no result (D9: a Ledger record needs the store moved),
+//!   so it reads none: discovery's APDUs alone, and `mismatched` empty.
 //! - **`ledger.add { scheme, index, name? }`**: the address at that path,
 //!   read with the display (`E0 02 01 00`, question 3), for the user to
 //!   confirm on the device (deviation `address-from-device`). The address

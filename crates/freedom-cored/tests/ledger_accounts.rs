@@ -11,8 +11,10 @@
 //!   `vault-meta.json` after it holds what the reference's record calls
 //!   kept, and the record `ledger.add` added.
 //! - **D1's check:** `mismatched`; the 20-record bound; a failed check
-//!   (main's refusal, its `{ failed }`, the core's write failing, a status
-//!   or an unplug) leaves `mismatched` empty and discovery answered.
+//!   (main's refusal, its `{ failed }`, the core's write failing, a status,
+//!   an unplug, or no answer by the core's own timer) leaves `mismatched`
+//!   empty and discovery answered, logged; no answer in discovery itself
+//!   fails it.
 //! - **The lane:** discovery `LEDGER_BUSY` while an add waits for the user,
 //!   or another discovery runs; a cancel during the user's wait.
 //! - **D9:** before `vault_meta` is moved nothing is checked or written;
@@ -27,6 +29,7 @@ mod common;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use common::*;
 use fc_ledger::LedgerPath;
@@ -613,9 +616,30 @@ fn twenty_records_at_most() {
     }
 }
 
+/// Main silent at the last APDU `sent` (`deadline_ms` 15000): the core's
+/// own timer, 16 s on in real time, cancels it and answers the request;
+/// main then answers the cancel. The response.
+fn unanswered(core: &mut Core, sent: &[Asked]) -> Value {
+    let held = sent.last().unwrap();
+    assert_eq!(held.deadline_ms, 15_000);
+    let waited = Instant::now();
+    let seen = [next(core), next(core)];
+    assert!(waited.elapsed() >= Duration::from_secs(15), "{seen:?}");
+    let cancel = seen.iter().find(|m| m["type"] == "cancel").unwrap();
+    assert_eq!(cancel, &json!({ "type": "cancel", "id": held.id }));
+    let response = seen.iter().find(|m| m["type"] == "response").unwrap();
+    reply(
+        core,
+        held.id,
+        Reply::Error(json!({ "code": "cancelled", "message": "Cancelled" })),
+    );
+    response.clone()
+}
+
 /// A failed check leaves `mismatched` empty and discovery answered, and
-/// keeps nothing: main's refusal of a check's APDU, its `{ failed }`, and
-/// the core's write failing; a failure in discovery itself fails it.
+/// keeps nothing: main's refusal of a check's APDU, its `{ failed }`, the
+/// core's write failing, and no answer by the core's own timer, logged; a
+/// failure in discovery itself fails it.
 #[test]
 fn a_failed_check_leaves_mismatched_empty() {
     let case = case("discovery-records-mixed");
@@ -703,6 +727,75 @@ fn a_failed_check_leaves_mismatched_empty() {
     let (sent, response) = drive(&mut core, 10, |_, _| Reply::Error(refusal.clone()));
     assert_eq!(sent.len(), 1);
     assert_eq!(ledger_code(&response.unwrap()), "LEDGER_UNKNOWN");
+    // Main silent at the first check's APDU: past the core's own timer the
+    // lane cancels it, and only the check fails, logged; discovery's
+    // accounts are answered, nothing kept.
+    let (root, mut core) = mixed(&[]);
+    let before = std::fs::read(meta_path(root.path())).unwrap();
+    call(
+        &mut core,
+        10,
+        "ledger.accounts",
+        case["request"].clone(),
+        "chrome",
+    );
+    let mut recorded = device(case);
+    let (sent, response) = drive(&mut core, 10, |k, asked| {
+        if k == 2 {
+            Reply::Hold
+        } else {
+            recorded(k, asked)
+        }
+    });
+    assert!(response.is_none());
+    assert_eq!(sent.len(), 3);
+    let response = unanswered(&mut core, &sent);
+    assert_eq!(response["id"], 10);
+    assert_eq!(
+        response["result"],
+        json!({ "accounts": accounts, "mismatched": [] }),
+        "{response}"
+    );
+    assert_eq!(std::fs::read(meta_path(root.path())).unwrap(), before);
+    core.close_stdin();
+    assert_eq!(core.exit_code(Duration::from_secs(10)), 0);
+    let stderr = core.stderr();
+    let logged = stderr
+        .lines()
+        .find(|line| line.contains("the Ledger record check failed"))
+        .unwrap_or_else(|| panic!("{stderr}"));
+    assert!(logged.contains("LEDGER_UNRESPONSIVE"), "{logged}");
+}
+
+/// Main silent at one of discovery's own APDUs: the core's own timer fails
+/// the request `device_failed`, `LEDGER_UNRESPONSIVE`, its APDU cancelled,
+/// no record read or kept.
+#[test]
+fn no_answer_in_discovery_itself_fails_it() {
+    let case = case("discovery-records-mixed");
+    let (root, mut core) = mixed(&[]);
+    let before = std::fs::read(meta_path(root.path())).unwrap();
+    call(
+        &mut core,
+        10,
+        "ledger.accounts",
+        case["request"].clone(),
+        "chrome",
+    );
+    let mut recorded = device(case);
+    let (sent, response) = drive(&mut core, 10, |k, asked| {
+        if k == 1 {
+            Reply::Hold
+        } else {
+            recorded(k, asked)
+        }
+    });
+    assert!(response.is_none());
+    assert_eq!(sent.len(), 2);
+    let response = unanswered(&mut core, &sent);
+    assert_eq!(response["id"], 10);
+    assert_eq!(ledger_code(&response), "LEDGER_UNRESPONSIVE");
+    assert_eq!(std::fs::read(meta_path(root.path())).unwrap(), before);
 }
 
 /// Discovery doesn't wait (deviation `discovery-busy`): while `ledger.add`
