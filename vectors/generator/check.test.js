@@ -1322,11 +1322,20 @@ const LEDGER_DAMAGES = [
   ['ledger.json', 'a changed Ledger deviation mark', (contents) => {
     delete contents.cases.find((item) => item.id === 'value-string-encoding-256').deviation;
   }],
+  ['ledger.json', 'a changed Ledger record check', (contents) => {
+    contents.cases.find((item) => item.id === 'discovery-records-mixed').result.mismatched.pop();
+  }],
+  ['ledger.json', 'a changed Ledger record to check', (contents) => {
+    contents.cases.find((item) => item.id === 'discovery-records-mixed').records[0].addressCheck = 'matched';
+  }],
   ['ledger.json', 'a changed Ledger package version', (contents) => {
     contents.meta.packages['@ledgerhq/hw-app-eth'] = '7.10.0';
   }],
   ['ledger-grammar.json', 'a changed honest Ledger stream', (contents) => {
     contents.honest.find((item) => item.case === 'msg-live-126').apdus.pop();
+  }],
+  ['ledger-grammar.json', 'a changed honest Ledger record check', (contents) => {
+    contents.honest.find((item) => item.case === 'discovery-records-25').apdus.push(contents.honest.find((item) => item.case === 'discovery-records-25').apdus[2]);
   }],
   ['ledger-grammar.json', 'a changed Ledger forbidden APDU\'s rule', (contents) => {
     contents.forbidden.find((item) => item.rule === 'path').rule = 'payload';
@@ -1353,6 +1362,19 @@ test('check refuses a recorded Ledger APDU outside its grammar row', () => {
     fs.writeFileSync(file, narrowed);
   });
   assert.match(stderr, /AssertionError.*msg-live-125: APDU 1 isn't the grammar's \(sign\.message\)/);
+});
+
+test('check refuses a Ledger record check past the grammar\'s bound', () => {
+  // The grammar narrowed in the copy: discovery checks 19 records, so the
+  // 20-record case's stream differs from the core's by check-bound.
+  const stderr = damagedCheck((copy) => {
+    const file = path.join(copy, 'generator/ledger-grammar.js');
+    const source = fs.readFileSync(file, 'utf8');
+    const narrowed = source.replace('const MAX_CHECKS = 20;', 'const MAX_CHECKS = 19;');
+    assert.notEqual(narrowed, source, 'the check\'s bound moved');
+    fs.writeFileSync(file, narrowed);
+  });
+  assert.match(stderr, /Byte mismatch: ledger\.json/);
 });
 
 test('check takes the Ledger vectors from the swarm reference, at its pinned commit', () => {

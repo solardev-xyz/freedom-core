@@ -117,6 +117,10 @@ pub enum ErrorCode {
     KeyStoreUnavailable,
     /// The user cancelled the OS key store's prompt (design 0013, API).
     KeyStoreCancelled,
+    /// A Ledger operation ended without a result (design 0016, API,
+    /// "Errors"): `data.ledger` is its `LEDGER_*` code, today's or one of
+    /// the new ones, for which main shows `errors.js`'s text.
+    DeviceFailed,
 }
 
 /// The `error` member of a response: a closed shape, so a member it
@@ -178,6 +182,19 @@ mod tests {
                 Some(code)
             );
         }
+    }
+
+    #[test]
+    fn device_failed_on_the_wire() {
+        // Design 0016, API: a device's failure, its code in `data.ledger`.
+        assert_eq!(
+            serde_json::to_value(ErrorCode::DeviceFailed).ok(),
+            Some(serde_json::Value::from("device_failed"))
+        );
+        assert_eq!(
+            serde_json::from_value::<ErrorCode>("device_failed".into()).ok(),
+            Some(ErrorCode::DeviceFailed)
+        );
     }
 
     #[test]

@@ -12,7 +12,8 @@ const headerOf = (h) => h.slice(0, 8);
 
 // The rows, as the design's table has them.
 const ROWS = [
-  { row: 'ledger.accounts', apdus: [{ header: 'e0020000', data: 'P(path_k)', times: 'c, 1 to 20' }], from: "the scheme's paths for start … start + c − 1", waits: false },
+  { row: 'ledger.accounts', apdus: [{ header: 'e0020000', data: 'P(path_k)', times: 'c, 1 to 20' }, { header: 'e0020000', data: 'P(path_j)', times: 'r, 0 to 20' }],
+    from: "the scheme's paths for start … start + c − 1; then the path of each Ledger record no device has matched (unchecked or mismatched), in the wallet list's order, at most 20 (D1)", waits: false },
   { row: 'ledger.add', apdus: [{ header: 'e0020100', data: 'P', times: 1 }], from: 'the path asked (question 3)', waits: true },
   { row: 'signature.first', apdus: [{ header: 'e0020000', data: 'P', times: 1 }], from: "the record's path", waits: false },
   { row: 'signature.second', apdus: [{ header: 'b0010000', data: '', times: 1 }], from: '—', waits: false },
@@ -28,7 +29,8 @@ const ROWS = [
   { row: 'sign.typed_data.sign', apdus: [{ header: 'e00c0001', data: 'P', times: 1 }], from: "the record's path", waits: true },
   { row: 'hash-only', apdus: [{ header: 'e00c0000', data: 'P ‖ domainSeparator ‖ hashStruct(message)', times: 1 }],
     from: "fc-evm's hashes of the bound typed data; only after 6D00 answered the operation's first E0 1A and main answered hash_only: \"shown\"", waits: true },
-  { row: 'safe.sign_owner', apdus: 'as sign.typed_data, over the core\'s SafeTx or SafeMessage', from: 'the approved SafeTx or SafeMessage, which main derives from its own record', waits: true },
+  { row: 'safe.sign_owner', apdus: 'as sign.typed_data, over the core\'s SafeTx', from: 'the approved SafeTx, which main derives from its own record', waits: true },
+  { row: 'safe.message_sign', apdus: 'as sign.typed_data, over the core\'s SafeMessage', from: 'the session\'s SafeMessage, which main derives from the page\'s request it holds', waits: true },
 ];
 
 const RULES = {
@@ -82,13 +84,19 @@ function streams(env, c, recorded) {
   switch (c.operation) {
     case 'ledger.accounts': {
       const { scheme, start, count } = c.request;
-      design(() => g.accountsStream(c.request));
+      // Then the check (D1): the records' paths, as the core reads them and
+      // as account-checks.js does, every one in a second session.
+      const paths = g.checkedPaths(recorded.records);
+      const check = g.checkStream(paths);
+      design(() => [...g.accountsStream(c.request), ...check.apdus]);
+      for (const deviation of check.skipped) needs.add(deviation);
       reference = [];
       for (let k = 0; k < count; k++) {
         const p = refPath(g.SCHEMES[scheme](start + k));
         if (!p) break;
         reference.push(g.apdu(0xe0, 0x02, 0x00, 0x00, p));
       }
+      if (reference.length === count) for (const p of paths) reference.push(g.apdu(0xe0, 0x02, 0x00, 0x00, refPath(p)));
       break;
     }
     case 'ledger.add': {
@@ -184,7 +192,9 @@ function checkCase(env, c, recorded) {
   if (fault && !(fault.status === 0x6d00 && c.operation === 'sign.typed_data' && fault.at >= 1)) limit = Math.min(limit, fault.at + 1);
   assert.ok(got.length <= limit, `${c.id}: ${got.length} APDUs where the grammar has at most ${limit}`);
   got.forEach((apdu, i) => assert.equal(apdu, want[i], `${c.id}: APDU ${i} isn't the grammar's (${rowOf(c.operation, headerOf(apdu), i)})`));
-  if (recorded.result.status === 'success') {
+  // A fault in discovery's check ends the check, not discovery (D1).
+  const checkFault = fault && c.operation === 'ledger.accounts' && fault.at >= c.request.count;
+  if (recorded.result.status === 'success' && !checkFault) {
     assert.equal(got.length, want.length, `${c.id}: it signed before the grammar's last APDU`);
   } else if (!fault && got.length < want.length) {
     // An operation that stopped early: on a fault in an answer, a too-long
@@ -201,6 +211,15 @@ function checkCase(env, c, recorded) {
   if (needs.has('field-pieces')) {
     const at = firstDifference(honest, reference).at;
     if (got.length <= at) needs.delete('field-pieces');
+  }
+  // A record the core doesn't read, which the reference reads where the
+  // run stopped before it.
+  if (c.operation === 'ledger.accounts' && honest && (needs.has('check-bound') || needs.has('path-strict'))) {
+    const diff = firstDifference(honest, reference);
+    if (!diff || got.length <= diff.at) {
+      needs.delete('check-bound');
+      needs.delete('path-strict');
+    }
   }
   const marks = new Set([c.deviation, ...(c.also || [])].filter(Boolean));
   if (!c.markless) for (const need of needs) assert.ok(marks.has(need), `${c.id}: differs from the honest stream by ${need}, which it doesn't mark`);
@@ -427,7 +446,8 @@ function buildGrammarFile(env, meta, recorded, x402Other) {
       const row = rowOf(c.operation, headerOf(h), i);
       assert.ok(row, `${c.id}: APDU ${i} in no row`);
       reached[row] += 1;
-      if (c.id === 'typed-safe-tx' || c.id === 'typed-safe-message') reached['safe.sign_owner'] += 1;
+      if (c.id === 'typed-safe-tx') reached['safe.sign_owner'] += 1;
+      if (c.id === 'typed-safe-message') reached['safe.message_sign'] += 1;
     });
     honest.push({ case: c.id, operation: c.operation, apdus: stream });
   }
@@ -472,6 +492,24 @@ function buildGrammarFile(env, meta, recorded, x402Other) {
       const header = c.operation === 'ledger.add' ? [0xe0, 0x02, 0x01, 0x00] : [0xe0, 0x02, 0x00, 0x00];
       push({ case: id, rule: 'path', at: 0, apdu: hexOf(Buffer.concat([Buffer.from(header), Buffer.from([bytes.length]), bytes])), what });
     }
+  }
+  // Discovery's check (D1): at the first check's place, the path of a record
+  // a device matched (which the check doesn't read), the display on, and the
+  // second record's check; one after the last record's, and a 21st.
+  {
+    const id = 'discovery-records-mixed';
+    const stream = honestOf(id);
+    const { c } = byId.get(id);
+    const at = c.request.count;
+    const read = (p) => hexOf(g.apdu(0xe0, 0x02, 0x00, 0x00, g.schemePath(p)));
+    const matched = c.meta.derivedWallets.find((w) => w.type === 'ledger' && w.addressCheck === 'matched').path;
+    push({ case: id, rule: 'path', at, apdu: read(matched), what: 'the path of a record a device matched, which the check doesn\'t read' });
+    push({ case: id, rule: 'header', at, apdu: hexOf(Buffer.concat([Buffer.from([0xe0, 0x02, 0x01, 0x00]), stream[at].subarray(4)])), what: 'the first record\'s check with the display on' });
+    push({ case: id, rule: 'order', at, apdu: hexOf(stream[at + 1]), what: 'the second record\'s check in the first\'s place' });
+    push({ case: id, rule: 'ended', at: stream.length, apdu: read(matched), what: 'a check after the last record\'s' });
+    const { c: many, run } = byId.get('discovery-records-25');
+    const past = g.checkedPaths(run.records)[g.MAX_CHECKS];
+    push({ case: many.id, rule: 'ended', at: honestOf(many.id).length, apdu: read(past), what: 'a 21st record\'s check (check-bound)' });
   }
   // A parent that isn't a Ledger operation: the right APDU for a vault account's signature.
   push({ case: 'msg-steps', rule: 'parent', parent: { method: 'sign.message', key: { kind: 'account', index: 0 } }, at: 0, apdu: honestOf('msg-steps').map(hexOf)[0],
@@ -566,8 +604,8 @@ function buildGrammarFile(env, meta, recorded, x402Other) {
 const GRAMMAR_FORMATS = {
   apdu: 'lowercase hex, CLA INS P1 P2 Lc data; Lc is the data\'s length, at most 255 (ledger.json\'s APDUs are hw-transport\'s framing of hw-app-eth\'s sends).',
   rows: 'design 0016\'s rows in order: each APDU\'s header, its data, how many, where its bytes come from, and whether it waits for the user.',
-  checked: 'every APDU ledger.json records was checked against its row: the stream the design predicts for the case (honest, with the case\'s deviations applied as the design describes the reference: no B0 01 for a transaction or a message, app-check; E0 02 00 00 for ledger.add, address-from-device; hw-app-eth\'s cut, count and UTF-16 name lengths, field-pieces, device-bounds and name-ascii; the hash-only APDU after any 6D00 of signEIP712Message, blind-typed-data; nothing past the address check for a type 2 at a chain ID of 2^53 or more, chain-id-width; hw-app-eth\'s splitPath, path-strict), up to where the case stopped, and every deviation that makes it differ is marked on the case. `reached`: the honest APDUs of each row.',
-  honest: 'each complete operation\'s stream as the core sends it (ledger.json\'s case `case`), which main\'s relay admits; for a hash-only case, through the 6D00 and the hash-only APDU.',
+  checked: 'every APDU ledger.json records was checked against its row: the stream the design predicts for the case (honest, with the case\'s deviations applied as the design describes the reference: no B0 01 for a transaction or a message, app-check; E0 02 00 00 for ledger.add, address-from-device; hw-app-eth\'s cut, count and UTF-16 name lengths, field-pieces, device-bounds and name-ascii; the hash-only APDU after any 6D00 of signEIP712Message, blind-typed-data; nothing past the address check for a type 2 at a chain ID of 2^53 or more, chain-id-width; hw-app-eth\'s splitPath, path-strict; every listed record\'s path read after discovery, where the core reads a scheme\'s path only, path-strict, and at most 20, check-bound), up to where the case stopped (a fault in discovery\'s check ends the check, not discovery), and every deviation that makes it differ is marked on the case. `reached`: the honest APDUs of each row.',
+  honest: 'each complete operation\'s stream as the core sends it (ledger.json\'s case `case`), which main\'s relay admits; for a hash-only case, through the 6D00 and the hash-only APDU; for discovery, its paths and then its check of the case\'s `records` (each one\'s path, a scheme\'s only, at most 20: D1).',
   refused: 'the cases the core refuses before the first APDU, by deviation.',
   forbidden: 'single APDUs main refuses with `rule`, each at position `at` of the case\'s honest stream (the APDUs before it as honest): `what` says what changed; `parent` the parent it names; `state` what main holds then.',
   same_shape: 'for each typed-data case the core sends, another schema and message of the same shape (every type and field name moved one letter on, EIP712Domain kept, every value another of the same encoded length) and its whole stream: the same headers and counts, other bytes, refused payload.',

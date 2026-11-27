@@ -47,6 +47,8 @@
     { "name": "sign.transaction", "callers": ["page", "chrome", "shell"], "mutates": false, "deadline_ms": "device" },
     { "name": "sign.message", "callers": ["page", "chrome", "shell"], "mutates": false, "deadline_ms": "device" },
     { "name": "sign.typed_data", "callers": ["page", "chrome", "shell"], "mutates": false, "deadline_ms": "device" },
+    { "name": "ledger.accounts", "callers": ["chrome", "shell"], "mutates": true, "deadline_ms": "device" },
+    { "name": "ledger.add", "callers": ["chrome", "shell"], "mutates": true, "deadline_ms": "device" },
     { "name": "swarm.sign_soc", "callers": ["page", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "typed_data.hash", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "naming.configure", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },

@@ -19,8 +19,8 @@
   "formats": {
     "apdu": "lowercase hex, CLA INS P1 P2 Lc data; Lc is the data's length, at most 255 (ledger.json's APDUs are hw-transport's framing of hw-app-eth's sends).",
     "rows": "design 0016's rows in order: each APDU's header, its data, how many, where its bytes come from, and whether it waits for the user.",
-    "checked": "every APDU ledger.json records was checked against its row: the stream the design predicts for the case (honest, with the case's deviations applied as the design describes the reference: no B0 01 for a transaction or a message, app-check; E0 02 00 00 for ledger.add, address-from-device; hw-app-eth's cut, count and UTF-16 name lengths, field-pieces, device-bounds and name-ascii; the hash-only APDU after any 6D00 of signEIP712Message, blind-typed-data; nothing past the address check for a type 2 at a chain ID of 2^53 or more, chain-id-width; hw-app-eth's splitPath, path-strict), up to where the case stopped, and every deviation that makes it differ is marked on the case. `reached`: the honest APDUs of each row.",
-    "honest": "each complete operation's stream as the core sends it (ledger.json's case `case`), which main's relay admits; for a hash-only case, through the 6D00 and the hash-only APDU.",
+    "checked": "every APDU ledger.json records was checked against its row: the stream the design predicts for the case (honest, with the case's deviations applied as the design describes the reference: no B0 01 for a transaction or a message, app-check; E0 02 00 00 for ledger.add, address-from-device; hw-app-eth's cut, count and UTF-16 name lengths, field-pieces, device-bounds and name-ascii; the hash-only APDU after any 6D00 of signEIP712Message, blind-typed-data; nothing past the address check for a type 2 at a chain ID of 2^53 or more, chain-id-width; hw-app-eth's splitPath, path-strict; every listed record's path read after discovery, where the core reads a scheme's path only, path-strict, and at most 20, check-bound), up to where the case stopped (a fault in discovery's check ends the check, not discovery), and every deviation that makes it differ is marked on the case. `reached`: the honest APDUs of each row.",
+    "honest": "each complete operation's stream as the core sends it (ledger.json's case `case`), which main's relay admits; for a hash-only case, through the 6D00 and the hash-only APDU; for discovery, its paths and then its check of the case's `records` (each one's path, a scheme's only, at most 20: D1).",
     "refused": "the cases the core refuses before the first APDU, by deviation.",
     "forbidden": "single APDUs main refuses with `rule`, each at position `at` of the case's honest stream (the APDUs before it as honest): `what` says what changed; `parent` the parent it names; `state` what main holds then.",
     "same_shape": "for each typed-data case the core sends, another schema and message of the same shape (every type and field name moved one letter on, EIP712Domain kept, every value another of the same encoded length) and its whole stream: the same headers and counts, other bytes, refused payload.",
@@ -37,9 +37,14 @@
           "header": "e0020000",
           "data": "P(path_k)",
           "times": "c, 1 to 20"
+        },
+        {
+          "header": "e0020000",
+          "data": "P(path_j)",
+          "times": "r, 0 to 20"
         }
       ],
-      "from": "the scheme's paths for start … start + c − 1",
+      "from": "the scheme's paths for start … start + c − 1; then the path of each Ledger record no device has matched (unchecked or mismatched), in the wallet list's order, at most 20 (D1)",
       "waits": false
     },
     {
@@ -182,8 +187,14 @@
     },
     {
       "row": "safe.sign_owner",
-      "apdus": "as sign.typed_data, over the core's SafeTx or SafeMessage",
-      "from": "the approved SafeTx or SafeMessage, which main derives from its own record",
+      "apdus": "as sign.typed_data, over the core's SafeTx",
+      "from": "the approved SafeTx, which main derives from its own record",
+      "waits": true
+    },
+    {
+      "row": "safe.message_sign",
+      "apdus": "as sign.typed_data, over the core's SafeMessage",
+      "from": "the session's SafeMessage, which main derives from the page's request it holds",
       "waits": true
     }
   ],
@@ -206,10 +217,10 @@
     "name_bytes": 255
   },
   "checked": {
-    "cases": 432,
-    "apdus": 4384,
+    "cases": 461,
+    "apdus": 4570,
     "reached": {
-      "ledger.accounts": 59,
+      "ledger.accounts": 139,
       "ledger.add": 3,
       "signature.first": 129,
       "signature.second": 129,
@@ -219,7 +230,8 @@
       "sign.typed_data.values": 1030,
       "sign.typed_data.sign": 80,
       "hash-only": 2,
-      "safe.sign_owner": 44
+      "safe.sign_owner": 31,
+      "safe.message_sign": 13
     }
   },
   "honest": [
@@ -328,6 +340,128 @@
       "operation": "ledger.accounts",
       "apdus": [
         "e002000011048000002c8000003c800000007fffffff"
+      ]
+    },
+    {
+      "case": "discovery-records-mixed",
+      "operation": "ledger.accounts",
+      "apdus": [
+        "e002000015058000002c8000003c800000000000000000000000",
+        "e002000015058000002c8000003c800000010000000000000000",
+        "e002000015058000002c8000003c800000000000000000000000",
+        "e002000015058000002c8000003c800000010000000000000000",
+        "e002000011048000002c8000003c8000000000000003",
+        "e002000011048000002c8000003c8000000000000005"
+      ]
+    },
+    {
+      "case": "discovery-records-all-matched",
+      "operation": "ledger.accounts",
+      "apdus": [
+        "e002000015058000002c8000003c800000000000000000000000",
+        "e002000015058000002c8000003c800000010000000000000000"
+      ]
+    },
+    {
+      "case": "discovery-records-20",
+      "operation": "ledger.accounts",
+      "apdus": [
+        "e002000015058000002c8000003c800000000000000000000000",
+        "e002000015058000002c8000003c800000010000000000000000",
+        "e002000015058000002c8000003c800000000000000000000000",
+        "e002000015058000002c8000003c800000010000000000000000",
+        "e002000015058000002c8000003c800000020000000000000000",
+        "e002000015058000002c8000003c800000030000000000000000",
+        "e002000015058000002c8000003c800000040000000000000000",
+        "e002000015058000002c8000003c800000050000000000000000",
+        "e002000015058000002c8000003c800000060000000000000000",
+        "e002000015058000002c8000003c800000070000000000000000",
+        "e002000015058000002c8000003c800000080000000000000000",
+        "e002000015058000002c8000003c800000090000000000000000",
+        "e002000015058000002c8000003c8000000a0000000000000000",
+        "e002000015058000002c8000003c8000000b0000000000000000",
+        "e002000015058000002c8000003c8000000c0000000000000000",
+        "e002000015058000002c8000003c8000000d0000000000000000",
+        "e002000015058000002c8000003c8000000e0000000000000000",
+        "e002000015058000002c8000003c8000000f0000000000000000",
+        "e002000015058000002c8000003c800000100000000000000000",
+        "e002000015058000002c8000003c800000110000000000000000",
+        "e002000015058000002c8000003c800000120000000000000000",
+        "e002000015058000002c8000003c800000130000000000000000"
+      ]
+    },
+    {
+      "case": "discovery-records-21",
+      "operation": "ledger.accounts",
+      "apdus": [
+        "e002000015058000002c8000003c800000000000000000000000",
+        "e002000015058000002c8000003c800000010000000000000000",
+        "e002000015058000002c8000003c800000000000000000000000",
+        "e002000015058000002c8000003c800000010000000000000000",
+        "e002000015058000002c8000003c800000020000000000000000",
+        "e002000015058000002c8000003c800000030000000000000000",
+        "e002000015058000002c8000003c800000040000000000000000",
+        "e002000015058000002c8000003c800000050000000000000000",
+        "e002000015058000002c8000003c800000060000000000000000",
+        "e002000015058000002c8000003c800000070000000000000000",
+        "e002000015058000002c8000003c800000080000000000000000",
+        "e002000015058000002c8000003c800000090000000000000000",
+        "e002000015058000002c8000003c8000000a0000000000000000",
+        "e002000015058000002c8000003c8000000b0000000000000000",
+        "e002000015058000002c8000003c8000000c0000000000000000",
+        "e002000015058000002c8000003c8000000d0000000000000000",
+        "e002000015058000002c8000003c8000000e0000000000000000",
+        "e002000015058000002c8000003c8000000f0000000000000000",
+        "e002000015058000002c8000003c800000100000000000000000",
+        "e002000015058000002c8000003c800000110000000000000000",
+        "e002000015058000002c8000003c800000120000000000000000",
+        "e002000015058000002c8000003c800000130000000000000000"
+      ]
+    },
+    {
+      "case": "discovery-records-25",
+      "operation": "ledger.accounts",
+      "apdus": [
+        "e002000015058000002c8000003c800000000000000000000000",
+        "e002000015058000002c8000003c800000010000000000000000",
+        "e002000015058000002c8000003c800000000000000000000000",
+        "e002000015058000002c8000003c800000010000000000000000",
+        "e002000015058000002c8000003c800000020000000000000000",
+        "e002000015058000002c8000003c800000030000000000000000",
+        "e002000015058000002c8000003c800000040000000000000000",
+        "e002000015058000002c8000003c800000050000000000000000",
+        "e002000015058000002c8000003c800000060000000000000000",
+        "e002000015058000002c8000003c800000070000000000000000",
+        "e002000015058000002c8000003c800000080000000000000000",
+        "e002000015058000002c8000003c800000090000000000000000",
+        "e002000015058000002c8000003c8000000a0000000000000000",
+        "e002000015058000002c8000003c8000000b0000000000000000",
+        "e002000015058000002c8000003c8000000c0000000000000000",
+        "e002000015058000002c8000003c8000000d0000000000000000",
+        "e002000015058000002c8000003c8000000e0000000000000000",
+        "e002000015058000002c8000003c8000000f0000000000000000",
+        "e002000015058000002c8000003c800000100000000000000000",
+        "e002000015058000002c8000003c800000110000000000000000",
+        "e002000015058000002c8000003c800000120000000000000000",
+        "e002000015058000002c8000003c800000130000000000000000"
+      ]
+    },
+    {
+      "case": "discovery-records-path-outside-schemes",
+      "operation": "ledger.accounts",
+      "apdus": [
+        "e002000015058000002c8000003c800000000000000000000000",
+        "e002000015058000002c8000003c800000010000000000000000",
+        "e002000015058000002c8000003c800000000000000000000000"
+      ]
+    },
+    {
+      "case": "discovery-records-core-fails",
+      "operation": "ledger.accounts",
+      "apdus": [
+        "e002000015058000002c8000003c800000000000000000000000",
+        "e002000015058000002c8000003c800000010000000000000000",
+        "e002000015058000002c8000003c800000010000000000000000"
       ]
     },
     {
@@ -4295,6 +4429,41 @@
       "at": 0,
       "apdu": "e002000019068000002c8000003c80000000000000000000000000000000",
       "what": "six elements"
+    },
+    {
+      "case": "discovery-records-mixed",
+      "rule": "path",
+      "at": 2,
+      "apdu": "e002000015058000002c8000003c800000020000000000000000",
+      "what": "the path of a record a device matched, which the check doesn't read"
+    },
+    {
+      "case": "discovery-records-mixed",
+      "rule": "header",
+      "at": 2,
+      "apdu": "e002010015058000002c8000003c800000000000000000000000",
+      "what": "the first record's check with the display on"
+    },
+    {
+      "case": "discovery-records-mixed",
+      "rule": "order",
+      "at": 2,
+      "apdu": "e002000015058000002c8000003c800000010000000000000000",
+      "what": "the second record's check in the first's place"
+    },
+    {
+      "case": "discovery-records-mixed",
+      "rule": "ended",
+      "at": 6,
+      "apdu": "e002000015058000002c8000003c800000020000000000000000",
+      "what": "a check after the last record's"
+    },
+    {
+      "case": "discovery-records-25",
+      "rule": "ended",
+      "at": 22,
+      "apdu": "e002000015058000002c8000003c800000140000000000000000",
+      "what": "a 21st record's check (check-bound)"
     },
     {
       "case": "msg-steps",

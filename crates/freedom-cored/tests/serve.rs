@@ -882,6 +882,8 @@ fn only_protocol_2_is_spoken() {
         "sign.transaction",
         "sign.message",
         "sign.typed_data",
+        "ledger.accounts",
+        "ledger.add",
         "swarm.sign_soc",
         "typed_data.hash",
         "naming.configure",

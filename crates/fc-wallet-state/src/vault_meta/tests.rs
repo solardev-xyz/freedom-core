@@ -484,3 +484,57 @@ fn new_vault_and_migration() {
         "Invalid time value"
     );
 }
+
+/// `getLedgerRecordsToCheck`: the Ledger records whose check state isn't
+/// `matched`, as `getWalletRecord` normalizes them, in the list's order; a
+/// record another of its index shadows is that one's, as the reference
+/// finds by index.
+#[test]
+fn ledger_records_to_check() {
+    let text = format!(
+        r#"{{"derivedWallets": [
+            {{"index": 0, "name": "Main"}},
+            {{"index": 1000000, "name": "Old", "address": "{A}", "type": "ledger", "path": "44'/60'/0'/0/0"}},
+            {{"index": 1000001, "name": "Seen", "address": "{B}", "type": "ledger", "path": "44'/60'/1'/0/0", "addressCheck": "matched"}},
+            {{"index": 1000002, "name": "Phone", "address": "{B}", "type": "remote", "addressCheck": "unchecked"}},
+            {{"index": 1000003, "name": "Off", "address": "{B}", "type": "ledger", "path": "44'/60'/3'/0/0", "addressCheck": "mismatched"}},
+            {{"index": 1000004, "name": "Odd", "type": "ledger", "addressCheck": "other"}},
+            {{"index": 1000005, "name": "Shadow", "address": "{A}", "type": "remote"}},
+            {{"index": 1000005, "name": "Shadowed", "address": "{B}", "type": "ledger", "path": "44'/60'/5'/0/0"}}
+        ]}}"#
+    );
+    let records = meta(&text).ledger_records_to_check();
+    let summary: Vec<(f64, String, Option<String>)> = records
+        .iter()
+        .map(|r| {
+            let index = match r.get("index") {
+                Some(JsValue::Number(n)) => *n,
+                _ => panic!("an index"),
+            };
+            let name = r.get("name").and_then(JsValue::as_str).unwrap().to_owned();
+            let check = r
+                .get("addressCheck")
+                .and_then(JsValue::as_str)
+                .map(str::to_owned);
+            (index, name, check)
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (1_000_000.0, "Old".into(), Some("unchecked".into())),
+            (1_000_003.0, "Off".into(), Some("mismatched".into())),
+            (1_000_004.0, "Odd".into(), Some("unchecked".into())),
+            // The ledger record's index finds the phone's record first.
+            (1_000_005.0, "Shadow".into(), Some("unchecked".into())),
+        ]
+    );
+    assert_eq!(records[0].get("path"), Some(&s("44'/60'/0'/0/0")));
+    assert_eq!(records[2].get("path"), None);
+    assert!(VaultMeta::none().ledger_records_to_check().is_empty());
+    assert!(
+        meta(r#"{"addresses": {}}"#)
+            .ledger_records_to_check()
+            .is_empty()
+    );
+}

@@ -43,6 +43,10 @@ fn context(case: &Value) -> Context {
                 ctx.paths
                     .push(LedgerPath::new(scheme, start + k).unwrap().encode());
             }
+            // Then the check of the records no device has matched (D1).
+            for (_, path) in checked_records(case) {
+                ctx.paths.push(path.encode());
+            }
         }
         "ledger.add" => {
             ctx.path = LedgerPath::parse(request["path"].as_str().unwrap())
@@ -217,8 +221,11 @@ fn every_apdu_matches_its_row_and_every_row_is_reached() {
             admitted += 1;
             if honest.contains_key(id) {
                 *reached.entry(row.to_owned()).or_default() += 1;
-                if id == "typed-safe-tx" || id == "typed-safe-message" {
+                if id == "typed-safe-tx" {
                     *reached.entry("safe.sign_owner".into()).or_default() += 1;
+                }
+                if id == "typed-safe-message" {
+                    *reached.entry("safe.message_sign".into()).or_default() += 1;
                 }
             }
         }
@@ -366,7 +373,7 @@ fn the_name_ascii_definitions_are_never_sent() {
 #[test]
 fn no_forbidden_apdu_is_the_cores_at_its_place() {
     let entries = grammar()["forbidden"].as_array().unwrap();
-    assert_eq!(entries.len(), 147);
+    assert_eq!(entries.len(), 152);
     for entry in entries {
         let id = entry["case"].as_str().unwrap();
         let ours = clean(case(id)).unwrap().0;

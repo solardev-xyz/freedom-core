@@ -111,6 +111,60 @@ function typedCase(ethers, id, family, typedData, record, extra = {}) {
   return { id, family, operation: 'sign.typed_data', record, request: { typed_data: typedData, expected_hash: hash }, digest: hash, ...extra };
 }
 
+/** A vault-meta.json whose wallet list holds `records` after the main wallet. */
+function metaWith(env, records) {
+  const derivedWallets = [{ index: 0, name: 'Main Wallet' }, ...records.map((r, k) => ({ index: 1_000_000 + k, ...r }))];
+  return { addresses: { userWallet: env.account(0).address }, derivedWallets, activeWalletIndex: 0, nextHardwareWalletIndex: 1_000_000 + records.length };
+}
+
+/** An address no path of the device's holds: 0x…01, 0x…02, …, checksummed. */
+const planted = (ethers, k) => ethers.getAddress('0x' + (0xf000 + k).toString(16).padStart(40, '0'));
+
+/**
+ * Discovery with records: matched and not, the ones the check skips (a
+ * record a device matched, a phone's, one with no path), past 20 (the
+ * reference checks all, the core 20: check-bound), a path outside the
+ * schemes (path-strict), none to check, and the core's write failing.
+ */
+function recordCases(env) {
+  const { ethers } = env;
+  const at = (p) => ethers.HDNodeWallet.fromPhrase(env.mnemonic, '', `m/${p}`).address;
+  const live = (i) => `44'/60'/${i}'/0/0`;
+  const legacy = (i) => `44'/60'/0'/${i}`;
+  const ledger = (name, path, address, check) => ({ name, address, type: 'ledger', path, ...(check ? { addressCheck: check } : {}) });
+  const mixed = [
+    // Added before #1065: no check state, unchecked; the device holds it.
+    ledger('Ledger 1', LIVE0, at(LIVE0)),
+    // The chrome's word, which the device doesn't hold.
+    ledger('Planted', live(1), planted(ethers, 1), 'unchecked'),
+    // Matched by a device already: not read again.
+    ledger('Checked', live(2), at(live(2)), 'matched'),
+    // A phone's record: no Ledger check.
+    { name: 'Phone', address: planted(ethers, 2), type: 'remote', addressCheck: 'unchecked' },
+    // Mismatched once, held by this device, written in lower case.
+    ledger('Back', legacy(3), at(legacy(3)).toLowerCase(), 'mismatched'),
+    // No path: account-checks.js doesn't read it.
+    { name: 'No path', address: planted(ethers, 3), type: 'ledger', addressCheck: 'unchecked' },
+    // Mismatched, and still not this device's.
+    ledger('Still planted', legacy(5), planted(ethers, 4), 'mismatched'),
+  ];
+  // Every other one the device's.
+  const many = (n) => Array.from({ length: n }, (_, i) => ledger(`Ledger ${i + 1}`, live(i), i % 2 ? planted(ethers, 10 + i) : at(live(i))));
+  const request = { scheme: 'live', start: 0, count: 2 };
+  const discovery = (id, records, extra = {}) => ({ id, family: 'discovery', operation: 'ledger.accounts', request, meta: metaWith(env, records), ...extra });
+  return [
+    discovery('discovery-records-mixed', mixed),
+    discovery('discovery-records-all-matched', [ledger('Checked', live(2), at(live(2)), 'matched')]),
+    discovery('discovery-records-20', many(20)),
+    discovery('discovery-records-21', many(21)),
+    discovery('discovery-records-25', many(25)),
+    // A path outside the schemes, which the core never reads (path-strict).
+    discovery('discovery-records-path-outside-schemes', [ledger('Ledger 1', LIVE0, at(LIVE0)), ledger('Off', "44'/60'/0'/0/1", planted(ethers, 5))]),
+    // The core can't keep the result: the check fails, and discovery doesn't.
+    discovery('discovery-records-core-fails', [ledger('Planted', live(1), planted(ethers, 1))], { core: { fault: 'record' } }),
+  ];
+}
+
 /** The cases that need no earlier run. */
 function baseCases(env, toEthersTx) {
   const { ethers } = env;
@@ -126,6 +180,10 @@ function baseCases(env, toEthersTx) {
     ['legacy', 0, 20], ['live', 2147483643, 5], ['legacy', 2147483647, 1], ['live', 2147483647, 2]]) {
     add({ id: `discovery-${scheme}-${start}-${count}`, family: 'discovery', operation: 'ledger.accounts', request: { scheme, start, count } });
   }
+  // Discovery's check of the Ledger records no device has matched (#1065,
+  // design 0016's D1): each such record's path read after discovery, its
+  // result kept on the record, the ones the device doesn't hold returned.
+  for (const c of recordCases(env)) add(c);
 
   // Adding an account (identity-manager.js's addLedgerWallet, #1065).
   add({ id: 'add-live-0', family: 'add', operation: 'ledger.add', request: { name: 'Ledger 1', address: env.account(0).address, path: LIVE0 } });
@@ -279,6 +337,8 @@ function baseCases(env, toEthersTx) {
 // these cases, at its first place in the recorded stream.
 const STEP_BASES = {
   'discovery-live-0-2': [['address-0', (h, i) => i === 0], ['address-1', (h, i) => i === 1]],
+  // The check's first and last APDU: the check fails, discovery doesn't.
+  'discovery-records-mixed': [['check-first', (h, i) => i === 2], ['check-last', (h, i, all) => i === all.length - 1]],
   'add-live-0': [['address', (h) => h === 'e0020000']],
   'tx-steps': [['address', (h) => h === 'e0020000'], ['piece-first', (h) => h === 'e0040000'], ['piece-last', (h) => h === 'e0048000']],
   'msg-steps': [['address', (h) => h === 'e0020000'], ['piece-first', (h) => h === 'e0080000'], ['piece-last', (h) => h === 'e0088000']],
@@ -296,7 +356,7 @@ function stepCases(bases) {
     assert.ok(base, `no base case ${baseId}`);
     const headers = base.exchanges.map((e) => e.apdu.slice(0, 8));
     for (const [step, match] of steps) {
-      const at = headers.findIndex((h, i) => match(h, i));
+      const at = headers.findIndex((h, i) => match(h, i, headers));
       assert.ok(at >= 0, `${baseId} has no ${step}`);
       const inherit = (fault) => {
         const device = { ...(base.device || {}), fault };

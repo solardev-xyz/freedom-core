@@ -13,8 +13,8 @@ use common::*;
 use fc_evm::{Transaction, typed_data_parse};
 use fc_ledger::bounds::Bound;
 use fc_ledger::{
-    Cause, Failed, LedgerCode, LedgerPath, Operation, ProtocolFault, Refusal, Reply, Retained,
-    Scheme, SignatureFault, Signed, Step,
+    Cause, Failed, Lapse, LedgerCode, LedgerPath, Operation, ProtocolFault, Refusal, Reply,
+    Retained, Scheme, SignatureFault, Signed, Step,
 };
 use serde_json::{Value, json};
 
@@ -214,7 +214,9 @@ fn an_address_whose_text_isnt_its_keys() {
         let run = run_device(&mut op, &mut device);
         let other = *other_key().address().as_bytes();
         match (name, &run.done) {
-            ("discovery", Ok(Signed::Accounts(accounts))) => assert_eq!(accounts[0].address, other),
+            ("discovery", Ok(Signed::Accounts(found))) => {
+                assert_eq!(found.accounts[0].address, other)
+            }
             ("add", Ok(Signed::Added(account))) => assert_eq!(account.address, other),
             (_, _) => {
                 assert_eq!(code(&run), LedgerCode::WrongDevice, "{name}");
@@ -870,4 +872,202 @@ fn the_excluded_written_form_class_is_refused() {
         refused += 1;
     }
     assert_eq!(refused, 3);
+}
+
+/// Discovery with its check of two records (design 0016, D1): the scheme's
+/// paths, then each record's, display off.
+fn checking() -> (Operation, Vec<LedgerPath>) {
+    let paths = vec![
+        LedgerPath::new(Scheme::Legacy, 3).unwrap(),
+        LedgerPath::new(Scheme::Live, 5).unwrap(),
+    ];
+    let op = Operation::accounts(Scheme::Live, 0, 2)
+        .unwrap()
+        .checking(paths.clone())
+        .unwrap();
+    (op, paths)
+}
+
+#[test]
+fn discovery_reads_each_records_path_after_its_own() {
+    let (mut op, paths) = checking();
+    let run = run_device(&mut op, &mut Device::default());
+    let Ok(Signed::Accounts(found)) = &run.done else {
+        panic!("{:?}", run.done)
+    };
+    assert_eq!(run.apdus.len(), 4);
+    assert_eq!(run.confirms, [false; 4]);
+    for (apdu, path) in run.apdus[2..].iter().zip(&paths) {
+        assert_eq!(apdu[..4], [0xe0, 0x02, 0x00, 0x00]);
+        assert_eq!(apdu[5..], path.encode());
+    }
+    assert_eq!(found.accounts.len(), 2);
+    let want: Vec<[u8; 20]> = paths
+        .iter()
+        .map(|p| *key_at(p).address().as_bytes())
+        .collect();
+    assert_eq!(found.checks.as_ref().unwrap(), &want);
+    // No records: discovery's paths alone, and nothing checked.
+    let mut op = Operation::accounts(Scheme::Live, 0, 2)
+        .unwrap()
+        .checking(Vec::new())
+        .unwrap();
+    let run = run_device(&mut op, &mut Device::default());
+    assert_eq!(run.apdus.len(), 2);
+    match &run.done {
+        Ok(Signed::Accounts(found)) => assert_eq!(found.checks, Ok(Vec::new())),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// What goes wrong at one APDU of discovery with its check.
+#[derive(Debug, Clone, Copy)]
+enum CheckFault {
+    Status,
+    Failed,
+    Refused,
+    Unplugged,
+    Short,
+    KeyNotAddress,
+}
+
+/// Discovery with its check ([`checking`]), `fault` at APDU `at`.
+fn with_fault(fault: CheckFault, at: usize) -> Run {
+    let (mut op, _) = checking();
+    let mut device = Device::default();
+    device.fault = match fault {
+        CheckFault::Status => Some((at, Fault::Status(0x6985))),
+        CheckFault::Unplugged => Some((at, Fault::Disconnect)),
+        CheckFault::Short => Some((at, Fault::Short)),
+        CheckFault::KeyNotAddress => Some((at, Fault::KeyNotAddress)),
+        CheckFault::Failed | CheckFault::Refused => None,
+    };
+    run(&mut op, |index, apdu| {
+        let answer = device.answer(apdu);
+        match fault {
+            CheckFault::Failed if index == at => Owned::Failed(Failed::Unresponsive),
+            CheckFault::Refused if index == at => Owned::Refused,
+            _ => relay(index, apdu, answer),
+        }
+    })
+}
+
+/// A status, main's failure or refusal, an unplug or an answer out of form
+/// at a check's APDU ends the check, never discovery (`ipc.js:24–33`); at
+/// a discovery APDU it ends the operation, as before.
+#[test]
+fn a_failed_check_leaves_discovery_answered() {
+    for fault in [
+        CheckFault::Status,
+        CheckFault::Failed,
+        CheckFault::Refused,
+        CheckFault::Unplugged,
+        CheckFault::Short,
+        CheckFault::KeyNotAddress,
+    ] {
+        for at in 0..4 {
+            let run = with_fault(fault, at);
+            assert_eq!(run.apdus.len(), at + 1, "{fault:?} at {at}: nothing after");
+            if at < 2 {
+                assert!(run.done.is_err(), "{fault:?} at {at}: discovery fails");
+                continue;
+            }
+            let Ok(Signed::Accounts(found)) = run.done else {
+                panic!("{fault:?} at {at}: {:?}", run.done)
+            };
+            assert_eq!(found.accounts.len(), 2, "{fault:?} at {at}");
+            assert!(found.checks.is_err(), "{fault:?} at {at}");
+        }
+    }
+    // Another key with its own address isn't a failure: the device holds
+    // another address there, which the core compares with the record's.
+    let (mut op, _) = checking();
+    let mut device = Device::default();
+    device.fault = Some((3, Fault::OtherAddress));
+    let run = run_device(&mut op, &mut device);
+    let Ok(Signed::Accounts(found)) = run.done else {
+        panic!()
+    };
+    assert_eq!(found.checks.unwrap()[1], *other_key().address().as_bytes());
+}
+
+/// The caller's own end of an APDU (LDG-2's lane: no answer by its timer,
+/// or one that couldn't go) at a check's APDU ends the check, never
+/// discovery; at a discovery APDU, or in any other operation, it fails the
+/// operation with the caller's code. Either way the operation has ended.
+#[test]
+fn the_callers_own_end_of_a_check_leaves_discovery_answered() {
+    for lapse in [Lapse::NoAnswer, Lapse::Unsent] {
+        for at in 0..4 {
+            let (mut op, _) = checking();
+            let mut device = Device::default();
+            let mut step = op.start();
+            for index in 0..at {
+                let Step::Send(exchange) = step else {
+                    panic!("{lapse:?} at {at}: {step:?}")
+                };
+                let apdu = exchange.apdu.into_bytes();
+                step = op.answer(relay(index, &apdu, device.answer(&apdu)).as_reply());
+            }
+            assert!(matches!(step, Step::Send(_)), "{lapse:?} at {at}");
+            let done = op.lapsed(LedgerCode::Unresponsive, lapse);
+            let failure = if at < 2 {
+                done.unwrap_err()
+            } else {
+                let Ok(Signed::Accounts(found)) = done else {
+                    panic!("{lapse:?} at {at}: {done:?}")
+                };
+                assert_eq!(found.accounts.len(), 2, "{lapse:?} at {at}");
+                found.checks.unwrap_err()
+            };
+            assert_eq!(failure.code, LedgerCode::Unresponsive, "{lapse:?} at {at}");
+            assert_eq!(failure.cause, Cause::Lapsed(lapse), "{lapse:?} at {at}");
+            let late = op.answer(Reply::Failed(Failed::Unresponsive));
+            assert!(
+                matches!(&late, Step::Done(Err(f)) if f.cause == Cause::Protocol(ProtocolFault::Order)),
+                "{lapse:?} at {at}: {late:?}"
+            );
+        }
+    }
+    // Every other operation, at its first APDU.
+    for (name, make) in steps() {
+        let (mut op, _) = make();
+        assert!(matches!(op.start(), Step::Send(_)), "{name}");
+        let failure = op.lapsed(LedgerCode::Unknown, Lapse::Unsent).unwrap_err();
+        assert_eq!(failure.code, LedgerCode::Unknown, "{name}");
+        assert_eq!(failure.cause, Cause::Lapsed(Lapse::Unsent), "{name}");
+    }
+}
+
+#[test]
+fn discovery_checks_at_most_twenty_records() {
+    let paths = |n: u64| -> Vec<LedgerPath> {
+        (0..n)
+            .map(|i| LedgerPath::new(Scheme::Live, i).unwrap())
+            .collect()
+    };
+    let op = Operation::accounts(Scheme::Live, 0, 20).unwrap();
+    let mut op = op.checking(paths(20)).unwrap();
+    let run = run_device(&mut op, &mut Device::default());
+    assert_eq!(run.apdus.len(), 40);
+    assert!(
+        matches!(run.done, Ok(Signed::Accounts(ref found)) if found.checks.as_ref().unwrap().len() == 20)
+    );
+    let op = Operation::accounts(Scheme::Live, 0, 1).unwrap();
+    assert_eq!(refusal_of(op.checking(paths(21))), Refusal::Checks);
+    // Only discovery checks, and only before its first APDU.
+    let add = Operation::add(LedgerPath::new(Scheme::Live, 0).unwrap());
+    assert_eq!(refusal_of(add.checking(paths(1))), Refusal::Checks);
+    let mut started = Operation::accounts(Scheme::Live, 0, 1).unwrap();
+    assert!(matches!(started.start(), Step::Send(_)));
+    assert_eq!(refusal_of(started.checking(paths(1))), Refusal::Checks);
+    // What it holds counts the paths and what they read.
+    let bare = Operation::accounts(Scheme::Live, 0, 1).unwrap().retained();
+    let held = Operation::accounts(Scheme::Live, 0, 1)
+        .unwrap()
+        .checking(paths(20))
+        .unwrap()
+        .retained();
+    assert!(held.beyond > bare.beyond, "{held:?} {bare:?}");
+    assert_eq!(held.request, 0);
 }

@@ -22,7 +22,9 @@ use serde_json::Value;
 /// A case's end, as the vectors write it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum End {
-    Accounts(Vec<(String, String)>),
+    /// The accounts, and the indexes of the records the check found the
+    /// device doesn't hold.
+    Accounts(Vec<(String, String)>, Vec<u64>),
     Added(String, String),
     Raw(String),
     Signature(String),
@@ -41,7 +43,16 @@ fn recorded_end(case: &Value) -> End {
         )
     };
     if let Some(accounts) = result.get("accounts") {
-        return End::Accounts(accounts.as_array().unwrap().iter().map(pair).collect());
+        let mismatched = result["mismatched"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["index"].as_u64().unwrap())
+            .collect();
+        return End::Accounts(
+            accounts.as_array().unwrap().iter().map(pair).collect(),
+            mismatched,
+        );
     }
     if let Some(wallet) = result.get("wallet") {
         let (path, address) = pair(wallet);
@@ -58,19 +69,44 @@ fn recorded_end(case: &Value) -> End {
     End::Signature(payload["payload"]["signature"].as_str().unwrap().to_owned())
 }
 
-fn core_end(done: &Result<Signed, fc_ledger::Failure>) -> End {
+fn core_end(case: &Value, done: &Result<Signed, fc_ledger::Failure>) -> End {
     match done {
-        Ok(Signed::Accounts(accounts)) => End::Accounts(
-            accounts
+        Ok(Signed::Accounts(found)) => End::Accounts(
+            found
+                .accounts
                 .iter()
                 .map(|a| (a.path.to_string(), checksum_address(&a.address)))
                 .collect(),
+            mismatched(case, &found.checks),
         ),
         Ok(Signed::Added(a)) => End::Added(a.path.to_string(), checksum_address(&a.address)),
         Ok(Signed::Transaction(tx)) => End::Raw(to_hex(&tx.raw)),
         Ok(Signed::Signature(signature)) => End::Signature(to_hex(signature)),
         Err(failure) => End::Code(failure.code.as_str().to_owned()),
     }
+}
+
+/// The records the check found the device doesn't hold, as the core keeps
+/// them: each checked record whose address, in lower case, isn't the
+/// device's (account-checks.js's comparison). None when the check failed,
+/// or when the core can't keep the results (`core.fault`).
+fn mismatched(case: &Value, checks: &Result<Vec<[u8; 20]>, fc_ledger::Failure>) -> Vec<u64> {
+    let Ok(addresses) = checks else {
+        return Vec::new();
+    };
+    if case.get("core").is_some() {
+        return Vec::new();
+    }
+    let records = checked_records(case);
+    assert_eq!(records.len(), addresses.len());
+    records
+        .iter()
+        .zip(addresses)
+        .filter(|((record, _), address)| {
+            record["address"].as_str().unwrap().to_lowercase() != to_hex(&address[..])
+        })
+        .map(|((record, _), _)| record["index"].as_u64().unwrap())
+        .collect()
 }
 
 fn marks(case: &Value) -> BTreeSet<String> {
@@ -243,7 +279,7 @@ fn every_case() {
             .iter()
             .map(|e| e["apdu"].as_str().unwrap())
             .collect();
-        let end = core_end(&run.done);
+        let end = core_end(case, &run.done);
         let mut want = recorded_end(case);
 
         // The stream.
@@ -275,7 +311,12 @@ fn every_case() {
         }
         // The core reads every answer the reference was sent, but where a
         // deviation ends it sooner.
+        // A record discovery's check doesn't read: the 21st on, or one
+        // outside the schemes, each listed last.
+        let unread = case["operation"] == "ledger.accounts"
+            && (marks.contains("check-bound") || marks.contains("path-strict"));
         let sooner = marks.contains("key-check")
+            || unread
             || marks.contains("blind-typed-data")
             || (marks.contains("app-check") && case["device"]["app"]["name"] != "Ethereum");
         if !replay.diverged && !replay.unopened {
@@ -337,6 +378,20 @@ fn every_case() {
             }
             want = end.clone();
         }
+        if unread && let End::Accounts(accounts, theirs) = &want {
+            // The reference's mismatched, but for the records the core
+            // doesn't read.
+            let read: Vec<u64> = checked_records(case)
+                .iter()
+                .map(|(record, _)| record["index"].as_u64().unwrap())
+                .collect();
+            let ours = theirs
+                .iter()
+                .copied()
+                .filter(|i| read.contains(i))
+                .collect();
+            want = End::Accounts(accounts.clone(), ours);
+        }
         if marks.contains("no-device") {
             // Main's failed: not_found, where the reference's NoDevice is
             // LEDGER_UNKNOWN.
@@ -345,7 +400,7 @@ fn every_case() {
         assert_eq!(end, want, "{id}");
         checked += 1;
     }
-    assert_eq!(checked, 432);
+    assert_eq!(checked, 461);
     // Every deviation of the file's list is marked where it says.
     for (deviation, entry) in ledger()["deviations"].as_object().unwrap() {
         let listed = entry["cases"].as_array().map_or(0, Vec::len);
