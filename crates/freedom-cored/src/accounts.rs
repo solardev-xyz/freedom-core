@@ -253,7 +253,7 @@ fn invalid() -> ErrorBody {
     ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters")
 }
 
-fn not_moved() -> ErrorBody {
+pub(crate) fn not_moved() -> ErrorBody {
     ErrorBody::new(
         ErrorCode::NotMoved,
         "main still writes vault-meta.json (vault_meta isn't in store_moved)",
@@ -952,6 +952,48 @@ impl Records {
                 .map_err(|message| ErrorBody::new(ErrorCode::InvalidArgument, message)),
         }
     }
+
+    /// A Ledger key's record ([`ledger_account`]): `invalid_argument` with
+    /// its message if account `index` has none a Ledger signs for.
+    pub fn ledger_account(&self, index: u32) -> Result<fc_ledger::Account, ErrorBody> {
+        match self {
+            Records::Pending => Err(storage("other")),
+            Records::Read(meta) => ledger_account(meta, index)
+                .map_err(|message| ErrorBody::new(ErrorCode::InvalidArgument, message)),
+        }
+    }
+}
+
+/// A Ledger key's refusal: account `index` has no Ledger record.
+pub const NOT_LEDGER: &str = "This account isn't a Ledger's (vault-meta.json)";
+/// A Ledger key's refusal: the record's path isn't one of the two schemes'
+/// forms (deviation `path-strict`), so no Ledger signs at it.
+pub const LEDGER_PATH: &str = "The Ledger account's path isn't one a Ledger signs at";
+/// A Ledger key's refusal: the record's address names no 20 bytes.
+pub const LEDGER_ADDRESS: &str = "The Ledger account's address can't be read";
+
+/// The record a Ledger key signs with (design 0016, "Accounts", D9):
+/// account `index`'s, whose `type` is `ledger`, its path one of the
+/// schemes' texts exactly ([`LedgerPath::parse`], deviation `path-strict`)
+/// and its address any form `isAddress` took when it was added, as
+/// `getAddress` reads it. The device's address at that path must be this
+/// one (`LEDGER_WRONG_DEVICE`), and every signature recovers to it.
+pub fn ledger_account(meta: &VaultMeta, index: u32) -> Result<fc_ledger::Account, &'static str> {
+    let record = meta.record(f64::from(index)).ok_or(NOT_LEDGER)?;
+    if record.get("type").and_then(JsValue::as_str) != Some("ledger") {
+        return Err(NOT_LEDGER);
+    }
+    let path = match record.get("path").and_then(JsValue::as_js_string) {
+        Some(text) if text.is_well_formed() => {
+            LedgerPath::parse(text.as_str()).map_err(|_| LEDGER_PATH)?
+        }
+        _ => return Err(LEDGER_PATH),
+    };
+    let address = record
+        .get("address")
+        .and_then(value_address_bytes)
+        .ok_or(LEDGER_ADDRESS)?;
+    Ok(fc_ledger::Account { path, address })
 }
 
 /// `getSigner`'s refusal of no record at a hardware index: a deleted

@@ -41,11 +41,40 @@
 //! as written. `sign.typed_data` signs only the digest the caller confirmed
 //! (`expected_hash`), and both typed-data methods refuse data whose signing
 //! reply, at the largest request ID, wouldn't fit one frame.
+//!
+//! **A Ledger key** (design 0016, "Accounts", API; LDG-2's L4), `{ kind:
+//! "ledger", index, path?, address? }`, signs `sign.transaction`,
+//! `sign.message` and `sign.typed_data` on the device lane, so each method
+//! is split in two:
+//! - **[`prepare`]** does everything a vault key's request does before its
+//!   key: the public work, then the record (D9: only once `vault_meta` is
+//!   moved, `not_moved` before; account `index`'s Ledger record, and a
+//!   `path` or `address` given must be the record's), then fc-ledger's
+//!   operation, which refuses what a Ledger can't carry
+//!   (`device_failed`, `LEDGER_TOO_LARGE`, `LEDGER_EMPTY_MESSAGE` or
+//!   `LEDGER_TYPE_NOT_CANONICAL`), then the authorization, checked and
+//!   spent as for a vault key (a presented token burnt however the request
+//!   ends, so a cancel finds it gone). A vault key then signs at once, as
+//!   before ([`Prepared::Now`]); a Ledger key's operation goes to the lane
+//!   with what the authorization does once signed ([`Prepared::Device`]).
+//! - **[`finish`]**, once the device's signature came back and fc-ledger
+//!   checked it (recovered against the record's address over the digest
+//!   the user confirmed): what the authorization does on a signature
+//!   ([`crate::approvals::Approvals::device_signed`]: a flagged
+//!   `dapp-send`'s rule written, a Safe approval checked again and fixed or
+//!   ended), and the reply, 0002's. A cancel or a failure on the device
+//!   ends the request with nothing returned, and the authorization does
+//!   nothing more.
+//!
+//! The vault isn't needed unlocked for a Ledger key, and no vault key is
+//! derived for one. [`handle`] signs with the vault's keys alone, for the
+//! callers that sign in one turn.
 
 use std::sync::OnceLock;
 
-use fc_evm::{Transaction, ViewRequest, checksum_address, parse_bytes, to_hex};
+use fc_evm::{SignedTransaction, Transaction, ViewRequest, checksum_address, parse_bytes, to_hex};
 use fc_keys::Secp256k1Key;
+use fc_ledger::{LedgerPath, Operation};
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::message::Context;
 use fc_vault::state::VaultState;
@@ -90,6 +119,99 @@ enum KeyRef {
     Account(u32),
     BeeWallet,
     Publisher(u32),
+}
+
+/// Which signers a call reaches: [`prepare`]'s, a Ledger's too; [`handle`]'s,
+/// the vault's alone, which refuses a Ledger key as an unknown kind.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Signers {
+    VaultOnly,
+    WithLedger,
+}
+
+/// A Ledger key reference (design 0016, "Accounts"): the record's index,
+/// and the path and address the caller says it has.
+struct LedgerKey {
+    index: u32,
+    path: Option<LedgerPath>,
+    address: Option<[u8; 20]>,
+}
+
+/// An account method's key.
+enum Signer {
+    Vault(KeyRef),
+    Ledger(LedgerKey),
+}
+
+/// How the signature is made once authorized.
+enum Signing {
+    /// The vault's key, derived for the one digest.
+    Vault(KeyRef),
+    /// The device's operation, on the lane.
+    Device(Operation),
+}
+
+/// A signing request, its public work done and its authorization checked.
+pub enum Prepared {
+    /// Its reply now: a vault key's signature, `typed_data.hash`'s or
+    /// `swarm.sign_soc`'s result, or a refusal.
+    Now(Result<Box<RawValue>, ErrorBody>),
+    /// A Ledger key's operation, for the device lane: [`finish`] answers
+    /// once the device signed.
+    Device(Box<Device>),
+}
+
+/// A Ledger key's request on its way to the device lane.
+pub struct Device {
+    /// fc-ledger's operation, built from the request and the record.
+    pub operation: Operation,
+    /// What [`finish`] needs once it signed.
+    pub pending: Pending,
+}
+
+/// What a Ledger signature's reply needs once the device signed: what its
+/// authorization does then, and the reply's form.
+pub struct Pending {
+    after: After,
+    reply: Reply,
+}
+
+/// Its kinds alone: a view is request data, and a Safe approval's ID a
+/// credential, so neither is printed.
+impl std::fmt::Debug for Pending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let after = match self.after {
+            After::Nothing => "nothing",
+            After::Owner(_) => "owner",
+            After::Executor(_) => "executor",
+            After::Remember(_) => "remember",
+        };
+        let reply = match self.reply {
+            Reply::Transaction => "transaction",
+            Reply::Message => "message",
+            Reply::TypedData { .. } => "typed_data",
+        };
+        f.debug_struct("Pending")
+            .field("after", &after)
+            .field("reply", &reply)
+            .finish()
+    }
+}
+
+/// A Ledger signature's reply: 0002's for its method.
+enum Reply {
+    Transaction,
+    Message,
+    /// `sign.typed_data`'s, with the view of what was signed, as written.
+    TypedData {
+        view: String,
+    },
+}
+
+/// A request's end in this turn, or its device operation.
+enum Done {
+    Reply(Box<RawValue>),
+    Device(Box<Device>),
 }
 
 /// The params object, with exactly the given fields.
@@ -150,6 +272,98 @@ fn key_ref(value: &Value, allowed: Allowed) -> Result<KeyRef, ErrorBody> {
         (Allowed::AccountsOnly, _) => Err(invalid("this key can only sign single-owner chunks")),
         (Allowed::ChunkKeysOnly, _) => Err(invalid("account keys don't sign single-owner chunks")),
     }
+}
+
+/// An account method's `key`: a vault account's, or, where the call
+/// reaches one, a Ledger's.
+fn account_key(value: &Value, signers: Signers) -> Result<Signer, ErrorBody> {
+    if signers == Signers::WithLedger && value.get("kind").and_then(Value::as_str) == Some("ledger")
+    {
+        return ledger_key(value).map(Signer::Ledger);
+    }
+    key_ref(value, Allowed::AccountsOnly).map(Signer::Vault)
+}
+
+/// `{ kind: "ledger", index, path?, address? }`, exactly (design 0016,
+/// API): a path in one of the schemes' texts, an address in any form a
+/// record's may have.
+fn ledger_key(value: &Value) -> Result<LedgerKey, ErrorBody> {
+    let fields = object(value, &["kind", "index"], &["path", "address"])?;
+    let index = index(fields.get("index"))?;
+    let path = match fields.get("path") {
+        None => None,
+        Some(Value::String(text)) => Some(
+            LedgerPath::parse(text).map_err(|_| invalid("path: not a Ledger account's path"))?,
+        ),
+        Some(_) => return Err(invalid("path: expected a string")),
+    };
+    let address = match fields.get("address") {
+        None => None,
+        Some(Value::String(text)) => Some(
+            fc_wallet_state::address_bytes(text)
+                .ok_or_else(|| invalid("address: expected an address"))?,
+        ),
+        Some(_) => return Err(invalid("address: expected a string")),
+    };
+    Ok(LedgerKey {
+        index,
+        path,
+        address,
+    })
+}
+
+/// The record a Ledger key signs with (D9): `not_moved` before
+/// `vault_meta` is moved; account `index`'s Ledger record; and the `path`
+/// and `address` the caller gave, each the record's.
+fn ledger_record(checks: &Checks<'_>, key: &LedgerKey) -> Result<fc_ledger::Account, ErrorBody> {
+    let account = checks.approvals.ledger_account(key.index)?;
+    if key.path.as_ref().is_some_and(|path| *path != account.path) {
+        return Err(invalid("path: not the Ledger account's"));
+    }
+    if key
+        .address
+        .is_some_and(|address| address != account.address)
+    {
+        return Err(invalid("address: not the Ledger account's"));
+    }
+    Ok(account)
+}
+
+/// fc-ledger's refusal before the first APDU: what a Ledger can't carry
+/// is `device_failed` with its code (design 0016, API); anything else an
+/// invalid request.
+fn device_refusal(refusal: fc_ledger::Refusal) -> ErrorBody {
+    match refusal.code() {
+        Some(code) => crate::ledger::methods::device_failed(code),
+        None => invalid(refusal.to_string()),
+    }
+}
+
+/// How the request is signed, after its public work and before its
+/// authorization: a vault account's index the core's records give the
+/// vault ([`vault_account`]), or a Ledger's record and its operation,
+/// `build` given the record. The account's index, for the authorization.
+fn signing(
+    checks: &Checks<'_>,
+    signer: Signer,
+    build: impl FnOnce(fc_ledger::Account) -> Result<Operation, fc_ledger::Refusal>,
+) -> Result<(u32, Signing), ErrorBody> {
+    match signer {
+        Signer::Vault(key) => Ok((vault_account(checks, key)?, Signing::Vault(key))),
+        Signer::Ledger(key) => {
+            let account = ledger_record(checks, &key)?;
+            let operation = build(account).map_err(device_refusal)?;
+            Ok((key.index, Signing::Device(operation)))
+        }
+    }
+}
+
+/// A Ledger key's request, authorized, for the lane.
+fn device(operation: Operation, after: After, reply: Reply) -> Done {
+    Done::Device(Box::new(Device {
+        operation,
+        pending: Pending { after, reply },
+    }))
 }
 
 /// Derives the key now; it wipes on drop.
@@ -363,28 +577,111 @@ fn authorize(
     }
 }
 
-/// Handles one of [`METHODS`]; returns the JSON result, as written.
+/// Handles one of [`METHODS`] with the vault's keys alone: the JSON
+/// result, as written. A Ledger key is an unknown kind here, refused
+/// before anything is spent; [`prepare`] reaches one.
 pub fn handle(
     state: &VaultState,
     checks: &mut Checks<'_>,
     method: &str,
     params: Option<&str>,
 ) -> Result<Box<RawValue>, ErrorBody> {
+    match run(state, checks, method, params, Signers::VaultOnly) {
+        Prepared::Now(result) => result,
+        Prepared::Device(_) => Err(crate::vault::internal()),
+    }
+}
+
+/// Handles one of [`METHODS`] as far as this turn goes (design 0016, L4):
+/// a vault key's request to its end, as [`handle`] does; a Ledger key's
+/// to its operation for the device lane, authorized, which [`finish`]
+/// answers once the device signed.
+pub fn prepare(
+    state: &VaultState,
+    checks: &mut Checks<'_>,
+    method: &str,
+    params: Option<&str>,
+) -> Prepared {
+    run(state, checks, method, params, Signers::WithLedger)
+}
+
+fn run(
+    state: &VaultState,
+    checks: &mut Checks<'_>,
+    method: &str,
+    params: Option<&str>,
+    signers: Signers,
+) -> Prepared {
     // Numbers as JSON.parse reads them: typed data must hash the integer
     // ethers signs and the approval UI shows (#87).
-    let params: Value =
-        fc_evm::parse_json(params.unwrap_or("{}")).map_err(|_| invalid("Invalid parameters"))?;
+    let Ok(params) = fc_evm::parse_json(params.unwrap_or("{}")) else {
+        return Prepared::Now(Err(invalid("Invalid parameters")));
+    };
     // A presented token is burnt however the request ends (design 0012,
-    // "Tokens"): one the check spent is already gone.
+    // "Tokens"): one the check spent is already gone, a Ledger key's
+    // included, before its operation reaches the lane.
     let presented = AUTHORIZED
         .contains(&method)
         .then(|| crate::approvals::presented_token(&params, true))
         .flatten();
-    let result = handle_parsed(state, checks, method, &params);
+    let result = handle_parsed(state, checks, method, &params, signers);
     if let Some(token) = presented {
         checks.approvals.burn(&token);
     }
+    match result {
+        Ok(Done::Reply(result)) => Prepared::Now(Ok(result)),
+        Ok(Done::Device(device)) => Prepared::Device(device),
+        Err(error) => Prepared::Now(Err(error)),
+    }
+}
+
+/// A Ledger key's request, once the device's signature came back and
+/// fc-ledger checked it (design 0016, "Answers the core checks"): what the
+/// authorization does on a signature, checked again where it is a Safe
+/// approval's ([`Approvals::device_signed`]), then 0002's reply. A refusal
+/// there returns nothing of the signature.
+pub fn finish(
+    approvals: &mut Approvals,
+    clocks: Clocks,
+    pending: Pending,
+    signed: fc_ledger::Signed,
+) -> Result<Box<RawValue>, ErrorBody> {
+    let Pending { after, reply } = pending;
+    match (reply, signed) {
+        (Reply::Transaction, fc_ledger::Signed::Transaction(signed)) => {
+            let rule = approvals.device_signed(after, clocks)?;
+            raw(&transaction_result(&signed, rule))
+        }
+        (Reply::Message, fc_ledger::Signed::Signature(signature)) => {
+            approvals.device_signed(after, clocks)?;
+            raw(&json!({ "signature": to_hex(&signature) }))
+        }
+        (Reply::TypedData { view }, fc_ledger::Signed::Signature(signature)) => {
+            approvals.device_signed(after, clocks)?;
+            typed_reply(&signature, view)
+        }
+        // An operation ends with its own kind of result.
+        _ => Err(crate::vault::internal()),
+    }
+}
+
+/// `sign.transaction`'s result: the signed transaction, and what became of
+/// a flagged `dapp-send`'s rule.
+fn transaction_result(signed: &SignedTransaction, rule: Option<Value>) -> Value {
+    let mut result = json!({ "raw": to_hex(&signed.raw), "hash": to_hex(&signed.hash) });
+    if let Some(rule) = rule {
+        result["rule"] = rule;
+    }
     result
+}
+
+/// `sign.typed_data`'s result: the signature and the view, as written.
+fn typed_reply(signature: &[u8; 65], view: String) -> Result<Box<RawValue>, ErrorBody> {
+    let view = view_value(view)?;
+    raw(&SignedView {
+        signature: to_hex(signature),
+        view: &view,
+    })
 }
 
 fn handle_parsed(
@@ -392,7 +689,8 @@ fn handle_parsed(
     checks: &mut Checks<'_>,
     method: &str,
     params: &Value,
-) -> Result<Box<RawValue>, ErrorBody> {
+    signers: Signers,
+) -> Result<Done, ErrorBody> {
     if AUTHORIZED.contains(&method) {
         crate::approvals::page_context(checks.context)?;
     }
@@ -403,7 +701,7 @@ fn handle_parsed(
                 &["key", "typed_data", "expected_hash"],
                 &["primary_type", "chain_id", "authorization"],
             )?;
-            let key = key_ref(&fields["key"], Allowed::AccountsOnly)?;
+            let signer = account_key(&fields["key"], signers)?;
             let expected: [u8; 32] = parse_bytes(string(fields, "expected_hash")?, "expected_hash")
                 .map_err(evm_error)?
                 .try_into()
@@ -416,7 +714,10 @@ fn handle_parsed(
                     "typed data hash is not the confirmed one (expected_hash)",
                 ));
             }
-            let account = vault_account(checks, key)?;
+            let (domain, types, message) = typed_data(&fields["typed_data"])?;
+            let (account, signing) = signing(checks, signer, |account| {
+                Operation::sign_typed_data(account, domain, types, message, &hashed.hash)
+            })?;
             let after = authorize(
                 checks,
                 fields,
@@ -427,13 +728,16 @@ fn handle_parsed(
                     view: &hashed,
                 },
             )?;
+            let key = match signing {
+                Signing::Device(operation) => {
+                    let reply = Reply::TypedData { view: hashed.view };
+                    return Ok(device(operation, after, reply));
+                }
+                Signing::Vault(key) => key,
+            };
             let signature = sign_with(state, key, &hashed.hash)?;
             let _ = checks.approvals.signed(after, checks.clocks);
-            let view = view_value(hashed.view)?;
-            raw(&SignedView {
-                signature: to_hex(&signature),
-                view: &view,
-            })
+            typed_reply(&signature, hashed.view).map(Done::Reply)
         }
         "typed_data.hash" => {
             let fields = object(params, &["typed_data"], &["primary_type", "chain_id"])?;
@@ -443,8 +747,9 @@ fn handle_parsed(
                 hash: to_hex(&hashed.hash),
                 view: &view,
             })
+            .map(Done::Reply)
         }
-        _ => other(state, checks, method, params).and_then(|result| raw(&result)),
+        _ => other(state, checks, method, params, signers),
     }
 }
 
@@ -454,14 +759,17 @@ fn other(
     checks: &mut Checks<'_>,
     method: &str,
     params: &Value,
-) -> Result<Value, ErrorBody> {
+    signers: Signers,
+) -> Result<Done, ErrorBody> {
     match method {
         "sign.transaction" => {
             let fields = object(params, &["key", "tx"], &["authorization"])?;
-            let key = key_ref(&fields["key"], Allowed::AccountsOnly)?;
+            let signer = account_key(&fields["key"], signers)?;
             let tx = Transaction::from_json(&fields["tx"]).map_err(evm_error)?;
             let prepared = tx.prepare().map_err(evm_error)?;
-            let account = vault_account(checks, key)?;
+            let (account, signing) = signing(checks, signer, |account| {
+                Operation::sign_transaction(account, &tx)
+            })?;
             let after = authorize(
                 checks,
                 fields,
@@ -471,22 +779,26 @@ fn other(
                     tx: &tx,
                 },
             )?;
+            let key = match signing {
+                Signing::Device(operation) => {
+                    return Ok(device(operation, after, Reply::Transaction));
+                }
+                Signing::Vault(key) => key,
+            };
             let signature = sign_with(state, key, &prepared.digest())?;
             // A flagged `dapp-send`'s rule, written as it signs (design
             // 0012, `token-remember`): the reply says what became of it.
             let rule = checks.approvals.signed(after, checks.clocks);
             let signed = prepared.finish(&signature).map_err(evm_error)?;
-            let mut result = json!({ "raw": to_hex(&signed.raw), "hash": to_hex(&signed.hash) });
-            if let Some(rule) = rule {
-                result["rule"] = rule;
-            }
-            Ok(result)
+            raw(&transaction_result(&signed, rule)).map(Done::Reply)
         }
         "sign.message" => {
             let fields = object(params, &["key", "message"], &["authorization"])?;
-            let key = key_ref(&fields["key"], Allowed::AccountsOnly)?;
+            let signer = account_key(&fields["key"], signers)?;
             let message = parse_bytes(string(fields, "message")?, "message").map_err(evm_error)?;
-            let account = vault_account(checks, key)?;
+            let (account, signing) = signing(checks, signer, |account| {
+                Operation::sign_message(account, message.clone())
+            })?;
             let after = authorize(
                 checks,
                 fields,
@@ -496,9 +808,15 @@ fn other(
                     bytes: &message,
                 },
             )?;
+            let key = match signing {
+                Signing::Device(operation) => {
+                    return Ok(device(operation, after, Reply::Message));
+                }
+                Signing::Vault(key) => key,
+            };
             let signature = sign_with(state, key, &fc_evm::eip191_digest(&message))?;
             let _ = checks.approvals.signed(after, checks.clocks);
-            Ok(json!({ "signature": to_hex(&signature) }))
+            raw(&json!({ "signature": to_hex(&signature) })).map(Done::Reply)
         }
         "swarm.sign_soc" => {
             let fields = object(
@@ -541,13 +859,14 @@ fn other(
                 (signature, fc_evm::address_of(derived.signing_key()))
             };
             let signed = prepared.finish(signature, owner);
-            Ok(json!({
+            raw(&json!({
                 "signature": to_hex(&signed.signature),
                 "owner": checksum_address(&signed.owner),
                 "chunk_address": to_hex(&signed.chunk_address),
                 "soc_address": to_hex(&signed.soc_address),
                 "span": signed.span.to_string(),
             }))
+            .map(Done::Reply)
         }
         _ => Err(invalid("unknown method")),
     }

@@ -1476,6 +1476,35 @@ impl Approvals {
         }
     }
 
+    /// A Ledger's signature came back, checked, after its authorization
+    /// was (design 0016, "Approvals: enforced"): [`Approvals::signed`],
+    /// but a Safe approval is checked again first, since the device took
+    /// time the vault's one turn doesn't. An owner's signature is used only
+    /// while its approval is open and its SafeTx fixed to none or this one
+    /// (which it then fixes); the executor's only while its approval is
+    /// open (which it then ends). Otherwise the signature isn't used:
+    /// `not_authorized`, `unknown_token` (the approval ended since) or
+    /// `mismatch` (another owner fixed another SafeTx since).
+    pub fn device_signed(
+        &mut self,
+        after: After,
+        clocks: Clocks,
+    ) -> Result<Option<Value>, ErrorBody> {
+        match after {
+            After::Owner(check) => self
+                .safes
+                .owner_signed_later(check)
+                .map(|()| None)
+                .map_err(safe_refusal),
+            After::Executor(check) => self
+                .safes
+                .executor_signed_later(check)
+                .map(|()| None)
+                .map_err(safe_refusal),
+            after => Ok(self.signed(after, clocks)),
+        }
+    }
+
     /// Burns a presented token: for a request that ended before its
     /// authorization was checked. A spent token is already gone.
     pub fn burn(&mut self, token: &str) {
@@ -1986,6 +2015,16 @@ impl Approvals {
         match &self.records {
             Some(records) => records.vault_signs(index),
             None => Ok(()),
+        }
+    }
+
+    /// The record a Ledger key signs with (design 0016, D9): only once
+    /// `vault_meta` is moved, `not_moved` before; then account `index`'s
+    /// Ledger record ([`crate::accounts::ledger_account`]).
+    pub(crate) fn ledger_account(&self, index: u32) -> Result<fc_ledger::Account, ErrorBody> {
+        match &self.records {
+            Some(records) => records.ledger_account(index),
+            None => Err(crate::accounts::not_moved()),
         }
     }
 
