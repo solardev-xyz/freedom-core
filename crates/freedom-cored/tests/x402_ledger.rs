@@ -92,7 +92,11 @@ fn vector_nonce() -> String {
         .unwrap()
         .to_owned();
     for form in FORMS {
-        assert_eq!(device::case(form)["x402"]["nonce"], nonce.as_str(), "{form}");
+        assert_eq!(
+            device::case(form)["x402"]["nonce"],
+            nonce.as_str(),
+            "{form}"
+        );
     }
     nonce
 }
@@ -306,7 +310,10 @@ fn call(core: &mut Core, id: &mut u64, method: &str, params: Value) -> Value {
         "type": "request", "id": *id, "method": method, "params": params, "context": shell(),
     }));
     let response = next(core);
-    assert_eq!(response["id"], *id, "an APDU, or another response: {response}");
+    assert_eq!(
+        response["id"], *id,
+        "an APDU, or another response: {response}"
+    );
     response
 }
 
@@ -573,11 +580,21 @@ fn now_s_at_30_s_is_taken_and_at_31_s_refused() {
         assert_eq!(typed["message"]["validBefore"], (at + 60).to_string());
     }
     for at in [now - 31, now + 31] {
-        refused(&pay_cap(&mut core, &mut id, v2, at), "invalid_argument", None);
+        refused(
+            &pay_cap(&mut core, &mut id, v2, at),
+            "invalid_argument",
+            None,
+        );
         assert_eq!(spent(&core), "0");
         let token = token(&mut core, &mut id, v2, None);
         refused(
-            &authorize(&mut core, &mut id, v2, json!({ "token": token }), Some(json!(at))),
+            &authorize(
+                &mut core,
+                &mut id,
+                v2,
+                json!({ "token": token }),
+                Some(json!(at)),
+            ),
             "invalid_argument",
             None,
         );
@@ -589,7 +606,12 @@ fn now_s_at_30_s_is_taken_and_at_31_s_refused() {
         );
     }
     // Whole seconds only.
-    for bad in [json!(now.to_string()), json!(now as f64 + 0.5), json!(-1), json!(null)] {
+    for bad in [
+        json!(now.to_string()),
+        json!(now as f64 + 0.5),
+        json!(-1),
+        json!(null),
+    ] {
         refused(
             &authorize(
                 &mut core,
@@ -722,7 +744,10 @@ fn any_other_authorization_is_refused() {
         "invalid_argument",
         None,
     );
-    let hash = result(&reply)["device"]["hash"].as_str().unwrap().to_owned();
+    let hash = result(&reply)["device"]["hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let digest: [u8; 32] = device::unhex(&hash).try_into().unwrap();
     let signature = fc_evm::to_hex(&fc_evm::sign_digest(key.signing_key(), &digest).unwrap());
     let signed = call(
@@ -731,7 +756,10 @@ fn any_other_authorization_is_refused() {
         "x402.settle",
         json!({ "reservation": reservation, "signature": signature }),
     );
-    assert_eq!(result(&signed)["payload"]["payload"]["signature"], signature);
+    assert_eq!(
+        result(&signed)["payload"]["payload"]["signature"],
+        signature
+    );
     // Two forms at once, and an unknown reservation.
     refused(
         &call(
@@ -849,7 +877,8 @@ fn failure_refunds() {
     let root = tempfile::tempdir().unwrap();
     let mut core = start_with(root.path(), true, None);
     let grant = json!({ "cap_amount": "30000", "window_seconds": 3600 });
-    let file = |core: &Core| std::fs::read_to_string(core.grant_root.join("x402-permissions.json")).ok();
+    let file =
+        |core: &Core| std::fs::read_to_string(core.grant_root.join("x402-permissions.json")).ok();
     let reply = pay_token(&mut core, &mut id, case, Some(&grant));
     assert_eq!(result(&reply)["charged"], false);
     let (reservation, _) = handed(&reply);
