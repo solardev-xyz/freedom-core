@@ -267,6 +267,11 @@ struct Harness {
     /// Reads held back, unanswered.
     hold: bool,
     held: Vec<ChainRead>,
+    /// The vault's state a proposal's owners sign with (S3): locked
+    /// unless a test unlocks it.
+    state: fc_vault::state::VaultState,
+    /// Who calls.
+    context: Context,
 }
 
 macro_rules! ctx {
@@ -297,6 +302,11 @@ impl Harness {
             now: Instant::now(),
             hold: false,
             held: Vec::new(),
+            state: fc_vault::state::VaultState::new(),
+            context: Context {
+                caller: fc_protocol::message::CallerKind::Shell,
+                page: None,
+            },
         };
         harness.records();
         harness
@@ -332,8 +342,9 @@ impl Harness {
     }
 
     fn send(&mut self, method: &str, params: Value) -> Vec<Out> {
+        let context = self.context.clone();
         self.safes
-            .request(9, method, Some(&params.to_string()), ctx!(self))
+            .request(9, method, Some(&params.to_string()), &context, ctx!(self))
     }
 
     /// Answers each read, and plays the vault's mark: the reply, if any.
@@ -351,6 +362,10 @@ impl Harness {
                 }
                 self.records();
                 queue.extend(self.safes.marked(id, Ok(()), ctx!(self)));
+            }
+            // A proposal's signing and write, as the vault runs them.
+            for id in self.safes.take_writes() {
+                queue.extend(self.safes.write(id, &self.state, ctx!(self)));
             }
             let Some(out) = queue.pop_front() else {
                 return answer;
@@ -1167,55 +1182,72 @@ fn the_bound_is_the_session_class() {
 
 // --- The pending store (D3) ----------------------------------------------
 
-fn entry(hash: &str, created_at: u64, signers: &[&str]) -> Value {
+/// The Safe's pending entry for its SafeTx to C of 5 wei at nonce 7, as
+/// the reference writes one, with `signers`' rows (whose signatures
+/// aren't theirs, so none counts).
+fn entry(created_at: u64, signers: &[&str]) -> Value {
+    let tx = fc_safe::SafeTx::new(address(C), U256::from_u64(5), vec![], 7).unwrap();
+    let hash = tx.hash(&safe_address()).unwrap();
     json!({
         "chainId": 100, "safeAddress": checksum_address(&safe_address()),
-        "safeTxData": { "to": C, "value": "5", "data": "0x" },
-        "safeTxHash": hash, "threshold": 1,
+        "safeTxData": tx.fields(), "safeTxHash": to_hex(&hash),
+        "typedData": tx.typed_data(&safe_address()), "threshold": 1,
         "display": { "symbol": "xDAI", "amount": "5" },
         "signatures": signers.iter().map(|s| json!({ "signer": s, "data": "0x" })).collect::<Vec<_>>(),
         "createdAt": created_at,
     })
 }
 
+/// [`entry`]'s hash, as it names it.
+fn hash_of(entry: &Value) -> String {
+    entry["safeTxHash"].as_str().unwrap().to_owned()
+}
+
 #[test]
 fn pending_renders_each_entry_as_the_board_does() {
     let mut h = Harness::new(meta(false), Chain::deployed());
+    let good = entry(20, &["0x1111111111111111111111111111111111111111"]);
+    let mut aside = entry(5, &[]);
+    aside["safeTxData"]["value"] = json!("6");
     let file = json!({
-        SAFE.to_string(): entry("0xaa", 20, &["0x1111111111111111111111111111111111111111"]),
-        "7": entry("0xbb", 10, &[]),
+        SAFE.to_string(): good.clone(),
+        // No Safe record at 7.
+        "7": entry(10, &[]),
         "8": "not an entry",
     });
     std::fs::write(h.path(), file.to_string()).unwrap();
     let reply = h.call("safe.pending", json!({}));
     let states = result(&reply)["states"].as_array().unwrap();
-    // Oldest first; the one the view can't read left out.
-    assert_eq!(states.len(), 2);
-    assert_eq!(states[0]["safeIndex"], 7);
-    // No Safe record at 7: no owners, no executor.
-    assert_eq!(states[0]["owners"], json!([]));
-    assert_eq!(states[0]["executorIndex"], Value::Null);
+    // S3's codec reads each for its Safe's record: one with none, and one
+    // that isn't an entry, are set aside and left out. A signature that
+    // isn't its owner's counts for nothing.
     assert_eq!(
-        states[1],
-        json!({
-            "safeIndex": SAFE, "chainId": 100, "safeTxHash": "0xaa", "threshold": 1,
-            "collected": 1,
+        states,
+        &[json!({
+            "safeIndex": SAFE, "chainId": 100, "safeTxHash": hash_of(&good), "threshold": 1,
+            "collected": 0,
             "owners": [
-                { "index": 0, "address": A, "type": "mnemonic", "signed": true },
+                { "index": 0, "address": A, "type": "mnemonic", "signed": false },
                 { "index": 1, "address": B, "type": "mnemonic", "signed": false },
             ],
             "executorIndex": 0, "display": { "symbol": "xDAI", "amount": "5" },
             "call": { "to": C, "value": "5", "data": "0x" },
             "createdAt": 20, "status": "awaiting",
-        })
+        })]
     );
+    // An entry whose hash isn't its fields' is set aside too.
+    std::fs::write(h.path(), json!({ SAFE.to_string(): aside }).to_string()).unwrap();
+    let reply = h.call("safe.pending", json!({}));
+    assert_eq!(result(&reply)["states"], json!([]));
     assert!(h.asked.is_empty());
 }
 
 #[test]
 fn discard_ends_the_sends_approval_then_clears_its_entry() {
     let mut h = Harness::new(meta(false), Chain::deployed());
-    let file = json!({ SAFE.to_string(): entry("0xaa", 20, &[]) });
+    let pending = entry(20, &[]);
+    let hash = hash_of(&pending);
+    let file = json!({ SAFE.to_string(): pending });
     std::fs::write(h.path(), file.to_string()).unwrap();
     // Another SafeTx named: nothing discarded.
     let reply = h.call(
@@ -1226,7 +1258,7 @@ fn discard_ends_the_sends_approval_then_clears_its_entry() {
     assert!(h.pending.entry(SAFE).is_some());
     let reply = h.call(
         "safe.discard",
-        json!({ "safe": SAFE, "safe_tx_hash": "0xaa" }),
+        json!({ "safe": SAFE, "safe_tx_hash": hash }),
     );
     assert_eq!(result(&reply), &json!({}));
     assert!(h.pending.entry(SAFE).is_none());
@@ -1238,7 +1270,7 @@ fn discard_ends_the_sends_approval_then_clears_its_entry() {
     );
     let reply = h.call(
         "safe.discard",
-        json!({ "safe": SAFE, "safe_tx_hash": "0xaa" }),
+        json!({ "safe": SAFE, "safe_tx_hash": hash }),
     );
     assert_eq!(refusal(&reply), "SAFE_DISCARDED");
     // Before the store moves: main's file, untouched.
@@ -1255,7 +1287,7 @@ fn discard_ends_the_sends_approval_then_clears_its_entry() {
 /// A file of `size` bytes holding one entry at `SAFE`, padded in its
 /// display.
 fn file_of(size: usize) -> Vec<u8> {
-    let mut entry = entry("0xaa", 20, &[]);
+    let mut entry = entry(20, &[]);
     entry["display"]["pad"] = json!("");
     let base = json!({ SAFE.to_string(): entry.clone() }).to_string().len();
     entry["display"]["pad"] = json!("x".repeat(size - base));
@@ -1323,3 +1355,7 @@ fn the_cost_is_exact_to_two_to_the_256() {
     assert_eq!(mul(2, &max), None);
     assert_eq!(mul(1, &max), Some(max));
 }
+
+// --- SAFE-2's S3: `safe.prepare` and `safe.propose` --------------------------
+
+mod propose;

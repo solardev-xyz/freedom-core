@@ -1731,7 +1731,7 @@ impl Vault {
                     clocks,
                     now: Instant::now(),
                 };
-                out.extend(self.safes.request(id, method, raw, &mut ctx));
+                out.extend(self.safes.request(id, method, raw, context, &mut ctx));
                 self.run_safe_marks(&mut out);
                 return out;
             }
@@ -2696,9 +2696,23 @@ impl Vault {
     /// running, as an `accounts.*` write runs at the queue's head: each only
     /// while the record at its index is still that Safe, after the vault
     /// write's metadata journal is finished. Each request then goes on.
+    /// Then the proposals whose signing and write are due (design 0016,
+    /// SAFE-2's S3), each with the vault's state as it stands, against the
+    /// records' snapshot of that state.
     fn run_safe_marks(&mut self, out: &mut Vec<Out>) {
         if self.running.is_some() {
             return;
+        }
+        for id in self.safes.take_writes() {
+            let clocks = self.clocks();
+            let mut ctx = crate::safe::methods::Ctx {
+                approvals: &mut self.approvals,
+                pending: &self.safe_pending,
+                clocks,
+                now: Instant::now(),
+            };
+            out.extend(self.safes.write(id, &self.state, &mut ctx));
+            out.extend(self.approvals.take_events().into_iter().map(Out::Send));
         }
         for (id, index, address) in self.safes.take_marks() {
             let written = crate::vault_meta_journal::recover(&self.dir, self.secrets.as_deref())

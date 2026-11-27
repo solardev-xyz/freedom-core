@@ -108,7 +108,7 @@ pub struct Page {
 /// | `dapp-send` | the account's index | `{ tx, remember? }`: as `wallet-send`, and whether "Always allow" was ticked, a boolean the token keeps beside its digest |
 /// | `sign-message` | the account's index | `{ message }`: `sign.message`'s bytes, as hex |
 /// | `sign-typed-data` | the account's index | `{ typed_data, primary_type?, chain_id? }`, as `sign.typed_data` takes them |
-/// | `safe-send` | the Safe's index | `{ safe, chain_id, tx: { to, value, data } }`: the Safe's address and the SafeTx |
+/// | `safe-send` | the Safe's index | `{ safe, chain_id, tx: { to, value, data } }`: the Safe's address and the call main builds its SafeTx for (APR-4's form); or `{ safe, chain_id, safe_tx, safe_tx_hash }`: the SafeTx the core built at `safe.prepare`, all ten fields as `safe.prepare` answers them, and its hash (design 0016's form, D6, which only `safe.propose` spends) |
 /// | `safe-message` | the Safe's index | `{ safe, chain_id, method, params }`: the Safe's address and chain, and the dApp's request |
 /// | `intent-resend` | none | `{ intent_id, chain_id, sender, nonce, hash }` |
 /// | `intent-replace` | none, or the index of the account that signs it again, which `sign.transaction` requires | `{ intent_id, sender, tx }`: `tx` as `sign.transaction` takes it, its `nonce` required and bound |
@@ -252,6 +252,7 @@ pub fn bind(request: &Request<'_>, limits: &Limits) -> Result<Binding, Error> {
             typed_data = Some(view);
             facts
         }
+        Kind::SafeSend if is_built_safe_send(payload) => built_safe_send(payload)?,
         Kind::SafeSend => {
             let fields = object(payload, "payload", &["safe", "chain_id", "tx"], &[])?;
             let tx = object(&fields["tx"], "tx", &["to", "value", "data"], &[])?;
@@ -362,6 +363,67 @@ fn page_facts(page: &Page) -> Result<Value, Error> {
         "frame": page.frame,
         "navigation": page.navigation,
         "handle": page.handle.to_text(),
+    }))
+}
+
+/// Whether a `safe-send` payload is design 0016's form (D6), `{ safe,
+/// chain_id, safe_tx, safe_tx_hash }`, the SafeTx the core built, which
+/// only `safe.propose` spends: it names `safe_tx`. APR-4's form, `{ safe,
+/// chain_id, tx }`, names none, and neither is spent as the other.
+pub fn is_built_safe_send(payload: &Value) -> bool {
+    payload.get("safe_tx").is_some()
+}
+
+/// The facts of design 0016's `safe-send` (D6): the Safe's address, the
+/// chain, all ten SafeTx fields and its hash. The fields are read as
+/// fc-safe reads a pending entry's (`SafeTx::from_fields`): an operation,
+/// gas field, gas token or refund receiver other than Freedom's gets no
+/// token, nor does a nonce past 2^53 − 1 or data past 64 KiB. The hash must
+/// be the fields' own for that Safe on that chain, so a token never binds a
+/// hash its SafeTx doesn't have.
+fn built_safe_send(payload: &Value) -> Result<Value, Error> {
+    let fields = object(
+        payload,
+        "payload",
+        &["safe", "chain_id", "safe_tx", "safe_tx_hash"],
+        &[],
+    )?;
+    let safe = fields["safe"]
+        .as_str()
+        .and_then(|text| parse_address(text).ok())
+        .ok_or_else(|| invalid("Invalid safe"))?;
+    let chain_id = chain(&fields["chain_id"], "chain_id")?;
+    let chain_number = chain_id
+        .parse::<u64>()
+        .map_err(|_| invalid("Invalid chainId"))?;
+    let tx = fc_safe::SafeTx::from_fields(&fields["safe_tx"])
+        .map_err(|error| invalid(format!("safe_tx: {error}")))?;
+    let nonce = U256::from_u64(tx.nonce());
+    let computed =
+        fc_safe::safe_tx_hash(chain_number, &safe, tx.to(), tx.value(), tx.data(), &nonce)
+            .map_err(|error| invalid(format!("safe_tx: {error}")))?;
+    let given = hash(&fields["safe_tx_hash"], "safe_tx_hash")?;
+    if given != to_hex(&computed) {
+        return Err(invalid("safe_tx_hash: not the hash of safe_tx"));
+    }
+    const ZERO: &str = "0x0000000000000000000000000000000000000000";
+    Ok(json!({
+        "form": "safe_tx",
+        "safe": to_hex(&safe),
+        "chain_id": chain_id,
+        "safe_tx": {
+            "to": to_hex(tx.to()),
+            "value": tx.value().to_decimal(),
+            "data": to_hex(tx.data()),
+            "operation": "0",
+            "safe_tx_gas": "0",
+            "base_gas": "0",
+            "gas_price": "0",
+            "gas_token": ZERO,
+            "refund_receiver": ZERO,
+            "nonce": tx.nonce().to_string(),
+        },
+        "safe_tx_hash": given,
     }))
 }
 

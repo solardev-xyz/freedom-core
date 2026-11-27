@@ -87,6 +87,8 @@
     { "name": "safe.deployed", "callers": ["shell"], "mutates": true, "deadline_ms": 120000 },
     { "name": "safe.pending", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "safe.discard", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
+    { "name": "safe.prepare", "callers": ["page", "chrome", "shell"], "mutates": false, "deadline_ms": 120000 },
+    { "name": "safe.propose", "callers": ["page", "chrome", "shell"], "mutates": false, "deadline_ms": 120000 },
     { "name": "payments.append", "callers": ["shell"], "mutates": false, "deadline_ms": null },
     { "name": "payments.update", "callers": ["shell"], "mutates": false, "deadline_ms": null },
     { "name": "payments.mark_confirmed", "callers": ["shell"], "mutates": false, "deadline_ms": null },

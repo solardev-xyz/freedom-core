@@ -1010,6 +1010,12 @@ impl Approvals {
         if kind == Kind::X402Payment {
             return Err(refusal(Refusal::Mismatch));
         }
+        // Design 0016's `safe-send`, the SafeTx the core built, is spent
+        // only by `safe.propose` (D6): presented here, it is burnt.
+        if kind == Kind::SafeSend && fc_approval::is_built_safe_send(&fields["payload"]) {
+            self.tokens.discard(token);
+            return Err(refusal(Refusal::Mismatch));
+        }
         let page = match token_page(context, fields.get("handle")) {
             Ok(page) => page,
             Err(HandleError::Body(body)) => return Err(body),
@@ -1098,6 +1104,42 @@ impl Approvals {
             },
             0,
         )
+    }
+
+    /// `safe.propose`'s `authorization` (design 0016, D6): `{ token,
+    /// handle? }`, a `safe-send` token minted for design 0016's form,
+    /// `payload` (`{ safe, chain_id, safe_tx, safe_tx_hash }`, the SafeTx
+    /// the core built), for the Safe at wallet index `account`, spent by
+    /// the caller kind that minted it: a site's under `page` for its page
+    /// and handle, the wallet's under `shell`. It gives no Safe approval:
+    /// the core signs the owners' signatures itself. The token is burnt
+    /// whatever the outcome.
+    pub fn spend_safe_tx(
+        &mut self,
+        context: &Context,
+        authorization: &Value,
+        account: u64,
+        payload: &Value,
+        clocks: Clocks,
+    ) -> Result<(), ErrorBody> {
+        let fields = object(authorization, &["token"], &["handle"])?;
+        let token = string(fields, "token")?;
+        let page = match token_page(context, fields.get("handle")) {
+            Ok(page) => page,
+            Err(HandleError::Body(body)) => return Err(body),
+            Err(HandleError::Handle) => return Err(refusal(Refusal::Mismatch)),
+        };
+        let account = json!(account);
+        let request = Request {
+            kind: Kind::SafeSend,
+            account: Some(&account),
+            payload,
+            page: page.as_ref(),
+        };
+        self.tokens
+            .spend_as(minter(context.caller), token, &request, clocks.vault_ms)
+            .map(|_| ())
+            .map_err(refusal)
     }
 
     /// Checks `sign.*`'s `authorization` for what it signs, before any key

@@ -65,16 +65,11 @@ use crate::phone::ChainRead;
 /// The bit that marks a Safe check's chain reads' tags.
 pub const SAFE_TAG: u64 = 1 << 62;
 
-// The signing steps' refusals (S3 to S5): until they land only the tests
-// use them, since `safe.status` reports the outcome as data.
-
 /// `safe_unverified`'s text (design 0016, "Chain reads").
-#[cfg_attr(not(test), allow(dead_code))]
 pub const UNVERIFIED_TEXT: &str = "Freedom couldn't verify this Safe on Gnosis, so it won't sign. \
      Try again, or add an RPC provider in Settings.";
 
 /// `safe_changed`'s text (design 0016, "Owners, threshold and setup").
-#[cfg_attr(not(test), allow(dead_code))]
 pub const CHANGED_TEXT: &str =
     "This Safe was changed outside Freedom, so Freedom can't sign for it.";
 
@@ -171,7 +166,6 @@ impl Outcome {
     /// for [`Outcome::Unchanged`] and [`Outcome::SetupUnchanged`], and for
     /// [`Outcome::NotDeployed`], which the step refuses `not_deployed`
     /// itself (`methods::NOT_DEPLOYED_TEXT`). S3 to S5 call it.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn refusal(&self) -> Option<ErrorBody> {
         let (text, safe) = match self {
             Outcome::Changed(_) => (CHANGED_TEXT, "changed"),
@@ -239,7 +233,6 @@ impl Evidence {
     /// read with `deadline_ms`: the check, and its first read. The caller
     /// has checked the address against the record (`Setup::check_address`).
     /// S3 to S5 call it.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn start(
         safe: [u8; 20],
         setup: Setup,

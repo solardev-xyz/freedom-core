@@ -357,6 +357,13 @@ pub const METHODS: &[Method] = &[
     row("safe.deployed", SHELL, true, SESSION),
     row("safe.pending", CS, false, NOW),
     row("safe.discard", CS, false, NOW),
+    // Design 0016, API (SAFE-2's S3): a Safe transaction built in the core
+    // and proposed with the `safe-send` token that confirmed it whole (D6),
+    // a site's or the wallet's. Each reads the Safe's setup and nonce
+    // through the chain machine first, the `session` class (#520);
+    // `propose` writes `safe-pending.json`, not the identity files.
+    row("safe.prepare", PCS, false, SESSION),
+    row("safe.propose", PCS, false, SESSION),
     // Design 0013, "Payment history" (PRF-5g-2): the chrome reads and
     // clears (`payments:get-recent`, `:get-count`, `:get-by-id`,
     // `:clear`, `x402:get-receipts`); the writes and the repoll's are
@@ -580,6 +587,8 @@ mod tests {
                 "phone.job",
                 "phone.sent",
                 "phone.result",
+                "safe.prepare",
+                "safe.propose",
                 "eip1193.request",
                 "swarm.request",
             ]
@@ -721,6 +730,23 @@ mod tests {
                 assert_eq!(
                     matches!(admit(name, caller, V2), Admission::Allowed(_)),
                     allowed,
+                    "{name} {caller:?}"
+                );
+            }
+        }
+        // SAFE-2's S3: a site, the chrome and main each reach
+        // `safe.prepare` and `safe.propose` (design 0016, API), under the
+        // chain machine's bound, and neither writes the identity files.
+        for name in ["safe.prepare", "safe.propose"] {
+            let row = method(name).unwrap();
+            assert_eq!(
+                (row.deadline, row.mutates),
+                (Deadline::Session, false),
+                "{name}"
+            );
+            for caller in [CallerKind::Page, CallerKind::Chrome, CallerKind::Shell] {
+                assert!(
+                    matches!(admit(name, caller, V2), Admission::Allowed(_)),
                     "{name} {caller:?}"
                 );
             }

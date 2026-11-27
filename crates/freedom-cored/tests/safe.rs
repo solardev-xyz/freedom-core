@@ -160,6 +160,16 @@ fn nothing_before_vault_meta_moves_and_deployed_is_mains() {
         (5, "safe.deployed", json!({ "safe": SAFE, "hash": HASH })),
         (6, "safe.pending", json!({})),
         (7, "safe.discard", json!({ "safe": SAFE })),
+        (
+            8,
+            "safe.prepare",
+            json!({ "safe": SAFE, "chain_id": 100, "tx": { "to": A, "value": "1", "data": "0x" } }),
+        ),
+        (
+            9,
+            "safe.propose",
+            json!({ "safe": SAFE, "safe_tx_hash": HASH, "authorization": { "token": "00".repeat(32) } }),
+        ),
     ] {
         let reply = call(&mut core, id, "shell", method, params);
         assert_eq!(reply["error"]["code"], "not_moved", "{method} {reply}");
@@ -171,7 +181,7 @@ fn nothing_before_vault_meta_moves_and_deployed_is_mains() {
     );
     let reply = call(
         &mut core,
-        8,
+        10,
         "chrome",
         "safe.deployed",
         json!({ "safe": SAFE, "hash": HASH }),
@@ -338,15 +348,26 @@ fn pending_and_discard_serve_the_store() {
     let root = tempfile::tempdir().unwrap();
     let mut core = start(root.path(), &meta(true), &["vault_meta", "safe_pending"]);
     let file = core.grant_root.join("safe-pending.json");
+    // An entry for the Safe's SafeTx, as the reference writes one (S3's
+    // codec sets aside any other).
+    let tx = fc_safe::SafeTx::new(
+        fc_wallet_state::address_bytes(A).unwrap(),
+        U256::from_u64(1),
+        vec![],
+        0,
+    )
+    .unwrap();
+    let hash = to_hex(&tx.hash(&safe_address()).unwrap());
     let entry = json!({
-        "chainId": 100, "safeTxHash": "0xaa", "threshold": 1, "signatures": [],
-        "safeTxData": { "to": A, "value": "1", "data": "0x" }, "createdAt": 5,
+        "chainId": 100, "safeAddress": checksum_address(&safe_address()),
+        "safeTxData": tx.fields(), "safeTxHash": hash, "threshold": 1, "signatures": [],
+        "createdAt": 5,
     });
     std::fs::write(&file, json!({ SAFE.to_string(): entry }).to_string()).unwrap();
     let reply = call(&mut core, 2, "chrome", "safe.pending", json!({}));
     let states = reply["result"]["states"].as_array().unwrap();
     assert_eq!(states.len(), 1, "{reply}");
-    assert_eq!(states[0]["safeTxHash"], "0xaa");
+    assert_eq!(states[0]["safeTxHash"], hash);
     assert_eq!(states[0]["executorIndex"], 0);
     let reply = call(
         &mut core,
@@ -361,7 +382,7 @@ fn pending_and_discard_serve_the_store() {
         4,
         "chrome",
         "safe.discard",
-        json!({ "safe": SAFE, "safe_tx_hash": "0xaa" }),
+        json!({ "safe": SAFE, "safe_tx_hash": hash }),
     );
     assert_eq!(reply["result"], json!({}), "{reply}");
     assert_eq!(std::fs::read(&file).unwrap(), b"{}");
@@ -376,4 +397,251 @@ fn pending_and_discard_serve_the_store() {
     );
     let reply = call(&mut core, 6, "page", "safe.pending", json!({}));
     assert_eq!(reply["error"]["code"], "forbidden");
+}
+
+// --- SAFE-2's S3: a Safe transaction prepared and proposed ------------------
+
+const ABANDON: &str =
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+fn vectors() -> Value {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vectors/safe.json");
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// What Gnosis answers each read of the Safe of `owners`, 1 of 2, as
+/// Freedom made it, at nonce 3.
+fn answer_for(method: &str, params: &Value, owners: &[[u8; 20]]) -> Value {
+    let data = params[0]["data"].as_str().unwrap_or("");
+    if method == "eth_call" && data == "0xa0e67e2b" {
+        let mut words = vec![word(&[0x20]), word(&[owners.len() as u8])];
+        words.extend(owners.iter().map(|owner| word(owner)));
+        return Value::String(format!(
+            "0x{}",
+            words
+                .iter()
+                .map(|w| w.trim_start_matches("0x").to_owned())
+                .collect::<String>()
+        ));
+    }
+    answer(method, params)
+}
+
+/// Plays main until request `id`'s response, every `shell.rpc` read
+/// answered alike by both endpoints for the Safe of `owners`. The reads'
+/// methods, in order.
+fn served_for(core: &mut Core, id: u64, owners: &[[u8; 20]]) -> (Value, Vec<String>) {
+    let mut methods = Vec::new();
+    loop {
+        let message = core.recv();
+        match message["type"].as_str() {
+            Some("response") if message["id"] == id => return (message, methods),
+            Some("request") => {
+                assert_eq!(message["method"], "shell.rpc", "{message}");
+                let body: Value =
+                    serde_json::from_str(message["params"]["body"].as_str().unwrap()).unwrap();
+                let method = body["method"].as_str().unwrap();
+                methods.push(method.to_owned());
+                let text = json!({
+                    "jsonrpc": "2.0", "id": body["id"],
+                    "result": answer_for(method, &body["params"], owners),
+                });
+                core.send(&json!({
+                    "type": "response", "id": message["id"],
+                    "result": {
+                        "status": 200,
+                        "body": base64::engine::general_purpose::STANDARD.encode(text.to_string()),
+                    },
+                }));
+            }
+            Some("event") => {}
+            _ => panic!("unexpected {message}"),
+        }
+    }
+}
+
+fn gnosis_of_two() -> Value {
+    json!({
+        "chain_id": 100, "display_name": "Gnosis Chain",
+        "read_order": ["quorum", "direct"], "broadcast_order": ["direct"],
+        "quorum": { "k": 2, "m": 2, "timeout_ms": 5000 },
+        "rpc": [
+            { "endpoint": "https://a.example", "user_configured": false },
+            { "endpoint": "https://b.example", "user_configured": false },
+        ],
+        "prover": null, "myotis": false, "blockscout": null,
+    })
+}
+
+/// The vector flow `one-of-two` over the wire: the vault imported, a
+/// second account and the flow's Safe added through the core's own
+/// `accounts.*`, marked deployed; `safe.prepare` reads the eight setup
+/// reads from both endpoints, the nonce last; `approval.issue` mints the
+/// `safe-send` over the SafeTx it answered (D6), and `safe.propose` reads
+/// them again, has the vault owner sign, and writes the reference's entry.
+/// A restart reads it back.
+#[test]
+fn a_safe_tx_is_prepared_proposed_and_reloaded() {
+    let v = vectors();
+    let flow = v["flows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|flow| flow["id"] == "one-of-two")
+        .unwrap()
+        .clone();
+    let start_step = &flow["steps"][0];
+    let pending = &start_step["pending"];
+    let owners: Vec<[u8; 20]> = ["A", "B"]
+        .iter()
+        .map(|name| fc_evm::parse_address(v["owners"][name]["address"].as_str().unwrap()).unwrap())
+        .collect();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("identity")).unwrap();
+    let mut core = spawn(
+        "serve",
+        &root.path().join("identity"),
+        &root.path().join("locks"),
+        &[],
+    );
+    std::fs::create_dir_all(&core.grant_root).unwrap();
+    core.store_moved = vec!["vault_meta", "safe_pending"];
+    assert!(core.hello()["result"].is_object());
+    let imported = call(
+        &mut core,
+        2,
+        "shell",
+        "vault.import",
+        json!({
+            "password_b64": base64::engine::general_purpose::STANDARD.encode("testpass1"),
+            "mnemonic_b64": base64::engine::general_purpose::STANDARD.encode(ABANDON),
+            "overwrite": true, "user_knows_password": true,
+        }),
+    );
+    assert!(imported["result"].is_object(), "{imported}");
+    let second = call(
+        &mut core,
+        3,
+        "shell",
+        "accounts.add_mnemonic",
+        json!({ "name": "B" }),
+    );
+    assert_eq!(second["result"]["wallet"]["index"], 1, "{second}");
+    assert_eq!(
+        second["result"]["wallet"]["address"],
+        v["owners"]["B"]["address"]
+    );
+    let safe = call(
+        &mut core,
+        4,
+        "shell",
+        "accounts.add_safe",
+        json!({ "address": flow["safe"]["address"], "owners": [0, 1], "threshold": 1, "salt_nonce": "0" }),
+    );
+    let index = safe["result"]["wallet"]["index"].as_u64().unwrap();
+    let marked = call(
+        &mut core,
+        5,
+        "shell",
+        "accounts.mark_safe_deployed",
+        json!({ "index": index, "chain_id": 100 }),
+    );
+    assert!(marked["result"].is_object(), "{marked}");
+    let configured = call(
+        &mut core,
+        6,
+        "shell",
+        "chain.configure",
+        json!({ "chains": [gnosis_of_two()] }),
+    );
+    assert!(configured["result"].is_object(), "{configured}");
+    // Prepared: the eight reads, each from both endpoints, the nonce last.
+    send(
+        &mut core,
+        7,
+        "chrome",
+        "safe.prepare",
+        json!({ "safe": index, "chain_id": 100, "tx": flow["tx"] }),
+    );
+    let (reply, methods) = served_for(&mut core, 7, &owners);
+    let answer = &reply["result"];
+    assert_eq!(answer["safe_tx"], pending["safeTxData"], "{reply}");
+    assert_eq!(answer["safe_tx_hash"], pending["safeTxHash"]);
+    assert_eq!(methods.len(), 16, "{methods:?}");
+    assert_eq!(methods[..2], ["eth_getCode"; 2]);
+    // The nonce, `eth_call` to `nonce()`, last.
+    assert_eq!(methods[14..], ["eth_call"; 2]);
+    // Main mints the `safe-send` over what it answered.
+    let issued = call(
+        &mut core,
+        8,
+        "shell",
+        "approval.issue",
+        json!({
+            "kind": "safe-send", "account": index,
+            "payload": {
+                "safe": flow["safe"]["address"], "chain_id": "100",
+                "safe_tx": answer["safe_tx"], "safe_tx_hash": answer["safe_tx_hash"],
+            },
+        }),
+    );
+    let token = issued["result"]["token"].as_str().unwrap().to_owned();
+    // A page can't propose with main's token.
+    let reply = call(
+        &mut core,
+        9,
+        "page",
+        "safe.propose",
+        json!({ "safe": index, "safe_tx_hash": answer["safe_tx_hash"],
+                "authorization": { "token": token, "handle": "a1".repeat(32) } }),
+    );
+    assert_eq!(reply["error"]["code"], "not_authorized", "{reply}");
+    // That burnt it: a new one, presented by main.
+    let issued = call(
+        &mut core,
+        10,
+        "shell",
+        "approval.issue",
+        json!({
+            "kind": "safe-send", "account": index,
+            "payload": {
+                "safe": flow["safe"]["address"], "chain_id": "100",
+                "safe_tx": answer["safe_tx"], "safe_tx_hash": answer["safe_tx_hash"],
+            },
+        }),
+    );
+    let token = issued["result"]["token"].as_str().unwrap().to_owned();
+    send(
+        &mut core,
+        11,
+        "shell",
+        "safe.propose",
+        json!({ "safe": index, "safe_tx_hash": answer["safe_tx_hash"],
+                "authorization": { "token": token }, "display": pending["display"] }),
+    );
+    let (reply, methods) = served_for(&mut core, 11, &owners);
+    let state = reply["result"].clone();
+    assert_eq!(state["collected"], 1, "{reply}");
+    assert_eq!(state["safeTxHash"], pending["safeTxHash"]);
+    assert_eq!(methods.len(), 16);
+    let file: Value = serde_json::from_str(
+        &std::fs::read_to_string(core.grant_root.join("safe-pending.json")).unwrap(),
+    )
+    .unwrap();
+    let mut entry = file[index.to_string()].clone();
+    assert!(entry["createdAt"].is_u64(), "{entry}");
+    entry.as_object_mut().unwrap().shift_remove("createdAt");
+    assert_eq!(entry, *pending);
+    // A restart reads it back, the vault locked.
+    drop(core);
+    let mut core = spawn(
+        "serve",
+        &root.path().join("identity"),
+        &root.path().join("locks"),
+        &[],
+    );
+    core.store_moved = vec!["vault_meta", "safe_pending"];
+    assert!(core.hello()["result"].is_object());
+    let reply = call(&mut core, 2, "chrome", "safe.pending", json!({}));
+    assert_eq!(reply["result"]["states"], json!([state]), "{reply}");
 }
