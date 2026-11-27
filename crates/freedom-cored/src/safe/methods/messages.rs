@@ -176,9 +176,11 @@ struct Started<'a> {
 }
 
 /// A session ID as presented: `Some` only for 32 lowercase hex digits; any
-/// other text is an ID no session has. A missing or non-string one is
-/// `invalid_argument`.
-fn presented(params: &serde_json::Map<String, Value>) -> Result<Option<[u8; ID_LEN]>, ErrorBody> {
+/// other text is an ID no session has, wiped when dropped. A missing or
+/// non-string one is `invalid_argument`.
+fn presented(
+    params: &serde_json::Map<String, Value>,
+) -> Result<Option<Zeroizing<[u8; ID_LEN]>>, ErrorBody> {
     let text = params
         .get("session")
         .and_then(Value::as_str)
@@ -188,7 +190,7 @@ fn presented(params: &serde_json::Map<String, Value>) -> Result<Option<[u8; ID_L
         return Ok(None);
     }
     let digit = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
-    let mut id = [0u8; ID_LEN];
+    let mut id = Zeroizing::new([0u8; ID_LEN]);
     let (pairs, _) = bytes.as_chunks::<2>();
     for (byte, [high, low]) in id.iter_mut().zip(pairs) {
         *byte = (digit(*high) << 4) | digit(*low);
@@ -475,7 +477,7 @@ impl Safes {
             Some(_) => Some(index_of(p, "owner")?),
         };
         let safe = resolve(records, index)?;
-        let session = self.session(index, presented.as_ref())?;
+        let session = self.session(index, presented.as_deref())?;
         let (serial, complete) = (session.serial, session.complete());
         let named = match owner {
             None => None,
@@ -500,7 +502,7 @@ impl Safes {
         if self.busy(index) {
             return Err(refused("SAFE_BUSY", STEP_BUSY_TEXT));
         }
-        let session = self.session(index, presented.as_ref())?;
+        let session = self.session(index, presented.as_deref())?;
         match named {
             Some(_) if !ctx.unlocked => return Err(crate::vault::locked()),
             // Nothing the sweep could sign: the state, with no read.
@@ -601,7 +603,7 @@ impl Safes {
         let index = index_of(p, "safe")?;
         let presented = presented(p)?;
         let state = match self.sessions.open.get(&index) {
-            Some(session) if session.is(presented.as_ref()) && !session.ended => {
+            Some(session) if session.is(presented.as_deref()) && !session.ended => {
                 state_of(records, index, session)?
             }
             _ => JsValue::Null,
@@ -624,7 +626,7 @@ impl Safes {
         let Some(session) = self.sessions.open.get_mut(&index) else {
             return Ok(vec![reply(id, &json!({}))]);
         };
-        if !session.is(presented.as_ref()) {
+        if !session.is(presented.as_deref()) {
             return Err(plain(OTHER_PAGE_TEXT));
         }
         if busy && !session.ended {
@@ -651,7 +653,7 @@ impl Safes {
         if self.busy(index) {
             return Err(refused("SAFE_BUSY", BUSY_TEXT));
         }
-        let session = self.session(index, presented.as_ref())?;
+        let session = self.session(index, presented.as_deref())?;
         // "Not enough signatures yet (1 of 2)".
         let joined = session
             .signatures
