@@ -36,11 +36,13 @@
 //!   estimate plus 20%, the core's fee quote) with its `executor-send`
 //!   token, or `{ fee_check }`, or `{ deployed: true }` for a Safe that
 //!   already is: judged and confirmed as an execution's send is (S4,
-//!   below), the balance read each time. With no vault owner, or a balance
-//!   below the cost, `SAFE_NEEDS_FUNDS`. A deployment isn't a Safe's call,
-//!   so main's word still signs one under `shell` without the token, as
-//!   today's activation does until SAFE-3; presented, the token is
-//!   checked.
+//!   below), the code and the balance read each time. `fee_ack: true` with
+//!   its offer standing reads no estimate, fee quote or fee evidence: the
+//!   offer is sent as shown while the balance covers its cost. With no
+//!   vault owner, or a balance below the cost, `SAFE_NEEDS_FUNDS`, nothing
+//!   minted. A deployment isn't a Safe's call, so main's word still signs
+//!   one under `shell` without the token, as today's activation does until
+//!   SAFE-3; presented, the token is checked.
 //! - **`safe.deployed { safe, hash }`** → `{ deployed }`, after main's
 //!   receipt (D4, the deployed mark): the receipt read again through the
 //!   chain machine, then the code. Marked only on verified evidence: a
@@ -693,6 +695,10 @@ struct Offer {
     account: u64,
     data: Vec<u8>,
     tx: Value,
+    /// Its cost, the gas limit times `maxFeePerGas ?? gasPrice`: the
+    /// executor's balance must still cover a deployment's when the user
+    /// confirms it.
+    cost: U256,
 }
 
 /// `{ send }`: the executor's prepared send and its token, which goes
@@ -727,7 +733,8 @@ enum Step {
 
 /// The activation's or the execution's reads: the estimate, the fee
 /// quote, for the activation the executor's balance, and for a deployment
-/// or an execution the fee evidence when it is stale.
+/// or an execution the fee evidence when it is stale. A deployment's
+/// confirmed offer reads the balance alone.
 struct Quote {
     estimate: Option<Reply>,
     fee: Option<Reply>,
@@ -738,6 +745,10 @@ struct Quote {
     reference: bool,
     /// What the code read showed, for `safe.status`'s `setup`.
     setup: Outcome,
+    /// The deployment's offer `fee_ack` confirms, as it stood when the
+    /// request started: no estimate or fee quote is read for it
+    /// ([`Safes::confirmed`]).
+    offer: Option<Value>,
 }
 
 /// Which of the activation's reads a tag is.
@@ -1253,8 +1264,9 @@ impl Safes {
                     Some(Part::Reference) => quote.reference = false,
                     None => {}
                 }
-                if quote.estimate.is_none()
-                    || quote.fee.is_none()
+                // A confirmed offer has no estimate or fee quote out.
+                let priced = quote.offer.is_none();
+                if (priced && (quote.estimate.is_none() || quote.fee.is_none()))
                     || (quote.wants_balance && quote.balance.is_none())
                     || quote.reference
                 {
@@ -1262,7 +1274,10 @@ impl Safes {
                     self.ops.insert(id, op);
                     return Vec::new();
                 }
-                vec![self.quoted(id, &op, &quote, ctx)]
+                match quote.offer.take() {
+                    Some(tx) => self.confirmed(id, op, tx, *quote, ctx),
+                    None => vec![self.quoted(id, &op, &quote, ctx)],
+                }
             }
             // No read is out while the mark or the write is due: a stray
             // reply changes nothing.
@@ -1335,6 +1350,16 @@ impl Safes {
                         }];
                     };
                     let deployment = op.safe.setup.deployment(&op.safe.salt);
+                    // The offer the user confirmed: sent as offered, with
+                    // no new estimate or quote, once the balance shows the
+                    // executor can still pay it (S4).
+                    if op.kind == (Kind::Deploy { fee_ack: true })
+                        && let Some(offer) =
+                            self.offer(&op.safe, None, executor.index, &deployment.data)
+                    {
+                        let tx = offer.tx.clone();
+                        return self.confirm(id, op, &executor.address, tx, seen, ctx);
+                    }
                     let call = Priced::call(&executor.address, &deployment.to, &deployment.data);
                     // Only a deployment is judged by the fee check.
                     let judged = matches!(op.kind, Kind::Deploy { .. });
@@ -1396,6 +1421,7 @@ impl Safes {
             wants_balance: balance.is_some(),
             reference: false,
             setup,
+            offer: None,
         };
         if judged && !ctx.approvals.fee_fresh(CHAIN_ID, ctx.clocks.vault_ms) {
             let read = self.read(
@@ -1419,6 +1445,40 @@ impl Safes {
         op.step = Step::Quote(Box::new(quote));
         self.ops.insert(id, op);
         out
+    }
+
+    /// `safe.deploy { fee_ack: true }` with its offer standing (`tx`), `op`
+    /// waiting for the executor's balance at `executor` alone: no estimate,
+    /// fee quote or fee evidence is read for a fee the user confirmed.
+    fn confirm(
+        &mut self,
+        id: u64,
+        mut op: Op,
+        executor: &[u8; 20],
+        tx: Value,
+        setup: Outcome,
+        ctx: &mut Ctx,
+    ) -> Vec<Out> {
+        let params = format!(r#"["{}","latest"]"#, to_hex(executor));
+        let read = self.read(
+            id,
+            Some(Part::Balance),
+            "eth_getBalance",
+            params,
+            &op,
+            ctx.now,
+        );
+        op.step = Step::Quote(Box::new(Quote {
+            estimate: None,
+            fee: None,
+            balance: None,
+            wants_balance: true,
+            reference: false,
+            setup,
+            offer: Some(tx),
+        }));
+        self.ops.insert(id, op);
+        vec![read]
     }
 
     /// A Safe known deployed: `safe.deploy` has nothing to send;
@@ -1762,30 +1822,18 @@ impl Safes {
                     &quote.setup,
                 ),
             ),
-            Kind::Deploy { fee_ack } => {
+            Kind::Deploy { .. } => {
                 if needs_funds {
-                    return failed(
-                        id,
-                        &refused(
-                            "SAFE_NEEDS_FUNDS",
-                            format!(
-                                "Fund {} with at least {} xDAI to activate",
-                                executor.text,
-                                format_ether(&priced.cost)
-                            ),
-                        ),
-                    );
+                    return failed(id, &needs_funds_error(&executor.text, &priced.cost));
                 }
-                // The executor's send, as an execution's (S4): the offer the
-                // user confirmed, or the quote the check approves.
+                // The executor's send, judged as an execution's is (S4). A
+                // confirmed offer never reaches here ([`Safes::confirm`]):
+                // `fee_ack` with none standing is quoted again, and a fee the
+                // check stops is offered again.
                 let deployment = op.safe.setup.deployment(&op.safe.salt);
-                let account = executor.index;
-                if fee_ack && let Some(tx) = self.offered(&op.safe, None, account, &deployment.data)
-                {
-                    return self.send_reply(id, &op.safe, account, &tx, ctx);
-                }
                 let tx = priced.tx(&deployment.to, &deployment.data);
-                self.judge(id, &op.safe, None, account, &deployment.data, tx, ctx)
+                let (account, data) = (executor.index, &deployment.data);
+                self.judge(id, &op.safe, None, account, data, tx, priced.cost, ctx)
             }
             Kind::Deployed { .. } | Kind::Prepare | Kind::Propose | Kind::Execute { .. } => {
                 failed(id, &crate::vault::internal())
@@ -1817,7 +1865,16 @@ impl Safes {
             return failed(id, &plain(NO_EXECUTOR_TO_EXECUTE_TEXT));
         };
         let tx = priced.tx(&safe.address, data);
-        self.judge(id, &safe, Some(*hash), executor.index, data, tx, ctx)
+        self.judge(
+            id,
+            &safe,
+            Some(*hash),
+            executor.index,
+            data,
+            tx,
+            priced.cost,
+            ctx,
+        )
     }
 
     /// The executor's send `tx` for the Safe `safe`, judged by the fee
@@ -1826,7 +1883,7 @@ impl Safes {
     /// endpoint's evidence) gets `{ send }` with its token; any other is
     /// offered, `{ fee_check }` with the verdict, nothing minted, and kept
     /// for `fee_ack` to confirm (`hash`: the SafeTx it executes; `data`
-    /// what it sends).
+    /// what it sends; `cost` what `tx` costs at most).
     #[allow(clippy::too_many_arguments)]
     fn judge(
         &mut self,
@@ -1836,6 +1893,7 @@ impl Safes {
         account: u64,
         data: &[u8],
         tx: Value,
+        cost: U256,
         ctx: &mut Ctx,
     ) -> Out {
         let (verdict, _) = ctx
@@ -1857,14 +1915,80 @@ impl Safes {
                 account,
                 data: data.to_vec(),
                 tx,
+                cost,
             },
         );
         reply(id, &json!({ "fee_check": verdict }))
     }
 
-    /// The offer `fee_ack` confirms: the transaction the Safe `safe`'s
-    /// executor at `account` was offered for sending `data` (for the SafeTx
-    /// `hash`, or the deployment), while it still sends exactly that.
+    /// `safe.deploy { fee_ack: true }`'s balance is in (`quote.balance`):
+    /// the offer it started with (`tx`) gets `{ send }` exactly as offered,
+    /// as `confirmedExecutorSend` signs the fee the user confirmed, while it
+    /// still stands and the executor can still pay its cost; with too
+    /// little, `SAFE_NEEDS_FUNDS` and nothing minted. An offer replaced or
+    /// dropped while the balance was read is no longer the one the user
+    /// confirmed: quoted again, as with none standing.
+    fn confirmed(&mut self, id: u64, op: Op, tx: Value, quote: Quote, ctx: &mut Ctx) -> Vec<Out> {
+        let balance = match quote.balance {
+            Some(Reply::Answer { result, .. }) => result.as_str().and_then(parse_unsigned),
+            // As `quoted` answers a failed balance read.
+            Some(Reply::Failed(error)) => {
+                return vec![failed(id, &ErrorBody::new(error.code, error.message))];
+            }
+            None => None,
+        };
+        let Some(executor) = op.safe.executor.clone() else {
+            return vec![failed(id, &crate::vault::internal())];
+        };
+        let deployment = op.safe.setup.deployment(&op.safe.salt);
+        let standing = self
+            .offer(&op.safe, None, executor.index, &deployment.data)
+            .filter(|offer| offer.tx == tx)
+            .map(|offer| offer.cost);
+        let Some(cost) = standing else {
+            let call = Priced::call(&executor.address, &deployment.to, &deployment.data);
+            return self.quote(
+                id,
+                op,
+                &call,
+                Some(&executor.address),
+                true,
+                quote.setup,
+                ctx,
+            );
+        };
+        let Some(balance) = balance else {
+            return vec![failed(id, &plain("Invalid balance"))];
+        };
+        if balance < cost {
+            return vec![failed(id, &needs_funds_error(&executor.text, &cost))];
+        }
+        crate::log::info(
+            "a Safe executor's fee confirmed: its offer prepared",
+            json!({}),
+        );
+        vec![self.send_reply(id, &op.safe, executor.index, &tx, ctx)]
+    }
+
+    /// The offer `fee_ack` confirms: the one the Safe `safe`'s executor at
+    /// `account` was offered for sending `data` (for the SafeTx `hash`, or
+    /// the deployment), while it still sends exactly that.
+    fn offer(
+        &self,
+        safe: &Safe,
+        hash: Option<[u8; 32]>,
+        account: u64,
+        data: &[u8],
+    ) -> Option<&Offer> {
+        self.offers.get(&safe.index).filter(|offer| {
+            offer.safe == safe.address
+                && offer.hash == hash
+                && offer.account == account
+                && offer.data == data
+        })
+    }
+
+    /// An execution's offer `fee_ack` confirms, its transaction to send.
     fn offered(
         &self,
         safe: &Safe,
@@ -1872,18 +1996,12 @@ impl Safes {
         account: u64,
         data: &[u8],
     ) -> Option<Value> {
-        let offer = self.offers.get(&safe.index)?;
-        let same = offer.safe == safe.address
-            && offer.hash == hash
-            && offer.account == account
-            && offer.data == data;
-        same.then(|| {
-            crate::log::info(
-                "a Safe executor's fee confirmed: its offer prepared",
-                json!({}),
-            );
-            offer.tx.clone()
-        })
+        let tx = self.offer(safe, hash, account, data)?.tx.clone();
+        crate::log::info(
+            "a Safe executor's fee confirmed: its offer prepared",
+            json!({}),
+        );
+        Some(tx)
     }
 
     /// Cancels request `id`: `cancelled`, its reads' replies ignored.
@@ -2054,6 +2172,18 @@ fn mul(a: u64, b: &U256) -> Option<U256> {
         product = product.checked_add(&U256::from_be_slice(&shifted)?)?;
     }
     Some(product)
+}
+
+/// `activateSafe`'s refusal of an executor (`executor`, its address's
+/// text) that can't pay `cost`.
+fn needs_funds_error(executor: &str, cost: &U256) -> ErrorBody {
+    refused(
+        "SAFE_NEEDS_FUNDS",
+        format!(
+            "Fund {executor} with at least {} xDAI to activate",
+            format_ether(cost)
+        ),
+    )
 }
 
 /// ethers' `formatEther`: the integer part, a point, and the fraction

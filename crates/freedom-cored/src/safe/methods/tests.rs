@@ -731,7 +731,15 @@ fn deploy_prepares_the_executors_deployment() {
     assert_eq!(fee_check["above"], true, "{reply}");
     assert_eq!(fee_check["askAgain"], true);
     assert_eq!(h.asked, ["code", "estimate", "fee", "balance", "reference"]);
-    // Confirmed: the send, the evidence still fresh.
+    // Confirmed: the send as offered, the code and the balance read again
+    // but no estimate, fee quote or fee evidence, so their failing since
+    // changes nothing (S4).
+    h.chain = h
+        .chain
+        .clone()
+        .served("estimate", Serve::Failed)
+        .served("fee", Serve::Failed)
+        .served("reference", Serve::Failed);
     h.asked.clear();
     let reply = h.call("safe.deploy", json!({ "safe": SAFE, "fee_ack": true }));
     let deployment = setup().deployment(&U256::from_u64(SALT));
@@ -750,7 +758,7 @@ fn deploy_prepares_the_executors_deployment() {
     );
     let keys: Vec<&String> = result(&reply)["send"].as_object().unwrap().keys().collect();
     assert_eq!(keys, ["kind", "account", "tx", "token"], "the token last");
-    assert_eq!(h.asked, ["code", "estimate", "fee", "balance"]);
+    assert_eq!(h.asked, ["code", "balance"]);
     assert!(h.marked.is_empty());
     // Main's `sign.transaction` spends it at its nonce, and only so.
     let spend = |h: &mut Harness, tx: &Value, token: &Value| {

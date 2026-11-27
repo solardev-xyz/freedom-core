@@ -810,8 +810,9 @@ fn a_prepared_send_ends_when_its_safe_tx_can_no_longer_execute() {
 /// The deployment is the executor's send too (design 0016, "The executor":
 /// it goes the same way): judged as `quotedExecutorSend` judges it, so a
 /// fee with no evidence to compare is offered, not sent, and `fee_ack`
-/// sends exactly the offer, the balance read again; a `fee_ack` with no
-/// offer standing confirms nothing.
+/// sends exactly the offer, the code and the balance read again but no
+/// estimate, fee quote or fee evidence; a `fee_ack` with no offer standing
+/// confirms nothing.
 #[test]
 fn a_deployment_is_judged_and_confirmed_as_an_execution_is() {
     let legacy = json!({ "type": "legacy", "gasPrice": "2000000000", "source": "quorum",
@@ -833,9 +834,82 @@ fn a_deployment_is_judged_and_confirmed_as_an_execution_is() {
     let send = send_of(&reply);
     assert_eq!(send["tx"]["gas_limit"], "240000");
     assert_eq!(send["tx"]["gas_price"], "2000000000");
-    assert_eq!(h.asked, ["code", "estimate", "fee", "balance", "reference"]);
+    assert_eq!(h.asked, ["code", "balance"]);
     // A `fee_ack` with no offer standing: the new quote is offered.
     let mut h = Harness::new(meta(false), Chain::undeployed());
     let reply = h.call("safe.deploy", json!({ "safe": SAFE, "fee_ack": true }));
     assert_eq!(result(&reply)["fee_check"]["above"], true, "{reply}");
+    assert_eq!(h.asked, ["code", "estimate", "fee", "balance", "reference"]);
+    assert!(h.safes.sends.is_empty());
+}
+
+/// `fee_ack` sends the deployment's offer only while the executor's
+/// balance, read again, covers the offer's cost: below it,
+/// `SAFE_NEEDS_FUNDS` with nothing minted. The offer stands, so once the
+/// executor is funded it is sent as shown, at its own cost, though a new
+/// quote would cost more.
+#[test]
+fn a_confirmed_deployment_still_needs_the_funds() {
+    let mut h = Harness::new(meta(false), Chain::undeployed());
+    let reply = h.call("safe.deploy", json!({ "safe": SAFE }));
+    assert_eq!(result(&reply)["fee_check"]["above"], true, "{reply}");
+    // The offer: 240,000 gas at 7 gwei, 0.00168 xDAI. One wei less.
+    let cost: u64 = 240_000 * 7_000_000_000;
+    h.chain = h
+        .chain
+        .clone()
+        .with("balance", json!(format!("{:#x}", cost - 1)));
+    h.asked.clear();
+    let reply = h.call("safe.deploy", json!({ "safe": SAFE, "fee_ack": true }));
+    assert_eq!(refusal(&reply), "SAFE_NEEDS_FUNDS");
+    assert_eq!(
+        reply["error"]["message"],
+        format!("Fund {A} with at least 0.00168 xDAI to activate")
+    );
+    assert_eq!(h.asked, ["code", "balance"]);
+    assert!(h.safes.sends.is_empty(), "nothing minted");
+    // Exactly the cost, the estimate grown meanwhile: the offer as shown.
+    h.chain = h
+        .chain
+        .clone()
+        .with("balance", json!(format!("{cost:#x}")))
+        .with("estimate", json!("0x40000"));
+    h.asked.clear();
+    let send = send_of(&h.call("safe.deploy", json!({ "safe": SAFE, "fee_ack": true })));
+    assert_eq!(send["tx"]["gas_limit"], "240000");
+    assert_eq!(send["tx"]["max_fee_per_gas"], "7000000000");
+    assert_eq!(h.asked, ["code", "balance"]);
+    assert_eq!(h.safes.sends.len(), 1);
+}
+
+/// An offer replaced while a confirmed deployment's balance is read is no
+/// longer the one the user confirmed: quoted again, as with none standing,
+/// and a fee the check stops is offered again, nothing minted.
+#[test]
+fn a_deployment_offer_replaced_meanwhile_is_quoted_again() {
+    let mut h = Harness::new(meta(false), Chain::undeployed());
+    let reply = h.call("safe.deploy", json!({ "safe": SAFE }));
+    assert_eq!(result(&reply)["fee_check"]["above"], true, "{reply}");
+    h.hold = true;
+    let outs = h.send("safe.deploy", json!({ "safe": SAFE, "fee_ack": true }));
+    assert!(h.drive(outs).is_none());
+    let code = h.held.pop().unwrap();
+    assert_eq!(name_of(&code), "code");
+    let outs = h
+        .safes
+        .chain_read(code.tag, &payload(&h.chain, &code), false, ctx!(h));
+    assert!(h.drive(outs).is_none());
+    let balance = h.held.pop().unwrap();
+    assert_eq!(name_of(&balance), "balance");
+    // Another quote's offer replaces it meanwhile.
+    h.safes.offers.get_mut(&SAFE).unwrap().tx["gas_limit"] = json!("250000");
+    h.hold = false;
+    h.asked.clear();
+    let outs = h
+        .safes
+        .chain_read(balance.tag, &payload(&h.chain, &balance), false, ctx!(h));
+    let reply = h.drive(outs).unwrap();
+    assert_eq!(result(&reply)["fee_check"]["above"], true, "{reply}");
+    assert_eq!(h.asked, ["estimate", "fee", "balance"]);
+    assert!(h.safes.sends.is_empty());
 }
