@@ -36,7 +36,12 @@
 //!   (`safe_changed`, `safe_unverified`, `not_deployed`, nothing signed),
 //!   unless the step can sign nothing: the threshold met, or the sweep with
 //!   the vault locked or every vault owner signed, answered at once. A
-//!   Ledger owner (S6) and a phone owner are `unsupported`.
+//!   Ledger owner (S6) signs on the device lane, `sign.typed_data`'s rows
+//!   over the session's SafeMessage (the grammar's `safe.message_sign`
+//!   row), its operation built before any read; its signature, checked by
+//!   fc-ledger, is kept only while the session is still the one the step
+//!   began on, not ended, and below its threshold ([`super::owners`]). A
+//!   phone owner is `unsupported` (0012's phone jobs).
 //! - **`safe.message_state { safe, session }`** → the state, or `null`
 //!   when no session is open, the ID isn't its, or it has ended
 //!   (`getSafeMessageState`).
@@ -67,6 +72,7 @@ use fc_approval::safe::Approved;
 use fc_safe::{SafeMessage, Signatures};
 use serde_json::value::RawValue;
 
+use super::owners::{self, Named};
 use super::*;
 
 /// `SAFE_MESSAGE_EXISTS`'s text (`openWatched`).
@@ -82,12 +88,8 @@ const OTHER_PAGE_TEXT: &str = "This signature request belongs to a different pag
 /// `requireSession`'s, for a session that has ended (`SAFE_DISCARDED`).
 const ENDED_TEXT: &str = "This signature request has ended";
 
-/// `signEntryOwner`'s, for a session ended or replaced while its owner
-/// signed (`SAFE_DISCARDED`).
-const DISCARDED_WHILE_TEXT: &str = "The request was discarded while the signature was being made";
-
 /// `signEntryOwner`'s, for an index that isn't one of the Safe's owners.
-const NOT_OWNER_TEXT: &str = "That account is not an owner of this Safe";
+pub(super) const NOT_OWNER_TEXT: &str = "That account is not an owner of this Safe";
 
 /// `approvalNeeded()`'s (`SAFE_APPROVAL_NEEDED`): the threshold's last
 /// signature ended the session's approval, so no owner signs after it.
@@ -96,9 +98,6 @@ const APPROVAL_NEEDED_TEXT: &str =
 
 /// `openWatched`'s, for a record that changed while the session opened.
 const CHANGED_TEXT: &str = "This account changed while the signature request was opening";
-
-/// A Ledger owner's (S6) or a phone owner's signature (`unsupported`).
-const UNSUPPORTED_OWNER_TEXT: &str = "Only the vault's owners can sign a Safe message here for now";
 
 /// The session ID's length in bytes.
 const ID_LEN: usize = 16;
@@ -115,6 +114,8 @@ pub(super) struct Session {
     pub(super) safe: [u8; 20],
     /// The SafeMessage's hash, which every owner signs.
     pub(super) hash: [u8; 32],
+    /// The digest the SafeMessage carries, for a Ledger owner's typed data.
+    pub(super) digest: [u8; 32],
     /// The record's threshold, which the reads verified.
     pub(super) threshold: usize,
     /// The caller's display data, as JS keeps it.
@@ -169,6 +170,7 @@ impl Sessions {
 /// A session `safe.message_start` opens once its reads are in.
 pub(super) struct Opening {
     hash: [u8; 32],
+    digest: [u8; 32],
     display: Option<JsValue>,
 }
 
@@ -417,19 +419,21 @@ fn state_of(records: &Records, index: u64, session: &Session) -> Result<JsValue,
     Ok(JsValue::Object(fields))
 }
 
-/// The vault owners' signatures over `hash` that `signatures` lacks, as
+/// The vault owners' signatures over `hash` (a SafeMessage's, or a
+/// SafeTx's for `safe.sign_owner`'s sweep) that `signatures` lacks, as
 /// `collectFreeSignatures` makes them: none while the vault is locked;
 /// otherwise each vault owner in the record's order that hasn't signed,
-/// until the Safe's threshold. One whose signature can't be made is passed
-/// over, as the reference passes over it. How many it signed.
-fn sweep(
+/// until the record's threshold. One whose signature can't be made is
+/// passed over, as the reference passes over it. The signatures it added,
+/// in order.
+pub(super) fn sweep(
     state: &VaultState,
     records: &Records,
     safe: &Safe,
     hash: &[u8; 32],
     signatures: &mut Signatures,
-) -> usize {
-    let mut signed = 0;
+) -> Vec<fc_safe::OwnerSignature> {
+    let mut signed = Vec::new();
     if !state.is_unlocked() {
         return signed;
     }
@@ -450,13 +454,10 @@ fn sweep(
         ) {
             Ok(signature) => {
                 if signatures.add(signature) {
-                    signed += 1;
+                    signed.push(signature);
                 }
             }
-            Err(_) => crate::log::warn(
-                "a vault owner's Safe message signature was passed over",
-                json!({}),
-            ),
+            Err(_) => crate::log::warn("a vault owner's Safe signature was passed over", json!({})),
         }
     }
     signed
@@ -548,7 +549,11 @@ impl Safes {
             .spend_safe_message(context, authorization, index, &payload, ctx.clocks)?;
         // An ended one gives way.
         self.sessions.open.remove(&index);
-        let work = Work::MessageStart(Box::new(Opening { hash, display }));
+        let work = Work::MessageStart(Box::new(Opening {
+            hash,
+            digest,
+            display,
+        }));
         Ok(self.check(id, Kind::MessageStart, safe, work, ctx.now))
     }
 
@@ -595,7 +600,7 @@ impl Safes {
             return Err(refused("SAFE_MESSAGE_EXISTS", EXISTS_TEXT));
         }
         let mut signatures = Signatures::new();
-        let signed = sweep(state, &records, &safe, &opening.hash, &mut signatures);
+        let signed = sweep(state, &records, &safe, &opening.hash, &mut signatures).len();
         // Filled in place, on the heap.
         let mut session_id = Box::new(Zeroizing::new([0u8; ID_LEN]));
         {
@@ -610,6 +615,7 @@ impl Safes {
             serial: self.sessions.serial,
             safe: safe.address,
             hash: opening.hash,
+            digest: opening.digest,
             threshold: safe.setup.threshold(),
             display: opening.display,
             signatures,
@@ -675,10 +681,11 @@ impl Safes {
                 if complete {
                     return Err(refused("SAFE_APPROVAL_NEEDED", APPROVAL_NEEDED_TEXT));
                 }
-                let Some(vault) = safe.vault_owners.iter().find(|(at, _)| *at == owner) else {
-                    return Err(refused("unsupported", UNSUPPORTED_OWNER_TEXT));
-                };
-                Some(*vault)
+                let (digest, hash) = (session.digest, session.hash);
+                // A vault owner, a Ledger owner (S6), or `unsupported`.
+                Some(owners::named(ctx, &safe, owner, address, |account| {
+                    owners::message_operation(account, &safe.address, &digest, &hash)
+                })?)
             }
         };
         if self.busy(index) {
@@ -686,7 +693,7 @@ impl Safes {
         }
         let session = self.session(index, presented.as_deref())?;
         match named {
-            Some(_) if !ctx.unlocked => return Err(crate::vault::locked()),
+            Some(Named::Vault { .. }) if !ctx.unlocked => return Err(crate::vault::locked()),
             // Nothing the sweep could sign: the state, with no read.
             None if complete
                 || !ctx.unlocked
@@ -703,6 +710,71 @@ impl Safes {
         Ok(self.check(id, Kind::MessageSign, safe, work, ctx.now))
     }
 
+    /// `safe.message_sign`'s reads are in, the setup the record's: a vault
+    /// owner's signing, or the sweep's, is due; a Ledger owner's operation
+    /// goes to the lane while the record is still the Safe the reads
+    /// checked and the session the one the step began on, not ended and
+    /// below its threshold.
+    pub(super) fn message_checked(
+        &mut self,
+        id: u64,
+        mut op: Op,
+        serial: u64,
+        owner: Option<Named>,
+        ctx: &Ctx,
+    ) -> Vec<Out> {
+        let Some(Named::Ledger(mut device)) = owner else {
+            op.work = Work::MessageSign { serial, owner };
+            op.step = Step::Write;
+            self.ops.insert(id, op);
+            self.writes.push(id);
+            return Vec::new();
+        };
+        let still = ctx
+            .approvals
+            .account_records()
+            .ok_or_else(not_moved)
+            .and_then(|records| resolve(records, op.safe.index))
+            .and_then(|safe| {
+                if safe.address == op.safe.address && safe.setup == op.safe.setup {
+                    Ok(())
+                } else {
+                    Err(plain(format!(
+                        "Wallet {} is not a Safe account",
+                        safe.index
+                    )))
+                }
+            });
+        if let Err(error) = still {
+            return vec![failed(id, &error)];
+        }
+        let Some(session) = self
+            .sessions
+            .open
+            .get(&op.safe.index)
+            .filter(|session| session.serial == serial && !session.ended)
+        else {
+            return vec![failed(
+                id,
+                &refused("SAFE_DISCARDED", owners::DISCARDED_WHILE_TEXT),
+            )];
+        };
+        if session.complete() {
+            return vec![failed(
+                id,
+                &refused("SAFE_APPROVAL_NEEDED", APPROVAL_NEEDED_TEXT),
+            )];
+        }
+        let Some(operation) = device.take_operation() else {
+            return vec![failed(id, &crate::vault::internal())];
+        };
+        op.work = Work::MessageSign {
+            serial,
+            owner: Some(Named::Ledger(device)),
+        };
+        self.onto_lane(id, op, operation)
+    }
+
     /// `safe.message_sign`'s signing, where no vault job is running, with
     /// the vault's `state`: the session still the one the step started on,
     /// and the record still the Safe the reads checked.
@@ -711,7 +783,7 @@ impl Safes {
         id: u64,
         checked: &Safe,
         serial: u64,
-        owner: Option<(u64, [u8; 20])>,
+        owner: Option<Named>,
         state: &VaultState,
         ctx: &mut Ctx,
     ) -> Out {
@@ -725,7 +797,7 @@ impl Safes {
         &mut self,
         checked: &Safe,
         serial: u64,
-        owner: Option<(u64, [u8; 20])>,
+        owner: Option<Named>,
         state: &VaultState,
         ctx: &mut Ctx,
     ) -> Result<JsValue, ErrorBody> {
@@ -739,7 +811,7 @@ impl Safes {
             .open
             .get_mut(&checked.index)
             .filter(|session| session.serial == serial && !session.ended)
-            .ok_or_else(|| refused("SAFE_DISCARDED", DISCARDED_WHILE_TEXT))?;
+            .ok_or_else(|| refused("SAFE_DISCARDED", owners::DISCARDED_WHILE_TEXT))?;
         let safe = resolve(&records, checked.index)?;
         if safe.address != checked.address || safe.setup != checked.setup {
             return Err(plain(format!(
@@ -749,7 +821,7 @@ impl Safes {
         }
         let hash = session.hash;
         let count = match owner {
-            Some((index, address)) if !session.signed(&address) => {
+            Some(Named::Vault { index, address }) if !session.signed(&address) => {
                 if session.complete() {
                     return Err(refused("SAFE_APPROVAL_NEEDED", APPROVAL_NEEDED_TEXT));
                 }
@@ -763,8 +835,24 @@ impl Safes {
                 )?;
                 usize::from(session.signatures.add(signature))
             }
+            // The device's signature, checked by fc-ledger over the
+            // SafeMessage's hash; kept only below the threshold, whose last
+            // signature ended the session's approval.
+            Some(Named::Ledger(device)) if !session.signed(&device.address) => {
+                if session.complete() {
+                    return Err(refused("SAFE_APPROVAL_NEEDED", APPROVAL_NEEDED_TEXT));
+                }
+                let signature = fc_safe::OwnerSignature::check(
+                    &hash,
+                    &device.signature()?,
+                    &device.address,
+                    safe.setup.owners(),
+                )
+                .map_err(|_| crate::vault::internal())?;
+                usize::from(session.signatures.add(signature))
+            }
             Some(_) => 0,
-            None => sweep(state, &records, &safe, &hash, &mut session.signatures),
+            None => sweep(state, &records, &safe, &hash, &mut session.signatures).len(),
         };
         if count > 0 {
             crate::log::info("a Safe message signed", json!({ "signed": count }));

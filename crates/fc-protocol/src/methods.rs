@@ -386,6 +386,12 @@ pub const METHODS: &[Method] = &[
     row("safe.message_state", CS, false, NOW),
     row("safe.message_cancel", CS, false, NOW),
     row("safe.message_complete", CS, false, NOW),
+    // Design 0016, API (SAFE-2's S6): owners who sign a pending SafeTx after
+    // its proposal, the chrome's board and main's: the vault owners' sweep,
+    // or one owner, a Ledger's on the device lane. It reads the chain before
+    // each owner's signature and may drive a Ledger: the `device` class.
+    // It writes `safe-pending.json`, not the identity files.
+    row("safe.sign_owner", CS, false, DEVICE),
     // Design 0013, "Payment history" (PRF-5g-2): the chrome reads and
     // clears (`payments:get-recent`, `:get-count`, `:get-by-id`,
     // `:clear`, `x402:get-receipts`); the writes and the repoll's are
@@ -788,6 +794,9 @@ mod tests {
             ("safe.message_state", false, true, Deadline::Immediate),
             ("safe.message_cancel", false, true, Deadline::Immediate),
             ("safe.message_complete", false, true, Deadline::Immediate),
+            // SAFE-2's S6: the board's owners who sign later, the vault's
+            // or a Ledger's, never a page's.
+            ("safe.sign_owner", false, true, Deadline::Device),
         ] {
             let row = method(name).unwrap();
             assert_eq!((row.deadline, row.mutates), (deadline, false), "{name}");
@@ -959,9 +968,8 @@ mod tests {
     /// immediate method, but `schema.json` writes it `"device"`, apart from
     /// `null` and `"idle"`; each APDU has its own, 15 s or the user's 5
     /// minutes. The rows that may drive a Ledger carry it, and no other:
-    /// `sign.*`, `ledger.*`, `x402.settle`, `safe.sign_owner` and
-    /// `safe.message_sign`, of which the table has `sign.*`, `ledger.*`,
-    /// `x402.settle` and `safe.message_sign` so far.
+    /// `sign.*`, `ledger.*`, `x402.settle`, `safe.message_sign` and
+    /// `safe.sign_owner`, all of them in the table since SAFE-2's S6.
     #[test]
     fn the_device_deadline_class() {
         assert_eq!(Deadline::Device.default_ms(), None);
@@ -995,7 +1003,8 @@ mod tests {
                 "ledger.accounts",
                 "ledger.add",
                 "x402.settle",
-                "safe.message_sign"
+                "safe.message_sign",
+                "safe.sign_owner"
             ]
         );
         for m in METHODS {
@@ -1012,6 +1021,7 @@ mod tests {
             ("ledger.add", Callers::ChromeOrShell, true),
             ("x402.settle", Callers::Shell, false),
             ("safe.message_sign", Callers::ChromeOrShell, false),
+            ("safe.sign_owner", Callers::ChromeOrShell, false),
         ] {
             let row = method(name).unwrap();
             assert_eq!(

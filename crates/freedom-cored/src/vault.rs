@@ -131,6 +131,11 @@ pub enum Out {
     /// data the reserved one, for the device lane:
     /// [`Vault::x402_ledger_ended`] answers it however it ends.
     X402Ledger(u64, Box<crate::approvals::x402::LedgerPayment>),
+    /// Request `id`'s Ledger owner's signature for a Safe (design 0016,
+    /// SAFE-2's S6: `safe.sign_owner`, `safe.message_sign`), its typed data
+    /// the pending SafeTx or the session's SafeMessage, for the device lane:
+    /// [`Vault::safe_ledger_ended`] answers it however it ends.
+    SafeLedger(u64, Box<fc_ledger::Operation>),
 }
 
 /// Why a vault operation failed. Mapped to a code and the method's JS
@@ -1823,6 +1828,20 @@ impl Vault {
             Err(error) => self.reply_error(&mut out, id, error),
         }
         self.after_request(&mut out);
+        out
+    }
+
+    /// Request `id`'s Ledger owner's operation for a Safe ended on the
+    /// device lane (design 0016, S6): its signature is kept for the Safe
+    /// method's write, where no vault job is running, or its end answers
+    /// the request ([`crate::safe::methods::Safes::device_ended`]).
+    pub fn safe_ledger_ended(
+        &mut self,
+        id: u64,
+        ended: Result<fc_ledger::Signed, ErrorBody>,
+    ) -> Vec<Out> {
+        let mut out = self.safes.device_ended(id, ended, Instant::now());
+        self.run_safe_marks(&mut out);
         out
     }
 

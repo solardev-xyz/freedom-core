@@ -28,11 +28,27 @@
 //!   record's owners (deviation `owner-signatures`). Any other is refused,
 //!   and a second from one owner is dropped: neither counts, and the entry
 //!   stays.
+//! - **The core's proposal mark** ([`PROPOSAL`], design 0016, "Owner
+//!   signatures"; S6): `safe.propose` marks the entry it writes with
+//!   `coreProposal: { chainId, safeAddress, safeTxHash }`, the Safe's chain
+//!   and checksummed address and the SafeTx's hash it recomputed, after
+//!   `createdAt` ([`mark`]). Only the core writes it: main's
+//!   `safe_pending.set` drops any the caller gives, and keeps the one the
+//!   index's entry already carries only while the new entry is for the
+//!   same Safe and recomputes to the same SafeTx ([`from_main`]). An entry
+//!   [`read`] reads is [`Entry::proposed`] when its mark is exactly the one
+//!   the core writes for the record's Safe and the recomputed hash, and
+//!   `safe.sign_owner` signs no other. The reference's readers ignore the
+//!   member, and its writers keep it (`{ ...current, signatures }`).
 
 use fc_evm::{checksum_address, parse_address, parse_bytes, to_hex};
 use fc_json::JsValue;
 use fc_protocol::error::ErrorBody;
+use fc_safe::constants::CHAIN_ID;
 use fc_safe::{OwnerSignature, SafeTx, Signatures};
+
+/// The member that holds the core's proposal mark.
+pub const PROPOSAL: &str = "coreProposal";
 
 /// Why an entry is set aside: nothing signs or executes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +90,9 @@ pub struct Entry {
     /// How many were refused or dropped.
     pub refused: usize,
     pub superseded: bool,
+    /// It carries the core's mark for the record's Safe and this SafeTx:
+    /// `safe.propose` wrote it ([`PROPOSAL`]).
+    pub proposed: bool,
 }
 
 /// An entry as `safe-pending.json` holds it, read for the Safe at `safe`
@@ -86,30 +105,13 @@ pub fn read(entry: &JsValue, safe: &[u8; 20], owners: &[[u8; 20]]) -> Result<Ent
         .get("signatures")
         .and_then(JsValue::as_array)
         .ok_or(SetAside::Shape)?;
-    match entry.get("chainId") {
-        Some(JsValue::Number(n)) if *n == fc_safe::constants::CHAIN_ID as f64 => {}
-        _ => return Err(SetAside::Chain),
+    if !on_gnosis(entry) {
+        return Err(SetAside::Chain);
     }
-    let address = entry
-        .get("safeAddress")
-        .and_then(JsValue::as_str)
-        .and_then(|text| parse_address(text).ok());
-    if address != Some(*safe) {
+    if safe_of(entry) != Some(*safe) {
         return Err(SetAside::Safe);
     }
-    let fields = entry
-        .get("safeTxData")
-        .and_then(|fields| serde_json::from_str::<serde_json::Value>(&fields.stringify()).ok())
-        .ok_or(SetAside::Fields)?;
-    let tx = SafeTx::from_fields(&fields).map_err(|_| SetAside::Fields)?;
-    let hash = tx.hash(safe).map_err(|_| SetAside::Fields)?;
-    let named = entry
-        .get("safeTxHash")
-        .and_then(JsValue::as_str)
-        .and_then(|text| parse_bytes(text, "safeTxHash").ok());
-    if named.as_deref() != Some(hash.as_slice()) {
-        return Err(SetAside::Hash);
-    }
+    let (tx, hash) = tx_of(entry, safe)?;
     let mut signatures = Signatures::new();
     let mut refused = 0;
     for signature in signed {
@@ -135,7 +137,96 @@ pub fn read(entry: &JsValue, safe: &[u8; 20], owners: &[[u8; 20]]) -> Result<Ent
         signatures,
         refused,
         superseded: entry.get("superseded").is_some_and(JsValue::truthy),
+        proposed: entry.get(PROPOSAL) == Some(&proposal(safe, &hash)),
     })
+}
+
+/// `chainId` is Gnosis's.
+fn on_gnosis(entry: &JsValue) -> bool {
+    matches!(entry.get("chainId"), Some(JsValue::Number(n)) if *n == CHAIN_ID as f64)
+}
+
+/// The Safe `safeAddress` names.
+fn safe_of(entry: &JsValue) -> Option<[u8; 20]> {
+    entry
+        .get("safeAddress")
+        .and_then(JsValue::as_str)
+        .and_then(|text| parse_address(text).ok())
+}
+
+/// The SafeTx `safeTxData` holds, one of Freedom's, and its hash for the
+/// Safe at `safe`, which `safeTxHash` must name.
+fn tx_of(entry: &JsValue, safe: &[u8; 20]) -> Result<(SafeTx, [u8; 32]), SetAside> {
+    let fields = entry
+        .get("safeTxData")
+        .and_then(|fields| serde_json::from_str::<serde_json::Value>(&fields.stringify()).ok())
+        .ok_or(SetAside::Fields)?;
+    let tx = SafeTx::from_fields(&fields).map_err(|_| SetAside::Fields)?;
+    let hash = tx.hash(safe).map_err(|_| SetAside::Fields)?;
+    let named = entry
+        .get("safeTxHash")
+        .and_then(JsValue::as_str)
+        .and_then(|text| parse_bytes(text, "safeTxHash").ok());
+    if named.as_deref() != Some(hash.as_slice()) {
+        return Err(SetAside::Hash);
+    }
+    Ok((tx, hash))
+}
+
+/// What an entry is for, with no record to read it against: the Safe its
+/// `safeAddress` names on Gnosis, and the hash its fields recompute to for
+/// that Safe, which its `safeTxHash` names. None for an entry that isn't
+/// one of Freedom's SafeTxs on Gnosis.
+fn identity(entry: &JsValue) -> Option<([u8; 20], [u8; 32])> {
+    if !matches!(entry, JsValue::Object(_)) || !on_gnosis(entry) {
+        return None;
+    }
+    let safe = safe_of(entry)?;
+    let (_, hash) = tx_of(entry, &safe).ok()?;
+    Some((safe, hash))
+}
+
+/// The core's proposal mark for the SafeTx `hash` of the Safe at `safe` on
+/// Gnosis: the only value [`read`] takes as one.
+pub fn proposal(safe: &[u8; 20], hash: &[u8; 32]) -> JsValue {
+    JsValue::Object(vec![
+        ("chainId".into(), JsValue::Number(CHAIN_ID as f64)),
+        (
+            "safeAddress".into(),
+            JsValue::string(checksum_address(safe).as_str()),
+        ),
+        ("safeTxHash".into(), JsValue::string(to_hex(hash).as_str())),
+    ])
+}
+
+/// `safe.propose`'s entry marked as the core's, for the SafeTx `hash` of
+/// the Safe at `safe`: [`PROPOSAL`] set, after the reference's members.
+pub fn mark(entry: &mut JsValue, safe: &[u8; 20], hash: &[u8; 32]) {
+    entry.set(PROPOSAL, proposal(safe, hash));
+}
+
+/// The entry main's `safe_pending.set` writes, `entry` as given but the
+/// mark: any [`PROPOSAL`] member it carries is dropped, and `current`'s
+/// (the index's entry as it stands) is kept, after the others, only when
+/// `current` carries the core's mark for what it is, and `entry` is for
+/// the same Safe on Gnosis and recomputes to the same SafeTx. So main can
+/// add signatures, `display` or `superseded` to a proposed entry and keep
+/// its mark, but never mark one: a SafeTx or a Safe changed, or a mark
+/// copied from another entry, leaves it unmarked.
+pub fn from_main(mut entry: JsValue, current: Option<&JsValue>) -> JsValue {
+    if let JsValue::Object(props) = &mut entry {
+        props.retain(|(key, _)| *key != PROPOSAL);
+    }
+    let kept = current.and_then(|current| {
+        let (safe, hash) = identity(current)?;
+        let mark = proposal(&safe, &hash);
+        (current.get(PROPOSAL) == Some(&mark) && identity(&entry) == Some((safe, hash)))
+            .then_some(mark)
+    });
+    if let Some(mark) = kept {
+        entry.set(PROPOSAL, mark);
+    }
+    entry
 }
 
 /// What [`written`] writes.

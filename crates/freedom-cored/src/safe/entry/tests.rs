@@ -1,7 +1,9 @@
 //! The entry codec against `vectors/safe.json`'s flows: each entry the
 //! reference's `startSafeSend` and `signEntryOwner` leave written as it
-//! writes it, and read back with every signature counted; and what the
-//! codec sets aside, refuses and drops.
+//! writes it, and read back with every signature counted; what the codec
+//! sets aside, refuses and drops; and the core's proposal mark, read only
+//! in the form the core writes it for the entry's Safe and SafeTx, and
+//! kept through main's set only for the same Safe and SafeTx.
 
 use std::path::PathBuf;
 
@@ -320,4 +322,195 @@ fn no_display_is_left_out_as_json_leaves_out_undefined() {
     })
     .unwrap();
     assert_eq!(entry.get("display"), Some(&JsValue::Null));
+}
+
+/// The flow's entry as main's `safe_pending.set` sends it: `entry` changed
+/// by `change`.
+fn changed_by(entry: &Value, change: impl FnOnce(&mut Value)) -> Value {
+    let mut entry = entry.clone();
+    change(&mut entry);
+    entry
+}
+
+fn mark_value(safe: &[u8; 20], hash: &[u8; 32]) -> Value {
+    serde_json::from_str(&proposal(safe, hash).stringify()).unwrap()
+}
+
+/// An entry reads as proposed only with the mark the core writes for the
+/// record's Safe and the SafeTx its fields recompute to; the reference's
+/// entries carry none.
+#[test]
+fn only_the_cores_mark_for_this_safe_and_safe_tx_reads_as_proposed() {
+    let (pending, setup, safe) = start();
+    let owners = setup.owners();
+    let read = read(&js(&pending), &safe, owners).unwrap();
+    assert!(!read.proposed, "the reference's entry");
+    let hash = read.hash;
+    let mut marked = js(&pending);
+    mark(&mut marked, &safe, &hash);
+    let again = super::read(&marked, &safe, owners).unwrap();
+    assert!(again.proposed);
+    let text: Value = serde_json::from_str(&marked.stringify()).unwrap();
+    assert_eq!(
+        text[PROPOSAL],
+        json!({
+            "chainId": 100,
+            "safeAddress": checksum_address(&safe),
+            "safeTxHash": to_hex(&hash),
+        })
+    );
+    let proposed = |mark: Value| {
+        let mut entry = pending.clone();
+        entry[PROPOSAL] = mark;
+        super::read(&js(&entry), &safe, owners).unwrap().proposed
+    };
+    let exact = mark_value(&safe, &hash);
+    assert!(proposed(exact.clone()));
+    let with = |key: &str, value: Value| {
+        let mut mark = exact.clone();
+        mark[key] = value;
+        mark
+    };
+    let elsewhere = setup.address(&U256::from_u64(99));
+    for (what, mark) in [
+        ("another Safe's", mark_value(&elsewhere, &hash)),
+        ("another SafeTx's", mark_value(&safe, &[0x11; 32])),
+        ("another chain", with("chainId", json!(1))),
+        ("the chain as text", with("chainId", json!("100"))),
+        ("lower case", with("safeAddress", json!(to_hex(&safe)))),
+        ("an extra member", with("by", json!("core"))),
+        ("no hash", {
+            let mut mark = exact.clone();
+            mark.as_object_mut().unwrap().shift_remove("safeTxHash");
+            mark
+        }),
+        ("true", json!(true)),
+        ("null", json!(null)),
+    ] {
+        assert!(!proposed(mark), "{what}");
+    }
+}
+
+/// Main's set: a mark it sends is dropped; the index's own is kept, after
+/// the others, only while the new entry is for the same Safe on Gnosis and
+/// recomputes to the same SafeTx, whatever else changed; an entry that
+/// isn't an object passes as it is.
+#[test]
+fn main_keeps_the_mark_only_for_the_same_safe_and_safe_tx() {
+    let (pending, setup, safe) = start();
+    let hash: [u8; 32] = parse_bytes(pending["safeTxHash"].as_str().unwrap(), "")
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let exact = mark_value(&safe, &hash);
+    let mut current = js(&pending);
+    mark(&mut current, &safe, &hash);
+    let set = |entry: &Value, current: Option<&JsValue>| -> Value {
+        serde_json::from_str(&from_main(js(entry), current).stringify()).unwrap()
+    };
+    // A mark main sends is dropped, with or without an entry there.
+    let sent = changed_by(&pending, |entry| entry[PROPOSAL] = exact.clone());
+    assert_eq!(set(&sent, None), pending);
+    assert_eq!(set(&sent, Some(&js(&pending))), pending, "an unmarked one");
+    let mut bogus = js(&pending);
+    bogus.set(PROPOSAL, JsValue::Bool(true));
+    assert_eq!(set(&sent, Some(&bogus)), pending, "a bogus one");
+    // The same Safe and SafeTx: kept, after the others, whatever main sent.
+    let other = checksum_address(&[0x77; 20]);
+    for (what, entry) in [
+        ("as it is", pending.clone()),
+        ("its mark sent back", sent.clone()),
+        (
+            "another mark sent",
+            changed_by(&pending, |entry| entry[PROPOSAL] = json!(true)),
+        ),
+        (
+            "a signature more",
+            changed_by(&pending, |entry| {
+                entry["signatures"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({ "signer": other, "data": "0x00" }))
+            }),
+        ),
+        (
+            "another display",
+            changed_by(&pending, |entry| entry["display"] = json!("x")),
+        ),
+        (
+            "superseded",
+            changed_by(&pending, |entry| entry["superseded"] = json!(true)),
+        ),
+        (
+            "the hash in upper case",
+            changed_by(&pending, |entry| {
+                let upper = to_hex(&hash).to_uppercase().replace("0X", "0x");
+                entry["safeTxHash"] = json!(upper);
+            }),
+        ),
+        (
+            "the address in lower case",
+            changed_by(&pending, |entry| {
+                entry["safeAddress"] = json!(to_hex(&safe))
+            }),
+        ),
+    ] {
+        let written = set(&entry, Some(&current));
+        assert_eq!(written[PROPOSAL], exact, "{what}");
+        assert_eq!(
+            written.as_object().unwrap().keys().next_back().unwrap(),
+            PROPOSAL
+        );
+        let mut without = written.clone();
+        without.as_object_mut().unwrap().shift_remove(PROPOSAL);
+        let mut sent = entry.clone();
+        sent.as_object_mut().unwrap().shift_remove(PROPOSAL);
+        assert_eq!(without, sent, "{what}: the rest as sent");
+    }
+    // Another Safe, chain or SafeTx: dropped, the mark sent back or not.
+    let elsewhere = checksum_address(&setup.address(&U256::from_u64(99)));
+    let changes: [(&str, &str, Value); 6] = [
+        ("another Safe", "safeAddress", json!(elsewhere)),
+        ("another chain", "chainId", json!(1)),
+        ("no chain", "chainId", Value::Null),
+        ("another value", "value", json!("1")),
+        (
+            "another hash named",
+            "safeTxHash",
+            json!(to_hex(&[0x11; 32])),
+        ),
+        ("no fields", "safeTxData", Value::Null),
+    ];
+    for (what, key, value) in changes {
+        let change = |entry: &mut Value| match key {
+            "value" => entry["safeTxData"]["value"] = value.clone(),
+            "chainId" if value.is_null() => {
+                entry.as_object_mut().unwrap().shift_remove("chainId");
+            }
+            key => entry[key] = value.clone(),
+        };
+        for sent_back in [false, true] {
+            let entry = changed_by(&pending, |entry| {
+                change(entry);
+                if sent_back {
+                    entry[PROPOSAL] = exact.clone();
+                }
+            });
+            let written = set(&entry, Some(&current));
+            assert!(written.get(PROPOSAL).is_none(), "{what}, {sent_back}");
+        }
+    }
+    // The fields of another SafeTx with their own hash: still another.
+    let mut fields = pending["safeTxData"].clone();
+    fields["value"] = json!("1");
+    let tx = SafeTx::from_fields(&fields).unwrap();
+    let rehashed = changed_by(&pending, |entry| {
+        entry["safeTxData"] = fields.clone();
+        entry["safeTxHash"] = json!(to_hex(&tx.hash(&safe).unwrap()));
+    });
+    assert!(set(&rehashed, Some(&current)).get(PROPOSAL).is_none());
+    // An entry that isn't an object, falsy or not, passes as it is.
+    for entry in [json!(null), json!(0), json!("a"), json!([1])] {
+        assert_eq!(set(&entry, Some(&current)), entry);
+    }
 }

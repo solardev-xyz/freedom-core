@@ -1,8 +1,9 @@
-//! The `safe.*` methods (design 0016, API; SAFE-2's S2 to S5): a Safe's
+//! The `safe.*` methods (design 0016, API; SAFE-2's S2 to S6): a Safe's
 //! record made in the core, its status and deployment read through the
 //! chain machine, the pending store's board views, a Safe transaction
-//! prepared, proposed and executed, and a page's Safe message signed by
-//! the Safe's owners ([`messages`]). Every one answers
+//! prepared, proposed, signed by the owners who sign later ([`owners`])
+//! and executed, and a page's Safe message signed by the Safe's owners
+//! ([`messages`]), a Ledger owner on the device lane. Every one answers
 //! `not_moved` (`data.store: "vault_meta"`) until the hello names
 //! `vault_meta`: the record is the core's to read and to mark.
 //!
@@ -79,9 +80,9 @@
 //!   are read again, each verified, and the nonce must still be the
 //!   SafeTx's; then, where no vault job is running, the vault owners sign
 //!   at once while the vault is unlocked, and the entry is written
-//!   ([`super::entry`]) unless another is pending meanwhile. It needs
-//!   `safe_pending` moved too. A presented token is burnt however the
-//!   request ends.
+//!   ([`super::entry`]), with the core's proposal mark, unless another is
+//!   pending meanwhile. It needs `safe_pending` moved too. A presented
+//!   token is burnt however the request ends.
 //! - **`safe.execute { safe, fee_ack?, safe_tx_hash? }`** → `{ send }`,
 //!   `{ fee_check }` or `{ superseded }` (S4): the pending SafeTx as the
 //!   codec reads it (`safe_tx_hash`, when given, must name it), of a Safe
@@ -122,7 +123,15 @@
 //! - **`safe.message_start`**, **`.message_sign`**, **`.message_state`**,
 //!   **`.message_cancel`** and **`.message_complete`** (S5): a page's
 //!   `personal_sign` or `eth_signTypedData_v4` for a Safe, as a session of
-//!   owner signatures over its SafeMessage ([`messages`]).
+//!   owner signatures over its SafeMessage ([`messages`]); a Ledger owner's
+//!   on the device lane (S6).
+//! - **`safe.sign_owner { safe, owner?, safe_tx_hash? }`** → the board's
+//!   state (S6): the pending SafeTx signed by the vault owners that haven't
+//!   signed (the board's sweep after a proposal made while the vault was
+//!   locked), or by the owner named, a vault owner or a Ledger owner on the
+//!   device lane, after the eight reads ([`owners`]); only an entry that
+//!   carries the core's proposal mark, which `safe.propose` writes and
+//!   main's `safe_pending.set` can't (`not_proposed` otherwise).
 //! - **The Safe's hold:** from a `safe.propose`'s spend to its answer, and
 //!   from a `safe.execute`'s start to its answer, the Safe is held: another
 //!   `safe.propose` for it is `SAFE_PENDING_EXISTS`, as the reference's
@@ -134,10 +143,12 @@
 //!   their answers, as the reference's one step per Safe covers sends and
 //!   message sessions alike (`signature-collection.js`'s `acquire`): every
 //!   other step of the Safe is `SAFE_BUSY` meanwhile, a `safe.propose` too.
+//!   So does a `safe.sign_owner`, from its start to its answer, a Ledger
+//!   owner's wait on the device included (S6).
 //! - **Refusals** are `invalid_argument` with `data.safe`: `unsupported`,
 //!   `unverified` (a deployment or activation no read answered, or a read
 //!   a step that signs rests on), `changed`, `not_deployed`, `self_call`,
-//!   `nonce_behind`, `store_full`, or today's `SAFE_*` codes
+//!   `nonce_behind`, `store_full`, `not_proposed`, or today's `SAFE_*` codes
 //!   (`SAFE_ADDRESS_MISMATCH`, `SAFE_NEEDS_FUNDS`, `SAFE_DISCARDED`,
 //!   `SAFE_PENDING_EXISTS`, `SAFE_BUSY`, and a message's
 //!   `SAFE_MESSAGE_EXISTS` and `SAFE_APPROVAL_NEEDED`). `safe.status` reports `changed`,
@@ -178,9 +189,10 @@ use crate::phone::ChainRead;
 use crate::safe_pending::{Failure, SafePending};
 use crate::vault::{Out, error_payload};
 use messages::{Opening, Sessions};
+use owners::Named;
 
 /// The methods, in `core.hello`'s capability order.
-pub const METHODS: [&str; 15] = [
+pub const METHODS: [&str; 16] = [
     "safe.create",
     "safe.status",
     "safe.deploy",
@@ -196,6 +208,7 @@ pub const METHODS: [&str; 15] = [
     "safe.message_state",
     "safe.message_cancel",
     "safe.message_complete",
+    "safe.sign_owner",
 ];
 
 /// The kind of the token the executor's prepared send carries (S4).
@@ -690,6 +703,8 @@ enum Kind {
     MessageStart,
     /// `safe.message_sign` (S5).
     MessageSign,
+    /// `safe.sign_owner` (S6).
+    SignOwner,
 }
 
 /// What a `safe.prepare`, `safe.propose` or `safe.execute` carries beside
@@ -716,11 +731,17 @@ enum Work {
     },
     /// The session `safe.message_start` opens once its reads are in (S5).
     MessageStart(Box<Opening>),
-    /// The session `safe.message_sign` signs, by its serial, and the vault
-    /// owner named (index and address), or none for the sweep (S5).
+    /// The session `safe.message_sign` signs, by its serial, and the owner
+    /// named (S5; a Ledger owner from S6), or none for the sweep.
     MessageSign {
         serial: u64,
-        owner: Option<(u64, [u8; 20])>,
+        owner: Option<Named>,
+    },
+    /// The pending SafeTx `safe.sign_owner` signs, by its hash, and the
+    /// owner named, or none for the vault owners' sweep (S6).
+    SignOwner {
+        hash: [u8; 32],
+        owner: Option<Named>,
     },
 }
 
@@ -769,6 +790,10 @@ enum Step {
     /// The setup and the nonce are verified: the vault owners sign and the
     /// entry is written ([`Safes::write`]).
     Write,
+    /// A Ledger owner's operation is on the device lane (S6): no read is
+    /// out, and the reads' bound no longer applies; the lane's own bounds
+    /// hold until [`Safes::device_ended`].
+    Device,
 }
 
 /// The activation's or the execution's reads: the estimate, the fee
@@ -1015,6 +1040,7 @@ impl Safes {
             "safe.message_state" => return self.message_state(id, raw, &records),
             "safe.message_cancel" => return self.message_cancel(id, raw),
             "safe.message_complete" => return self.message_complete(id, raw),
+            "safe.sign_owner" => return self.sign_owner(id, raw, &records, ctx),
             "safe.pending" => {
                 members(raw, &[], &mut params)?;
                 let states = pending_states(&records, ctx.pending)?;
@@ -1210,7 +1236,8 @@ impl Safes {
             | Kind::Propose
             | Kind::Execute { .. }
             | Kind::MessageStart
-            | Kind::MessageSign => {
+            | Kind::MessageSign
+            | Kind::SignOwner => {
                 return Err(crate::vault::internal());
             }
         };
@@ -1342,9 +1369,9 @@ impl Safes {
                     None => vec![self.quoted(id, &op, &quote, ctx)],
                 }
             }
-            // No read is out while the mark or the write is due: a stray
-            // reply changes nothing.
-            Step::Mark | Step::Write => {
+            // No read is out while the mark or the write is due, or while
+            // the device signs: a stray reply changes nothing.
+            Step::Mark | Step::Write | Step::Device => {
                 self.ops.insert(id, op);
                 Vec::new()
             }
@@ -1389,7 +1416,8 @@ impl Safes {
                     | Kind::Propose
                     | Kind::Execute { .. }
                     | Kind::MessageStart
-                    | Kind::MessageSign => {
+                    | Kind::MessageSign
+                    | Kind::SignOwner => {
                         return vec![failed(id, &crate::vault::internal())];
                     }
                 };
@@ -1408,7 +1436,8 @@ impl Safes {
                 | Kind::Propose
                 | Kind::Execute { .. }
                 | Kind::MessageStart
-                | Kind::MessageSign => vec![failed(id, &crate::vault::internal())],
+                | Kind::MessageSign
+                | Kind::SignOwner => vec![failed(id, &crate::vault::internal())],
                 Kind::Status | Kind::Deploy { .. } => {
                     let Some(executor) = op.safe.executor.clone() else {
                         return vec![match op.kind {
@@ -1560,7 +1589,8 @@ impl Safes {
             | Kind::Propose
             | Kind::Execute { .. }
             | Kind::MessageStart
-            | Kind::MessageSign => vec![failed(id, &crate::vault::internal())],
+            | Kind::MessageSign
+            | Kind::SignOwner => vec![failed(id, &crate::vault::internal())],
             Kind::Status => {
                 let (evidence, reads) = Evidence::start_status(
                     op.safe.address,
@@ -1590,13 +1620,18 @@ impl Safes {
     }
 
     /// Whether any step holds the Safe at wallet index `index`: a send's
-    /// ([`Safes::holds`]) or a message's (S5), the reference's one step per
-    /// Safe (`signature-collection.js`'s `acquire`).
+    /// ([`Safes::holds`]), a message's (S5) or an owner's signature (S6),
+    /// the reference's one step per Safe (`signature-collection.js`'s
+    /// `acquire`).
     fn busy(&self, index: u64) -> bool {
         self.ops.values().any(|op| {
             matches!(
                 op.kind,
-                Kind::Propose | Kind::Execute { .. } | Kind::MessageStart | Kind::MessageSign
+                Kind::Propose
+                    | Kind::Execute { .. }
+                    | Kind::MessageStart
+                    | Kind::MessageSign
+                    | Kind::SignOwner
             ) && op.safe.index == index
         })
     }
@@ -1707,15 +1742,21 @@ impl Safes {
                     }
                 }
             }
-            // A message's step: the session opened or signed where no
-            // vault job is running, with the vault's state ([`Safes::write`]).
-            work @ (Work::MessageStart(_) | Work::MessageSign { .. }) => {
+            // A message's start: the session opened where no vault job is
+            // running, with the vault's state ([`Safes::write`]).
+            work @ Work::MessageStart(_) => {
                 op.work = work;
                 op.step = Step::Write;
                 self.ops.insert(id, op);
                 self.writes.push(id);
                 Vec::new()
             }
+            // A message's owners: signed where no vault job is running, or
+            // a Ledger owner's operation to the lane (S6).
+            Work::MessageSign { serial, owner } => self.message_checked(id, op, serial, owner, ctx),
+            // `safe.sign_owner` (S6): the record and the entry still the
+            // ones read, at the verified nonce.
+            Work::SignOwner { hash, owner } => self.owner_checked(id, op, hash, owner, &nonce, ctx),
             Work::Exec { .. } | Work::None => vec![failed(id, &crate::vault::internal())],
         }
     }
@@ -1807,6 +1848,9 @@ impl Safes {
     /// Proposal `id`'s signing and write, with the vault's `state`: its
     /// answer, the board's state. Or a message's step (S5): the session
     /// `safe.message_start` opens, or the owners `safe.message_sign` signs.
+    /// Or `safe.sign_owner`'s (S6): its owners' signatures added to the
+    /// pending entry. A Ledger owner's signature is the device's, kept
+    /// since [`Safes::device_ended`].
     pub fn write(&mut self, id: u64, state: &VaultState, ctx: &mut Ctx) -> Vec<Out> {
         let Some(op) = self.ops.remove(&id) else {
             return Vec::new();
@@ -1821,6 +1865,9 @@ impl Safes {
             Work::MessageStart(opening) => vec![self.opened(id, &op.safe, *opening, state, ctx)],
             Work::MessageSign { serial, owner } => {
                 vec![self.message_signed(id, &op.safe, serial, owner, state, ctx)]
+            }
+            Work::SignOwner { hash, owner } => {
+                vec![self.owner_signed(id, &op.safe, hash, owner, state, ctx)]
             }
             _ => vec![failed(id, &crate::vault::internal())],
         }
@@ -1941,7 +1988,8 @@ impl Safes {
             | Kind::Propose
             | Kind::Execute { .. }
             | Kind::MessageStart
-            | Kind::MessageSign => failed(id, &crate::vault::internal()),
+            | Kind::MessageSign
+            | Kind::SignOwner => failed(id, &crate::vault::internal()),
         }
     }
 
@@ -2121,12 +2169,13 @@ impl Safes {
         )]
     }
 
-    /// Answers `deadline` for every request past its bound.
+    /// Answers `deadline` for every request past its bound; one on the
+    /// device lane has the lane's bounds instead (S6).
     pub fn tick(&mut self, now: Instant) -> Vec<Out> {
         let due: Vec<u64> = self
             .ops
             .iter()
-            .filter(|(_, op)| now >= op.deadline)
+            .filter(|(_, op)| !matches!(op.step, Step::Device) && now >= op.deadline)
             .map(|(id, _)| *id)
             .collect();
         due.into_iter()
@@ -2138,9 +2187,13 @@ impl Safes {
             .collect()
     }
 
-    /// The earliest request's bound.
+    /// The earliest request's bound, the ones on the device lane aside.
     pub fn next_wakeup(&self) -> Option<Instant> {
-        self.ops.values().map(|op| op.deadline).min()
+        self.ops
+            .values()
+            .filter(|op| !matches!(op.step, Step::Device))
+            .map(|op| op.deadline)
+            .min()
     }
 
     /// Drops request `id`'s reads: their replies change nothing but the
@@ -2451,10 +2504,11 @@ fn executed(
 /// `safe.propose`'s signing and write, where no vault job is running: the
 /// Safe's record as it stands now, which must still be the one the reads
 /// checked; the vault owners' signatures (`collectFreeSignatures`); the
-/// entry written, unless an entry that reads is pending meanwhile; then the
-/// Safe's older `safe-send` approvals ended, as a new one ends them, since
-/// a Safe has one pending SafeTx. The board's state, with `durable: false`
-/// when the write's flush failed.
+/// entry written with the core's proposal mark ([`entry::mark`]), unless an
+/// entry that reads is pending meanwhile; then the Safe's older `safe-send`
+/// approvals ended, as a new one ends them, since a Safe has one pending
+/// SafeTx. The board's state, with `durable: false` when the write's flush
+/// failed.
 fn proposed(
     checked: &Safe,
     prepared: &Prepared,
@@ -2483,7 +2537,7 @@ fn proposed(
         &prepared.hash,
         threshold,
     );
-    let written = entry::written(&entry::New {
+    let mut written = entry::written(&entry::New {
         safe: &safe.address,
         tx: &prepared.tx,
         hash: &prepared.hash,
@@ -2492,6 +2546,9 @@ fn proposed(
         signatures: &signatures,
         created_at_ms: ctx.clocks.wall_ms,
     })?;
+    // The core's mark: the spent `safe-send` authorized this SafeTx, for
+    // `safe.sign_owner` to sign it later (design 0016, "Owner signatures").
+    entry::mark(&mut written, &safe.address, &prepared.hash);
     let durable = ctx
         .pending
         .set_where(safe.index, written.clone(), |current| match current {
@@ -2668,6 +2725,7 @@ fn discard(
 }
 
 mod messages;
+mod owners;
 
 #[cfg(test)]
 mod tests;

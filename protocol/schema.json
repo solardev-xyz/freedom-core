@@ -96,6 +96,7 @@
     { "name": "safe.message_state", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "safe.message_cancel", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "safe.message_complete", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
+    { "name": "safe.sign_owner", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": "device" },
     { "name": "payments.append", "callers": ["shell"], "mutates": false, "deadline_ms": null },
     { "name": "payments.update", "callers": ["shell"], "mutates": false, "deadline_ms": null },
     { "name": "payments.mark_confirmed", "callers": ["shell"], "mutates": false, "deadline_ms": null },

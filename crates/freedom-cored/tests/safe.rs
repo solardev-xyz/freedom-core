@@ -656,6 +656,16 @@ fn a_safe_tx_is_prepared_proposed_and_reloaded() {
     let mut entry = file[index.to_string()].clone();
     assert!(entry["createdAt"].is_u64(), "{entry}");
     entry.as_object_mut().unwrap().shift_remove("createdAt");
+    // The core's proposal mark, after the reference's members (0016,
+    // "Owner signatures"): this Safe on Gnosis and this SafeTx.
+    let mark = entry.as_object_mut().unwrap().shift_remove("coreProposal");
+    assert_eq!(
+        mark,
+        Some(json!({
+            "chainId": 100, "safeAddress": pending["safeAddress"],
+            "safeTxHash": pending["safeTxHash"],
+        }))
+    );
     assert_eq!(entry, *pending);
     // A restart reads it back, the vault locked.
     drop(core);

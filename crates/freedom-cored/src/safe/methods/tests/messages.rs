@@ -5,9 +5,9 @@
 //! hash, each owner's signature and the joined signature); a session
 //! refused for another page; complete only at the threshold;
 //! `safe.message_sign` reading the setup before each owner's signature, a
-//! changed setup refusing it with nothing signed; a Ledger owner
-//! `unsupported` until S6; the Safe's hold; and the session following the
-//! records.
+//! changed setup refusing it with nothing signed; a phone owner
+//! `unsupported` (a Ledger owner's, S6's, is [`super::owners`]'); the
+//! Safe's hold; and the session following the records.
 
 use fc_protocol::message::{CallerKind, PageContext};
 use fc_vault::state::VaultState;
@@ -25,7 +25,7 @@ fn vectors() -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
-fn message(id: &str) -> Value {
+pub(super) fn message(id: &str) -> Value {
     vectors()["messages"]
         .as_array()
         .unwrap()
@@ -108,7 +108,7 @@ impl Harness {
     }
 
     /// Minted and started under the page `SITE` in frame 1: the answer.
-    fn message_started(&mut self, index: u64, request: &Value) -> Value {
+    pub(super) fn message_started(&mut self, index: u64, request: &Value) -> Value {
         self.context = page(SITE, 1);
         let token = self.message_token(index, request);
         self.message_start(index, request, &token)
@@ -116,7 +116,13 @@ impl Harness {
 
     /// A board call (`safe.message_sign`, `_state`, `_cancel`,
     /// `_complete`) from main, naming `session` and `owner`.
-    fn board(&mut self, method: &str, index: u64, session: &str, owner: Option<u64>) -> Value {
+    pub(super) fn board(
+        &mut self,
+        method: &str,
+        index: u64,
+        session: &str,
+        owner: Option<u64>,
+    ) -> Value {
         let context = std::mem::replace(&mut self.context, caller(CallerKind::Shell));
         let mut params = json!({ "safe": index, "session": session });
         if let Some(owner) = owner {
@@ -128,7 +134,7 @@ impl Harness {
     }
 
     /// The Safe's open session's kept signatures, by owner.
-    fn kept(&self, index: u64) -> Vec<(String, String)> {
+    pub(super) fn kept(&self, index: u64) -> Vec<(String, String)> {
         self.safes.sessions.open[&index]
             .signatures
             .kept()
@@ -138,7 +144,7 @@ impl Harness {
     }
 }
 
-fn session_of(answer: &Value) -> String {
+pub(super) fn session_of(answer: &Value) -> String {
     let session = result(answer)["session"].as_str().unwrap().to_owned();
     assert_eq!(session.len(), 32, "{session}");
     assert!(
@@ -150,7 +156,7 @@ fn session_of(answer: &Value) -> String {
 }
 
 /// The vector signatures, by owner.
-fn vector_signatures(case: &Value) -> Vec<(String, String)> {
+pub(super) fn vector_signatures(case: &Value) -> Vec<(String, String)> {
     let mut signatures: Vec<(String, String)> = case["signatures"]
         .as_array()
         .unwrap()
@@ -244,9 +250,9 @@ fn start_and_complete_give_the_reference_s_signatures() {
 /// A Safe with a Ledger and a phone among its owners (`S4`, D, A and E, 2 of
 /// 3): the vault owner A signs at the start, the reference's signature; the
 /// join waits for the threshold ("Not enough signatures yet (1 of 2)", the
-/// `below-the-threshold` case); the Ledger owner D signs through
-/// `safe.message_sign` only with S6, `unsupported` until then, and so is
-/// the phone owner E. A sweep with nothing left to sign reads nothing.
+/// `below-the-threshold` case); the phone owner E is `unsupported` (the
+/// Ledger owner D signs on the device lane, S6's tests). A sweep with
+/// nothing left to sign reads nothing.
 #[test]
 fn a_device_owner_waits_and_the_join_waits_for_the_threshold() {
     for id in ["S4-below-the-threshold", "S4-device-owner"] {
@@ -280,10 +286,8 @@ fn a_device_owner_waits_and_the_join_waits_for_the_threshold() {
             "Not enough signatures yet (1 of 2)"
         );
         h.asked.clear();
-        for owner in [1_000_000, 1_000_001] {
-            let reply = h.board("safe.message_sign", S4, &session, Some(owner));
-            assert_eq!(refusal(&reply), "unsupported", "{owner}");
-        }
+        let reply = h.board("safe.message_sign", S4, &session, Some(1_000_001));
+        assert_eq!(refusal(&reply), "unsupported");
         let reply = h.board("safe.message_sign", S4, &session, None);
         assert_eq!(result(&reply)["collected"], 1);
         // A's again: idempotent.

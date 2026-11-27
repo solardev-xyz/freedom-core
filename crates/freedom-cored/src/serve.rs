@@ -326,6 +326,8 @@ const CAPABILITIES: &[&str] = &[
     "safe.message_state",
     "safe.message_cancel",
     "safe.message_complete",
+    // Design 0016: owners who sign after a proposal (SAFE-2's S6).
+    "safe.sign_owner",
     // Design 0013: the payment history (PRF-5g-2).
     "payments.append",
     "payments.update",
@@ -2272,6 +2274,10 @@ impl Core {
                     let outs = self.vault.x402_ledger_ended(id, *settling, ended);
                     self.dispatch(outs)
                 }
+                Finish::Safe(id, ended) => {
+                    let outs = self.vault.safe_ledger_ended(id, ended);
+                    self.dispatch(outs)
+                }
             };
             if let Flow::Exit(exit) = flow {
                 return Flow::Exit(exit);
@@ -2548,6 +2554,15 @@ impl Core {
                         Turn::Wait,
                         Instant::now(),
                     );
+                    self.ledger_ended(ended)
+                }
+                // A Safe's Ledger owner (design 0016, S6): its signature over
+                // the pending SafeTx or the session's SafeMessage waits its
+                // turn on the device lane, the Safe held meanwhile.
+                Out::SafeLedger(id, operation) => {
+                    let ended =
+                        self.ledger
+                            .submit(id, *operation, Then::Safe, Turn::Wait, Instant::now());
                     self.ledger_ended(ended)
                 }
                 // A user's Swarm grant change (design 0015, D17), after the
