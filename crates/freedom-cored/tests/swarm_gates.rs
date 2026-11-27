@@ -2427,12 +2427,23 @@ fn vault_under_load(window: Duration, delay_ms: u64, paced: bool) -> VaultRun {
         let answer = rig.answer(*id);
         assert!(answer["result"]["result_typed"].is_object(), "{answer}");
     }
-    // The search found its signer, or a slow runner's lane passed the
-    // job's 15 s after the window: either way it ran through it.
+    // The search found its signer, or a slow runner's lane passed one of
+    // its bounds after the window: the job's 15 s (`gsoc_mining_timeout`),
+    // or the second a batch may be out (`mining lane stuck`). That second
+    // runs on the swarm thread's clock from the batch's dispatch until the
+    // thread takes its answer (design 0015: an answer at or after it is
+    // the stuck lane's), so it spans the lane thread's wake, the hook's
+    // delay, the batch, and the swarm thread's turn to read the answer
+    // behind the bodies' frames. On a loaded runner (a debug core, the
+    // binary's other gates streaming beside it) a thread that isn't
+    // scheduled for a second reaches it with no bug. Either way the search
+    // ran through the window, as checked above.
     let answer = rig.answer(search);
+    let text = answer.to_string();
     assert!(
         answer["result"]["result_typed"].is_object()
-            || answer.to_string().contains("gsoc_mining_timeout"),
+            || text.contains("gsoc_mining_timeout")
+            || text.contains("GSOC mining failed: mining lane stuck"),
         "{answer}"
     );
     rig.settled();
