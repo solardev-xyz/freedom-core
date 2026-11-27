@@ -54,7 +54,9 @@
 //! ([`Connection::commit`]) and the connection's end, under the import's
 //! lock. Past it, only a success is proven: libradicle's error, a panic,
 //! the deadline, a kill or a crash is `outcome_unknown`, the error's text
-//! logged with its code. libradicle builds the repository in a temporary
+//! logged with its code. Out of memory, before the start or past it, ends
+//! the process with 71 and answers nothing ([`crate::oom`]): past the
+//! start, main makes that `outcome_unknown`, as any crash. libradicle builds the repository in a temporary
 //! clone and moves it into place last, so a cut-off import leaves one of
 //! two things: before the move, only its temporary clone (`<rid>.tmp`),
 //! which reconciliation at the service's next start removes; after it, the
@@ -375,6 +377,10 @@ fn run(ending: Ending, source: &Source, params: &Params, key: &radicle::crypto::
             ending.finish(Ok(result(&rid)));
         }
         Ok(Err(e)) => {
+            // Out of memory ends the process, unanswered: main makes it
+            // `outcome_unknown`, as it does any crash past the start, and
+            // the marker stays ([`crate::oom`]).
+            crate::oom::check(&e);
             *lock(&ending.phase) = Phase::Over { uncertain: true };
             log::error(
                 "the import failed past its start; the dirty marker stays",
@@ -415,8 +421,11 @@ pub fn result(rid: &radicle::prelude::RepoId) -> Box<RawValue> {
         .unwrap_or_default()
 }
 
-/// libradicle's refusal before the start, as the service answers it.
+/// libradicle's refusal before the start, as the service answers it. Out
+/// of memory is never answered: it ends the process ([`crate::oom`]), with
+/// the marker left for the service's next start.
 pub fn refusal(e: libradicle::Error) -> ErrorBody {
+    crate::oom::check(&e);
     match e {
         libradicle::Error::InvalidImport(message) => {
             ErrorBody::new(ErrorCode::InvalidArgument, message)

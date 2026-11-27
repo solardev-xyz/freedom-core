@@ -175,6 +175,33 @@ pub(crate) fn exit_reporting(exit: Exit, bound: Duration, report: impl FnOnce())
     std::process::exit(code)
 }
 
+/// Ends the process at once with `exit`, from any thread, after one write
+/// of `line`, a fixed one, to stderr: a fail-stop that no request answers
+/// and no teardown precedes, for a native library's out-of-memory error
+/// under the memory cap ([`Exit::OutOfMemory`]; design 0010, "The memory
+/// cap"), which ends the process as a crash does.
+///
+/// It must work with the heap exhausted, as libradicle's hooks do, so it
+/// allocates nothing, takes no lock, starts no thread and runs no `atexit`
+/// handler or destructor: `_exit` on Unix, `TerminateProcess` on Windows,
+/// both through `fc-sys`. So it doesn't [`claim`] the exit, and the log
+/// queue isn't drained: lines queued before it may be lost, and `line`
+/// goes to stderr directly.
+pub fn fail_stop(exit: Exit, line: &'static [u8]) -> ! {
+    // Every Unix target, not only Linux and macOS: `fc-sys`'s `unix` module
+    // is built for all of them, and an ordinary exit could run `atexit`
+    // handlers or take a lock with the heap exhausted (Codex, round 2 on
+    // #521). Any other target has no such exit, and doesn't build.
+    #[cfg(unix)]
+    {
+        fc_sys::unix::fail_stop(i32::from(exit.code()), line)
+    }
+    #[cfg(windows)]
+    {
+        fc_sys::windows::fail_stop(u32::from(exit.code()), line)
+    }
+}
+
 impl From<&GateError> for Exit {
     fn from(error: &GateError) -> Self {
         match error {
@@ -242,6 +269,14 @@ mod tests {
                 exit_reporting(Exit::Internal, Duration::from_millis(300), || {
                     std::thread::sleep(Duration::from_secs(60));
                 })
+            }
+            // A fail-stop on another thread, while the main thread waits:
+            // its line, then 71.
+            "fail_stop" => {
+                std::thread::spawn(|| fail_stop(Exit::OutOfMemory, b"{\"fail_stop\":true}\n"));
+                loop {
+                    std::thread::park();
+                }
             }
             // A thread-local destructor that comes back while its thread
             // exits the process.
@@ -353,6 +388,15 @@ mod tests {
             let (code, stderr) = run_child(mode, Duration::from_secs(30));
             assert!(aborted(code), "{mode}: {code:?} {stderr}");
         }
+    }
+
+    /// A fail-stop ends the process from its own thread, with its code,
+    /// once its line is written.
+    #[test]
+    fn a_fail_stop_ends_the_process_with_its_code() {
+        let (code, stderr) = run_child("fail_stop", Duration::from_secs(30));
+        assert_eq!(code, Some(71), "{stderr}");
+        assert!(stderr.contains("{\"fail_stop\":true}"), "{stderr}");
     }
 
     #[test]

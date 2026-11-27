@@ -367,7 +367,9 @@ pub enum ByDeadline {
 }
 
 impl From<libradicle::Error> for ByDeadline {
+    /// Out of memory ends the process first ([`crate::oom`]).
     fn from(error: libradicle::Error) -> Self {
+        crate::oom::check(&error);
         ByDeadline::Node(error)
     }
 }
@@ -1017,7 +1019,11 @@ fn counted(
     match looked {
         None => previous,
         Some(Ok(peers)) => Some(peers),
-        Some(Err(_)) => None,
+        // Out of memory ends the process ([`crate::oom`]).
+        Some(Err(e)) => {
+            crate::oom::check(&e);
+            None
+        }
     }
 }
 
@@ -1068,7 +1074,11 @@ fn run(start: Start) -> Result<Running, ErrorBody> {
         },
         key,
     )
-    .map_err(|e| start_failed(e.to_string()))?;
+    .map_err(|e| {
+        // Out of memory ends the process, never `start_failed`.
+        crate::oom::check(&e);
+        start_failed(e.to_string())
+    })?;
     Ok(Running {
         embedded: Arc::new(RwLock::new(embedded)),
         calls: NodeCalls::default(),
@@ -1094,20 +1104,17 @@ fn configured(home: &Path) -> Vec<ConnectAddress> {
 /// for its kind.
 fn repository_gate(home: &Path) -> Result<RepoGate, ErrorBody> {
     let path = home.join("node").join(quarantine::QUARANTINE_DB_FILE);
-    let record = Quarantine::open(&path).map_err(|e| {
+    let failed = |e: quarantine::Error| {
+        crate::oom::check_heartwood(&e);
         start_failed(format!(
             "the quarantine record: {}",
             crate::reconcile::record_error(&e)
         ))
-    })?;
+    };
+    let record = Quarantine::open(&path).map_err(failed)?;
     let repositories = RepoGate::new();
     for page in 0.. {
-        let records = record.page(page, PAGE).map_err(|e| {
-            start_failed(format!(
-                "the quarantine record: {}",
-                crate::reconcile::record_error(&e)
-            ))
-        })?;
+        let records = record.page(page, PAGE).map_err(failed)?;
         for entry in &records {
             let kind = match entry.kind {
                 quarantine::Kind::Cache => gate::Quarantine::Cache,

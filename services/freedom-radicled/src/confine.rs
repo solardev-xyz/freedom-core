@@ -83,7 +83,7 @@ impl Grant {
             times: false,
             symlinks: false,
             modes: false,
-            memory_cap: Some(confine::MEMORY_CAP),
+            memory_cap: Some(crate::testhooks::memory_cap(confine::MEMORY_CAP)),
         }
     }
 }
@@ -140,7 +140,7 @@ impl Grant {
             times: false,
             symlinks: false,
             modes: false,
-            memory_cap: Some(confine::MEMORY_CAP),
+            memory_cap: Some(crate::testhooks::memory_cap(confine::MEMORY_CAP)),
         }
     }
 }

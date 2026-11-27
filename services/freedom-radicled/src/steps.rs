@@ -122,6 +122,7 @@ impl Steps {
 
     /// `rad.identity`: once; a failure ends the process after its reply.
     pub fn identity(&self, conn: &Connection, request: &Request<'_>) {
+        testhooks::allocate();
         match self
             .identity
             .establish(request.params.map(serde_json::value::RawValue::get))

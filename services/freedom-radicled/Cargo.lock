@@ -2188,12 +2188,14 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "libradicle"
 version = "0.8.0"
-source = "git+https://github.com/solardev-xyz/libradicle?rev=36b176bc3e2667c8c1500bf0eb6fc80407bd9d84#36b176bc3e2667c8c1500bf0eb6fc80407bd9d84"
+source = "git+https://github.com/solardev-xyz/libradicle?rev=6a991c4d28e3e1c92ceb006ac208c02de990031e#6a991c4d28e3e1c92ceb006ac208c02de990031e"
 dependencies = [
  "dunce",
  "ed25519-dalek",
  "getrandom 0.4.3",
  "git2",
+ "libc",
+ "libgit2-sys",
  "log",
  "radicle",
  "radicle-node",
