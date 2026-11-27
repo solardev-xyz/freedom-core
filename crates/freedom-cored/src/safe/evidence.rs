@@ -204,6 +204,12 @@ impl Evidence {
         (evidence, reads)
     }
 
+    /// Whether the read tagged `tag` is this check's, and still out.
+    #[cfg(test)]
+    pub fn waits_for(&self, tag: u64) -> bool {
+        self.out.contains_key(&tag)
+    }
+
     /// The chain thread's reply to read `tag` (its whole payload, and
     /// whether it failed at or after its deadline): the check's next step.
     pub fn answered(

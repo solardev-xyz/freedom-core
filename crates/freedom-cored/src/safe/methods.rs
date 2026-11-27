@@ -281,7 +281,9 @@ fn resolve(records: &Records, index: u64) -> Result<Safe, ErrorBody> {
         let owner = records.record(*at)?.ok_or_else(|| {
             plain(format!(
                 "Owner wallet index {} does not exist",
-                fc_json::JsValue::Number(*at).js_string().unwrap_or_default()
+                fc_json::JsValue::Number(*at)
+                    .js_string()
+                    .unwrap_or_default()
             ))
         })?;
         let stored = owner.get("address").filter(|a| a.truthy());
@@ -343,7 +345,10 @@ fn resolve(records: &Records, index: u64) -> Result<Safe, ErrorBody> {
 enum Reply {
     /// The read's `result` (its node's answer, or the fee quote's object
     /// itself), and whether it is labelled verified.
-    Answer { result: Value, verified: bool },
+    Answer {
+        result: Value,
+        verified: bool,
+    },
     Failed(ErrorBody),
 }
 
@@ -384,7 +389,11 @@ enum Receipt {
 /// 1, with a log from the factory whose topics are `ProxyCreation` and the
 /// Safe's address.
 fn deploys(receipt: &Value, safe: &[u8; 20], hash: &[u8; 32]) -> bool {
-    let hex = |value: Option<&Value>| value.and_then(Value::as_str).and_then(|t| parse_bytes(t, "").ok());
+    let hex = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .and_then(|t| parse_bytes(t, "").ok())
+    };
     let status_one = receipt
         .get("status")
         .and_then(Value::as_str)
@@ -398,7 +407,8 @@ fn deploys(receipt: &Value, safe: &[u8; 20], hash: &[u8; 32]) -> bool {
         .and_then(Value::as_array)
         .is_some_and(|logs| {
             logs.iter().any(|log| {
-                let from_factory = hex(log.get("address")).as_deref() == Some(PROXY_FACTORY.as_slice());
+                let from_factory =
+                    hex(log.get("address")).as_deref() == Some(PROXY_FACTORY.as_slice());
                 let topics = log.get("topics").and_then(Value::as_array);
                 let topic_at = |i: usize| hex(topics.and_then(|t| t.get(i)));
                 from_factory
@@ -412,8 +422,12 @@ fn deploys(receipt: &Value, safe: &[u8; 20], hash: &[u8; 32]) -> bool {
 /// What a code read shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Code {
-    Verified { empty: bool },
-    Unverified { empty: bool },
+    Verified {
+        empty: bool,
+    },
+    Unverified {
+        empty: bool,
+    },
     /// No answer to judge: a failed read, or one that isn't hex.
     Failed,
 }
@@ -462,7 +476,9 @@ enum Kind {
 /// Where a request stands.
 enum Step {
     Receipt,
-    Code { receipt: Receipt },
+    Code {
+        receipt: Receipt,
+    },
     /// The mark is written ([`Safes::marked`]), then the request goes on.
     Mark,
     Setup(Box<Evidence>),
@@ -566,7 +582,11 @@ impl Safes {
         raw: Option<&str>,
         ctx: &mut Ctx,
     ) -> Result<Vec<Out>, ErrorBody> {
-        let records = ctx.approvals.account_records().ok_or_else(not_moved)?.clone();
+        let records = ctx
+            .approvals
+            .account_records()
+            .ok_or_else(not_moved)?
+            .clone();
         let mut params = Value::Null;
         let (kind, index) = match method {
             "safe.pending" => {
@@ -671,7 +691,13 @@ impl Safes {
 
     /// The chain thread answered read `tag`: `payload` its reply, and
     /// `past_due` whether it failed at or after its deadline.
-    pub fn chain_read(&mut self, tag: u64, payload: &[u8], past_due: bool, ctx: &mut Ctx) -> Vec<Out> {
+    pub fn chain_read(
+        &mut self,
+        tag: u64,
+        payload: &[u8],
+        past_due: bool,
+        ctx: &mut Ctx,
+    ) -> Vec<Out> {
         let Some((id, part)) = self.reads.remove(&tag) else {
             return Vec::new();
         };
@@ -693,8 +719,14 @@ impl Safes {
                     return vec![failed(id, &crate::vault::internal())];
                 };
                 let receipt = match reply_of(payload, false) {
-                    Reply::Answer { result, verified } if deploys(&result, &op.safe.address, &hash) => {
-                        if verified { Receipt::Proves } else { Receipt::Suggests }
+                    Reply::Answer { result, verified }
+                        if deploys(&result, &op.safe.address, &hash) =>
+                    {
+                        if verified {
+                            Receipt::Proves
+                        } else {
+                            Receipt::Suggests
+                        }
                     }
                     _ => Receipt::Nothing,
                 };
@@ -710,35 +742,41 @@ impl Safes {
                 let code = code_of(&reply_of(payload, false));
                 self.judged(id, op, receipt, code, ctx)
             }
-            Step::Setup(mut evidence) => match evidence.answered(tag, payload, false, &mut self.tags) {
-                Progress::Waiting => {
-                    op.step = Step::Setup(evidence);
-                    self.ops.insert(id, op);
-                    Vec::new()
+            Step::Setup(mut evidence) => {
+                match evidence.answered(tag, payload, false, &mut self.tags) {
+                    Progress::Waiting => {
+                        op.step = Step::Setup(evidence);
+                        self.ops.insert(id, op);
+                        Vec::new()
+                    }
+                    Progress::Reads(reads) => {
+                        op.step = Step::Setup(evidence);
+                        self.ops.insert(id, op);
+                        reads
+                            .into_iter()
+                            .map(|read| {
+                                self.reads.insert(read.tag, (id, None));
+                                Out::ChainRead(read)
+                            })
+                            .collect()
+                    }
+                    Progress::Done(outcome) => {
+                        let answer = match outcome {
+                            Outcome::Unchanged { .. } => {
+                                Ok(status(&op.safe, true, None, None, false))
+                            }
+                            Outcome::NotDeployed => Err(not_deployed()),
+                            refused => {
+                                Err(refused.refusal().unwrap_or_else(crate::vault::internal))
+                            }
+                        };
+                        vec![match answer {
+                            Ok(answer) => reply(id, &answer),
+                            Err(error) => failed(id, &error),
+                        }]
+                    }
                 }
-                Progress::Reads(reads) => {
-                    op.step = Step::Setup(evidence);
-                    self.ops.insert(id, op);
-                    reads
-                        .into_iter()
-                        .map(|read| {
-                            self.reads.insert(read.tag, (id, None));
-                            Out::ChainRead(read)
-                        })
-                        .collect()
-                }
-                Progress::Done(outcome) => {
-                    let answer = match outcome {
-                        Outcome::Unchanged { .. } => Ok(status(&op.safe, true, None, None, false)),
-                        Outcome::NotDeployed => Err(not_deployed()),
-                        refused => Err(refused.refusal().unwrap_or_else(crate::vault::internal)),
-                    };
-                    vec![match answer {
-                        Ok(answer) => reply(id, &answer),
-                        Err(error) => failed(id, &error),
-                    }]
-                }
-            },
+            }
             Step::Quote(mut quote) => {
                 let reply = reply_of(payload, part == Some(Part::Fee));
                 match part {
@@ -766,7 +804,14 @@ impl Safes {
     /// The deployment as the reads show it (D4): marked on verified
     /// evidence, reported for the session on an unverified answer of it,
     /// and a verified empty code ends the session's report.
-    fn judged(&mut self, id: u64, mut op: Op, receipt: Receipt, code: Code, ctx: &mut Ctx) -> Vec<Out> {
+    fn judged(
+        &mut self,
+        id: u64,
+        mut op: Op,
+        receipt: Receipt,
+        code: Code,
+        ctx: &mut Ctx,
+    ) -> Vec<Out> {
         let address = op.safe.address;
         let deployment = match code {
             Code::Verified { empty: false } => Deployment::Mark,
@@ -784,7 +829,10 @@ impl Safes {
             Deployment::Mark => self.mark(id, op),
             Deployment::Session => {
                 self.session.insert(address);
-                crate::log::warn("safe deployment reported unverified, for the session", json!({}));
+                crate::log::warn(
+                    "safe deployment reported unverified, for the session",
+                    json!({}),
+                );
                 let answer = match op.kind {
                     Kind::Deployed { .. } => json!({ "deployed": true, "verified": false }),
                     Kind::Deploy { .. } => json!({ "deployed": true }),
@@ -816,15 +864,43 @@ impl Safes {
                         "value": "0",
                         "data": to_hex(&deployment.data),
                     }]);
-                    out.push(self.read(id, Some(Part::Estimate), "eth_estimateGas", estimate.to_string(), &op, ctx.now));
-                    out.push(self.read(id, Some(Part::Fee), crate::chain::INTERNAL_FEE_QUOTE, String::new(), &op, ctx.now));
+                    out.push(self.read(
+                        id,
+                        Some(Part::Estimate),
+                        "eth_estimateGas",
+                        estimate.to_string(),
+                        &op,
+                        ctx.now,
+                    ));
+                    out.push(self.read(
+                        id,
+                        Some(Part::Fee),
+                        crate::chain::INTERNAL_FEE_QUOTE,
+                        String::new(),
+                        &op,
+                        ctx.now,
+                    ));
                     let balance = format!(r#"["{}","latest"]"#, to_hex(&executor.address));
-                    out.push(self.read(id, Some(Part::Balance), "eth_getBalance", balance, &op, ctx.now));
+                    out.push(self.read(
+                        id,
+                        Some(Part::Balance),
+                        "eth_getBalance",
+                        balance,
+                        &op,
+                        ctx.now,
+                    ));
                     let mut quote = Quote::default();
                     if matches!(op.kind, Kind::Deploy { .. })
                         && !ctx.approvals.fee_fresh(CHAIN_ID, ctx.clocks.vault_ms)
                     {
-                        let read = self.read(id, Some(Part::Reference), crate::chain::INTERNAL_FEE_REFERENCE, String::new(), &op, ctx.now);
+                        let read = self.read(
+                            id,
+                            Some(Part::Reference),
+                            crate::chain::INTERNAL_FEE_REFERENCE,
+                            String::new(),
+                            &op,
+                            ctx.now,
+                        );
                         if let Out::ChainRead(read) = &read {
                             ctx.approvals.fee_asked(
                                 read.tag,
@@ -949,7 +1025,13 @@ impl Safes {
         match op.kind {
             Kind::Status => reply(
                 id,
-                &status(&op.safe, false, Some(&balance), Some(&priced.cost), needs_funds),
+                &status(
+                    &op.safe,
+                    false,
+                    Some(&balance),
+                    Some(&priced.cost),
+                    needs_funds,
+                ),
             ),
             Kind::Deploy { fee_ack } => {
                 if needs_funds {
@@ -989,7 +1071,10 @@ impl Safes {
             return Vec::new();
         }
         self.forget(id);
-        vec![failed(id, &ErrorBody::new(ErrorCode::Cancelled, "Cancelled"))]
+        vec![failed(
+            id,
+            &ErrorBody::new(ErrorCode::Cancelled, "Cancelled"),
+        )]
     }
 
     /// Answers `deadline` for every request past its bound.
@@ -1161,7 +1246,10 @@ fn pending_states(records: &Records, pending: &SafePending) -> Result<Vec<JsValu
     for (index, entry) in pending.entries() {
         match send_state(records, index, &entry)? {
             Some(state) => states.push(state),
-            None => crate::log::warn("a pending Safe entry the board can't read: left out", json!({})),
+            None => crate::log::warn(
+                "a pending Safe entry the board can't read: left out",
+                json!({}),
+            ),
         }
     }
     // `sort((a, b) => a.createdAt - b.createdAt)`, stable: an entry whose
@@ -1178,8 +1266,14 @@ fn created_at(state: &JsValue) -> f64 {
 }
 
 /// `getSafeSendState(index)` for `entry`.
-fn send_state(records: &Records, index: u64, entry: &JsValue) -> Result<Option<JsValue>, ErrorBody> {
-    let (JsValue::Object(_), Some(signatures)) = (entry, entry.get("signatures").and_then(JsValue::as_array)) else {
+fn send_state(
+    records: &Records,
+    index: u64,
+    entry: &JsValue,
+) -> Result<Option<JsValue>, ErrorBody> {
+    let (JsValue::Object(_), Some(signatures)) =
+        (entry, entry.get("signatures").and_then(JsValue::as_array))
+    else {
         return Ok(None);
     };
     let owners: Vec<JsValue> = match records.record(index as f64)? {
@@ -1209,7 +1303,10 @@ fn send_state(records: &Records, index: u64, entry: &JsValue) -> Result<Option<J
             .filter(|t| t.truthy())
             .cloned()
             .unwrap_or_else(|| JsValue::string("mnemonic"));
-        if matches!(executor, JsValue::Null) && kind.as_str() == Some("mnemonic") && record.is_some() {
+        if matches!(executor, JsValue::Null)
+            && kind.as_str() == Some("mnemonic")
+            && record.is_some()
+        {
             executor = owner.clone();
         }
         let signed = address.as_str().is_some_and(|address| {
@@ -1266,13 +1363,24 @@ fn send_state(records: &Records, index: u64, entry: &JsValue) -> Result<Option<J
 /// (`SAFE_DISCARDED` otherwise, nothing discarded); the Safe's send
 /// approvals ended, then its entry cleared. `{}`, and `durable: false`
 /// when the clear's directory flush failed.
-fn discard(records: &Records, ctx: &mut Ctx, index: u64, named: Option<&str>) -> Result<Value, ErrorBody> {
+fn discard(
+    records: &Records,
+    ctx: &mut Ctx,
+    index: u64,
+    named: Option<&str>,
+) -> Result<Value, ErrorBody> {
     ctx.pending.check_moved()?;
     let entry = ctx.pending.entry(index);
     if let Some(named) = named {
-        let hash = entry.as_ref().and_then(|e| e.get("safeTxHash")).and_then(JsValue::as_str);
+        let hash = entry
+            .as_ref()
+            .and_then(|e| e.get("safeTxHash"))
+            .and_then(JsValue::as_str);
         if hash != Some(named) {
-            return Err(refused("SAFE_DISCARDED", "This transaction was discarded or replaced"));
+            return Err(refused(
+                "SAFE_DISCARDED",
+                "This transaction was discarded or replaced",
+            ));
         }
     }
     if entry.is_none() {
@@ -1285,7 +1393,10 @@ fn discard(records: &Records, ctx: &mut Ctx, index: u64, named: Option<&str>) ->
     if let Some(address) = address {
         ctx.approvals.end_safe_sends(&address);
     }
-    let cleared = ctx.pending.clear(index).map_err(|failure| failure.error())?;
+    let cleared = ctx
+        .pending
+        .clear(index)
+        .map_err(|failure| failure.error())?;
     Ok(if cleared.durable {
         json!({})
     } else {
