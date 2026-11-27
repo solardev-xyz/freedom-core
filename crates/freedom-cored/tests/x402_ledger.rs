@@ -19,10 +19,19 @@
 //!   `mismatch` before any APDU, the reservation spent; a reservation made
 //!   with `now_s` takes no `{ signature }`, and one made without takes no
 //!   `{ typed_data }` (it still settles with its signature).
-//! - **Failure refunds:** another authorization, the device's refusal, a
-//!   disconnect, and a cancel during the user's wait each give a cap's
-//!   charge back and spend the reservation; a token's payment that fails
-//!   writes no grant and charges nothing.
+//! - **The charge is held, not written** (Codex's round 1 on #532): under
+//!   a cap, `x402.authorize` writes nothing; open holds count against the
+//!   cap in every check (another hold, a phone's written charge); a
+//!   restart while the device signs leaves the cap file as it was and the
+//!   whole cap there; a reservation dropped for room drops its hold.
+//! - **Failure writes nothing:** another authorization, the device's
+//!   refusal, a disconnect and a cancel during the user's wait each drop
+//!   the hold, the cap file untouched, and spend the reservation, with
+//!   `refunded` as it should be; a token's payment that fails writes no
+//!   grant and charges nothing.
+//! - **The charge before the signature:** a signed payment's charge is in
+//!   the file when its payload arrives; with the write failing, or the cap
+//!   revoked while the device signs, no signature leaves the core.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -103,9 +112,14 @@ fn vector_nonce() -> String {
 
 /// A cap on the sellers' USDC on Base, `spent` of 1,000,000 spent.
 fn cap(spent: &str) -> Value {
+    cap_of("1000000", spent)
+}
+
+/// A cap on the sellers' USDC on Base, `spent` of `amount` spent.
+fn cap_of(amount: &str, spent: &str) -> Value {
     let now = vector_now();
     json!({ SELLER: { "8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": {
-        "capAmount": "1000000", "spentAmount": spent,
+        "capAmount": amount, "spentAmount": spent,
         "createdAt": now - 100, "expiresAt": now + 3600,
     } } })
 }
@@ -114,6 +128,11 @@ fn cap(spent: &str) -> Value {
 /// [`meta`] and `vault_meta` moved if `moved`, `x402` moved, and `caps` as
 /// the cap file.
 fn start_with(root: &Path, moved: bool, caps: Option<Value>) -> Core {
+    start_env(root, moved, caps, &[])
+}
+
+/// [`start_with`], with more of the core's environment.
+fn start_env(root: &Path, moved: bool, caps: Option<Value>, more: &[(&str, &str)]) -> Core {
     let identity = root.join("identity");
     std::fs::create_dir_all(&identity).unwrap();
     std::fs::write(
@@ -124,16 +143,12 @@ fn start_with(root: &Path, moved: bool, caps: Option<Value>) -> Core {
     let clock = root.join("wall-clock");
     std::fs::write(&clock, (vector_now() * 1000).to_string()).unwrap();
     let nonce = vector_nonce();
-    let mut core = spawn_env(
-        "serve",
-        &identity,
-        &root.join("locks"),
-        &[],
-        &[
-            ("FREEDOM_CORED_TEST_WALL_CLOCK", clock.to_str().unwrap()),
-            ("FREEDOM_CORED_TEST_X402_NONCE", nonce.as_str()),
-        ],
-    );
+    let mut env = vec![
+        ("FREEDOM_CORED_TEST_WALL_CLOCK", clock.to_str().unwrap()),
+        ("FREEDOM_CORED_TEST_X402_NONCE", nonce.as_str()),
+    ];
+    env.extend_from_slice(more);
+    let mut core = spawn_env("serve", &identity, &root.join("locks"), &[], &env);
     std::fs::create_dir_all(&core.grant_root).unwrap();
     if let Some(caps) = caps {
         std::fs::write(
@@ -163,9 +178,13 @@ fn shell() -> Value {
 
 /// What the cap file says is spent.
 fn spent(core: &Core) -> Value {
-    let text = std::fs::read_to_string(core.grant_root.join("x402-permissions.json")).unwrap();
-    let caps: Value = serde_json::from_str(&text).unwrap();
+    let caps: Value = serde_json::from_str(&cap_file(core).unwrap()).unwrap();
     caps[SELLER]["8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"]["spentAmount"].clone()
+}
+
+/// The cap file's text, if there is one.
+fn cap_file(core: &Core) -> Option<String> {
+    std::fs::read_to_string(core.grant_root.join("x402-permissions.json")).ok()
 }
 
 // The wire, as `ledger_sign.rs` drives it.
@@ -559,7 +578,8 @@ fn now_s_at_30_s_is_taken_and_at_31_s_refused() {
                 message["validBefore"] == before.as_str() || message["deadline"] == before.as_str(),
                 "{at}: {typed}"
             );
-            assert_eq!(spent(&core), "10000");
+            // Held, not written.
+            assert_eq!(spent(&core), "0");
             assert_eq!(
                 result(&settle(&mut core, &mut id, &reservation, "withheld"))["refunded"],
                 true
@@ -778,13 +798,45 @@ fn any_other_authorization_is_refused() {
     );
 }
 
-/// A payment that ends without a signature gives a cap's charge back and
-/// spends the reservation: another authorization, the device's refusal on
-/// `E0 0C`, a disconnect at the first APDU, and a cancel while the user
-/// confirms. A token's payment that fails writes no grant and charges
-/// nothing; one that signs writes its grant and charges its cap.
+/// The parent's `shell.ledger_apdu`s answered up to the APDU the user
+/// confirms, which main holds: that APDU, and main, to answer it later.
+fn held_at_confirm(core: &mut Core, parent: u64, hash: &str) -> (Asked, Main) {
+    let mut main = Main::new(hash);
+    let (sent, response) = drive(core, parent, |asked| {
+        if asked.deadline_ms == CONFIRM_MS {
+            Reply::Hold
+        } else {
+            main.answer(asked)
+        }
+    });
+    assert!(response.is_none(), "{response:?}");
+    (sent.last().unwrap().clone(), main)
+}
+
+/// Main cancels `parent` while `held` is out: the parent's response, once
+/// main answered the core's cancel of `held`.
+fn cancel(core: &mut Core, parent: u64, held: &Asked) -> Value {
+    core.send(&json!({ "type": "cancel", "id": parent }));
+    let seen = [next(core), next(core)];
+    let cancel = seen.iter().find(|m| m["type"] == "cancel").unwrap();
+    assert_eq!(cancel["id"], held.id, "{seen:?}");
+    core.send(&json!({ "type": "response", "id": held.id,
+        "error": { "code": "cancelled", "message": "Cancelled" } }));
+    let response = seen.iter().find(|m| m["type"] == "response").unwrap();
+    assert_eq!(response["id"], parent);
+    response.clone()
+}
+
+/// A Ledger payment under the cap holds its charge and writes nothing; one
+/// that ends without a signature drops the hold, the cap file untouched,
+/// and spends the reservation: another authorization, the device's
+/// refusal on `E0 0C`, a disconnect at the first APDU, and a cancel while
+/// the user confirms. Each error but the cancel's says `refunded: true`,
+/// the room back on the cap. A token's payment that fails writes no grant,
+/// charges nothing and says `refunded: false`; one that signs writes its
+/// grant and charges its cap.
 #[test]
-fn failure_refunds() {
+fn a_failed_or_cancelled_settle_writes_nothing() {
     let root = tempfile::tempdir().unwrap();
     let mut core = start(root.path());
     let mut id = 10;
@@ -795,15 +847,17 @@ fn failure_refunds() {
     let stream = honest(FORMS[0]);
     let confirm = stream.len() - 1;
     assert!(stream[confirm].starts_with("e00c0001"));
-    // Under the cap: charged as it is handed out.
-    let charged = |core: &mut Core, id: &mut u64| {
+    let before = cap_file(&core).unwrap();
+    // Under the cap: held, nothing written.
+    let held = |core: &mut Core, id: &mut u64| {
         let reply = pay_cap(core, id, case, now);
         assert_eq!(result(&reply)["charged"], true);
-        assert_eq!(spent(core), "10000");
+        assert!(result(&reply).get("durable").is_none());
+        assert_eq!(cap_file(core).unwrap(), before);
         handed(&reply).0
     };
     let spent_then = |core: &mut Core, id: &mut u64, reservation: &str| {
-        assert_eq!(spent(core), "0");
+        assert_eq!(cap_file(core).unwrap(), before);
         refused(
             &settle(core, id, reservation, "withheld"),
             "invalid_argument",
@@ -811,7 +865,7 @@ fn failure_refunds() {
         );
     };
     // Another authorization.
-    let reservation = charged(&mut core, &mut id);
+    let reservation = held(&mut core, &mut id);
     let mut other = vector.clone();
     other["message"]["value"] = json!("10001");
     let refusal = settle_unasked(&mut core, &mut id, &reservation, &other);
@@ -824,7 +878,7 @@ fn failure_refunds() {
         (confirm, Fault::Status(0x6985), "LEDGER_USER_REJECTED"),
         (0, Fault::Disconnect, "LEDGER_DISCONNECTED"),
     ] {
-        let reservation = charged(&mut core, &mut id);
+        let reservation = held(&mut core, &mut id);
         let parent = settle_typed(&mut core, &mut id, &reservation, vector);
         let mut main = Main::faulty(hash, at, fault);
         let (sent, response) = drive(&mut core, parent, |asked| main.answer(asked));
@@ -836,31 +890,24 @@ fn failure_refunds() {
         spent_then(&mut core, &mut id, &reservation);
     }
     // A cancel while the device waits for the user.
-    let reservation = charged(&mut core, &mut id);
+    let reservation = held(&mut core, &mut id);
     let parent = settle_typed(&mut core, &mut id, &reservation, vector);
-    let mut main = Main::new(hash);
-    let (sent, response) = drive(&mut core, parent, |asked| {
-        if asked.deadline_ms == CONFIRM_MS {
-            Reply::Hold
-        } else {
-            main.answer(asked)
-        }
-    });
-    assert!(response.is_none());
-    let held = sent.last().unwrap().clone();
-    core.send(&json!({ "type": "cancel", "id": parent }));
-    let seen = [next(&mut core), next(&mut core)];
-    let cancel = seen.iter().find(|m| m["type"] == "cancel").unwrap();
-    assert_eq!(cancel["id"], held.id, "{seen:?}");
-    core.send(&json!({ "type": "response", "id": held.id,
-        "error": { "code": "cancelled", "message": "Cancelled" } }));
-    let response = seen.iter().find(|m| m["type"] == "response").unwrap();
-    assert_eq!(response["id"], parent);
+    let (waiting, _) = held_at_confirm(&mut core, parent, hash);
+    let response = cancel(&mut core, parent, &waiting);
     assert_eq!(response["error"]["code"], "cancelled", "{response}");
     assert!(response["error"].get("data").is_none(), "{response}");
     spent_then(&mut core, &mut id, &reservation);
-    // Signed under the cap: the charge stands until withheld.
-    let reservation = charged(&mut core, &mut id);
+    // No approval.changed for any of it: nothing changed in the file.
+    assert!(
+        !core
+            .events
+            .iter()
+            .any(|event| event["event"] == "approval.changed"),
+        "{:?}",
+        core.events
+    );
+    // Signed under the cap: the charge written, standing until withheld.
+    let reservation = held(&mut core, &mut id);
     let parent = settle_typed(&mut core, &mut id, &reservation, vector);
     let mut main = Main::new(hash);
     let (_, response) = drive(&mut core, parent, |asked| main.answer(asked));
@@ -877,8 +924,6 @@ fn failure_refunds() {
     let root = tempfile::tempdir().unwrap();
     let mut core = start_with(root.path(), true, None);
     let grant = json!({ "cap_amount": "30000", "window_seconds": 3600 });
-    let file =
-        |core: &Core| std::fs::read_to_string(core.grant_root.join("x402-permissions.json")).ok();
     let reply = pay_token(&mut core, &mut id, case, Some(&grant));
     assert_eq!(result(&reply)["charged"], false);
     let (reservation, _) = handed(&reply);
@@ -888,7 +933,7 @@ fn failure_refunds() {
     let response = response.unwrap();
     assert_eq!(ledger_code(&response), "LEDGER_USER_REJECTED");
     assert_eq!(response["error"]["data"]["refunded"], false);
-    assert_eq!(file(&core), None);
+    assert_eq!(cap_file(&core), None);
     let reply = pay_token(&mut core, &mut id, case, Some(&grant));
     let (reservation, _) = handed(&reply);
     let parent = settle_typed(&mut core, &mut id, &reservation, vector);
@@ -901,6 +946,254 @@ fn failure_refunds() {
     assert_eq!(spent(&core), "10000");
     assert_eq!(
         result(&settle(&mut core, &mut id, &reservation, "withheld"))["refunded"],
+        true
+    );
+    assert_eq!(spent(&core), "0");
+}
+
+/// Codex's round 1 on #532: the core stops while a settle waits on the
+/// device (killed, as a crash), and the next one finds the cap file as it
+/// was, nothing charged and nothing to give back, and the whole cap there
+/// for payments again.
+#[test]
+fn a_restart_while_the_device_signs_leaves_the_cap_whole() {
+    let root = tempfile::tempdir().unwrap();
+    let mut core = start_with(root.path(), true, Some(cap_of("20000", "0")));
+    let before = cap_file(&core).unwrap();
+    let mut id = 10;
+    let now = vector_now();
+    let case = device::case(FORMS[0]);
+    let vector = &case["request"]["typed_data"];
+    let hash = case["request"]["expected_hash"].as_str().unwrap();
+    // Two holds take the whole cap: one on the device, one awaiting its
+    // settle.
+    let (signing, _) = handed(&pay_cap(&mut core, &mut id, case, now));
+    let (_waiting, _) = handed(&pay_cap(&mut core, &mut id, case, now));
+    refused(
+        &pay_cap(&mut core, &mut id, case, now),
+        "not_authorized",
+        Some("cap"),
+    );
+    let parent = settle_typed(&mut core, &mut id, &signing, vector);
+    let _held = held_at_confirm(&mut core, parent, hash);
+    assert_eq!(cap_file(&core).unwrap(), before);
+    core.child.kill().unwrap();
+    core.child.wait().unwrap();
+    drop(core);
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("userData").join("x402-permissions.json"))
+            .unwrap(),
+        before
+    );
+    let mut core = start_with(root.path(), true, None);
+    assert_eq!(cap_file(&core).unwrap(), before);
+    assert_eq!(spent(&core), "0");
+    // The old reservations are gone with the process.
+    refused(
+        &settle_unasked(&mut core, &mut id, &signing, vector),
+        "invalid_argument",
+        None,
+    );
+    // The whole cap again: two payments, and no third.
+    for _ in 0..2 {
+        let reservation = handed(&pay_cap(&mut core, &mut id, case, now)).0;
+        let parent = settle_typed(&mut core, &mut id, &reservation, vector);
+        let mut main = Main::new(hash);
+        let (_, response) = drive(&mut core, parent, |asked| main.answer(asked));
+        assert_eq!(result(&response.unwrap())["charged"], true);
+    }
+    assert_eq!(spent(&core), "20000");
+    refused(
+        &pay_cap(&mut core, &mut id, case, now),
+        "not_authorized",
+        Some("cap"),
+    );
+}
+
+/// Open holds count against the cap in every check: two of 10,000 fill a
+/// cap of 20,000, so a third Ledger payment, and a phone's payment, which
+/// writes its charge at once (#392), are refused; a hold and a written
+/// charge fill it alike; a withheld hold gives its room back. Once the cap
+/// is revoked, a withheld hold's room is back on no cap.
+#[test]
+fn open_holds_count_against_the_cap() {
+    let root = tempfile::tempdir().unwrap();
+    let mut core = start_with(root.path(), true, Some(cap_of("20000", "0")));
+    let mut id = 10;
+    let now = vector_now();
+    let case = device::case(FORMS[0]);
+    let phone = json!({
+        "account": PHONE,
+        "device": { "kind": "phone", "address": "0x000000000000000000000000000000000000F002" },
+        "detection": detection(), "requirements": requirements(case),
+        "authorization": { "cap": { "agent": false, "attributable": true } },
+    });
+    let (first, _) = handed(&pay_cap(&mut core, &mut id, case, now));
+    // One hold and the phone's written charge fill it.
+    let (phone_paid, _) = handed(&call(&mut core, &mut id, "x402.authorize", phone.clone()));
+    assert_eq!(spent(&core), "10000");
+    refused(
+        &pay_cap(&mut core, &mut id, case, now),
+        "not_authorized",
+        Some("cap"),
+    );
+    assert_eq!(
+        result(&settle(&mut core, &mut id, &phone_paid, "withheld"))["refunded"],
+        true
+    );
+    assert_eq!(spent(&core), "0");
+    // Two holds fill it.
+    let (second, _) = handed(&pay_cap(&mut core, &mut id, case, now));
+    for refusal in [
+        pay_cap(&mut core, &mut id, case, now),
+        call(&mut core, &mut id, "x402.authorize", phone.clone()),
+    ] {
+        refused(&refusal, "not_authorized", Some("cap"));
+    }
+    assert_eq!(spent(&core), "0");
+    // One withheld: room for one more, and only one.
+    assert_eq!(
+        result(&settle(&mut core, &mut id, &first, "withheld"))["refunded"],
+        true
+    );
+    let (third, _) = handed(&pay_cap(&mut core, &mut id, case, now));
+    refused(
+        &pay_cap(&mut core, &mut id, case, now),
+        "not_authorized",
+        Some("cap"),
+    );
+    // Revoked: the holds' room isn't back on any cap.
+    let revoke = call(
+        &mut core,
+        &mut id,
+        "approval.revoke",
+        json!({ "store": "x402", "key": SELLER, "what": "grant" }),
+    );
+    assert_eq!(result(&revoke)["revoked"], true);
+    assert_eq!(
+        result(&settle(&mut core, &mut id, &second, "withheld"))["refunded"],
+        false
+    );
+    assert_eq!(
+        result(&settle(&mut core, &mut id, &third, "withheld"))["refunded"],
+        false
+    );
+}
+
+/// A successful settle writes the held charge before the reply carries the
+/// signature: the file has it when the payload arrives; with the cap file's
+/// write failing, the reply carries no payload and no signature, the
+/// reservation is spent, nothing is written, and `refunded` says the room
+/// is back; with the cap revoked while the device signs, `cap_changed`,
+/// nothing released, and `refunded: false`.
+#[test]
+fn the_charge_is_written_before_the_signature_leaves() {
+    let root = tempfile::tempdir().unwrap();
+    let hook = root.path().join("write-fail");
+    let hook_env = hook.to_str().unwrap().to_owned();
+    let mut core = start_env(
+        root.path(),
+        true,
+        Some(cap("0")),
+        &[("FREEDOM_CORED_TEST_GRANT_WRITE_FAIL", &hook_env)],
+    );
+    let mut id = 10;
+    let now = vector_now();
+    let case = device::case(FORMS[0]);
+    let vector = &case["request"]["typed_data"];
+    let hash = case["request"]["expected_hash"].as_str().unwrap();
+    let before = cap_file(&core).unwrap();
+    // Signed: the charge is in the file by the time the payload arrives.
+    let (reservation, _) = handed(&pay_cap(&mut core, &mut id, case, now));
+    let parent = settle_typed(&mut core, &mut id, &reservation, vector);
+    let (waiting, mut main) = held_at_confirm(&mut core, parent, hash);
+    assert_eq!(cap_file(&core).unwrap(), before);
+    respond_apdu(&mut core, &waiting, &mut main);
+    let response = next(&mut core);
+    assert_eq!(response["id"], parent, "{response}");
+    let signature = result(&response)["payload"]["payload"]["signature"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(spent(&core), "10000");
+    assert_eq!(
+        result(&settle(&mut core, &mut id, &reservation, "withheld"))["refunded"],
+        true
+    );
+    assert_eq!(spent(&core), "0");
+    let before = cap_file(&core).unwrap();
+    // The write fails once the device has signed: no signature leaves.
+    let (reservation, _) = handed(&pay_cap(&mut core, &mut id, case, now));
+    let parent = settle_typed(&mut core, &mut id, &reservation, vector);
+    let (waiting, mut main) = held_at_confirm(&mut core, parent, hash);
+    std::fs::write(&hook, "x402:write\n").unwrap();
+    respond_apdu(&mut core, &waiting, &mut main);
+    let response = next(&mut core);
+    assert_eq!(response["id"], parent, "{response}");
+    assert_eq!(response["error"]["code"], "storage", "{response}");
+    assert_eq!(response["error"]["data"]["refunded"], true, "{response}");
+    assert!(response.get("result").is_none());
+    assert!(!response.to_string().contains(&signature[2..]));
+    std::fs::remove_file(&hook).unwrap();
+    assert_eq!(cap_file(&core).unwrap(), before);
+    refused(
+        &settle(&mut core, &mut id, &reservation, "withheld"),
+        "invalid_argument",
+        None,
+    );
+    // The cap revoked while the device signs: nothing released, and no
+    // room back on a cap that is gone.
+    let (reservation, _) = handed(&pay_cap(&mut core, &mut id, case, now));
+    let parent = settle_typed(&mut core, &mut id, &reservation, vector);
+    let (waiting, mut main) = held_at_confirm(&mut core, parent, hash);
+    let revoke = call(
+        &mut core,
+        &mut id,
+        "approval.revoke",
+        json!({ "store": "x402", "key": SELLER, "what": "grant" }),
+    );
+    assert_eq!(result(&revoke)["revoked"], true);
+    let revoked = cap_file(&core);
+    respond_apdu(&mut core, &waiting, &mut main);
+    let response = next(&mut core);
+    assert_eq!(response["id"], parent, "{response}");
+    refused(&response, "not_authorized", Some("cap_changed"));
+    assert_eq!(response["error"]["data"]["refunded"], false, "{response}");
+    assert_eq!(cap_file(&core), revoked);
+}
+
+/// Main answers `asked`, the APDU it held, from `main`'s device.
+fn respond_apdu(core: &mut Core, asked: &Asked, main: &mut Main) {
+    match main.answer(asked) {
+        Reply::Result(result) => respond(core, asked.id, result),
+        Reply::Hold => panic!("held again"),
+    }
+}
+
+/// A reservation dropped for room (the oldest of 64 kept) drops its hold:
+/// with a cap of 65 payments, 66 Ledger payments are each held, as the
+/// first's hold went when the 65th came, and the first two are unknown.
+#[test]
+fn a_reservation_dropped_for_room_drops_its_hold() {
+    let root = tempfile::tempdir().unwrap();
+    let mut core = start_with(root.path(), true, Some(cap_of("650000", "0")));
+    let mut id = 10;
+    let now = vector_now();
+    let case = device::case(FORMS[0]);
+    let mut kept = Vec::new();
+    // The 66th fits only if the first's hold went: 64 kept and itself.
+    for _ in 0..66 {
+        kept.push(handed(&pay_cap(&mut core, &mut id, case, now)).0);
+    }
+    for dropped in &kept[..2] {
+        refused(
+            &settle(&mut core, &mut id, dropped, "withheld"),
+            "invalid_argument",
+            None,
+        );
+    }
+    assert_eq!(
+        result(&settle(&mut core, &mut id, &kept[2], "withheld"))["refunded"],
         true
     );
     assert_eq!(spent(&core), "0");

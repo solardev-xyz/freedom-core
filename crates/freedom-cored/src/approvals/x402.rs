@@ -45,6 +45,18 @@
 //!   every time byte in it is main's, with the nonce the core drew, and
 //!   handed out and kept as a device's is; the cap's window stays the
 //!   core's clock.
+//! - **A Ledger payment's charge is held, not written** (D2, as L5's review
+//!   decided it): under a cap, `x402.authorize` writes nothing. It holds
+//!   the charge in memory, and every check of a cap (a cover, a charge,
+//!   another hold) counts the open holds as spent, so open payments can't
+//!   together pass the cap. The charge is written only once fc-ledger has
+//!   checked the device's signature, and before the signature leaves the
+//!   core; a charge the file lacks releases nothing (`x402-at-sign`). So a
+//!   crash between that write and the reply charges once with nothing
+//!   paid, the safe way round, and a restart before it leaves nothing
+//!   charged and nothing to give back. Every other way through, the vault
+//!   key's inline signature and #392's device payment, writes the charge
+//!   before anything is signed or handed out, as before.
 //! - `x402.settle { reservation, typed_data }` (`shell`, D2): main's own
 //!   rebuild of that authorization, `{ domain, types, primaryType, message
 //!   }`, which must equal the reserved one as JSON values (the same members
@@ -57,10 +69,13 @@
 //!   Anything else ends the payment, with nothing of a signature returned:
 //!   another authorization (`not_authorized`, `mismatch`), a record that no
 //!   longer is the account's, what a Ledger can't carry, the device's
-//!   refusal or failure (`device_failed`), or the request's cancel. Each
-//!   gives the charge back and spends the reservation, as a refused `{
-//!   signature }` does, and says so in the error's `refunded` (a cancel's
-//!   error carries no data). While the device signs, the reservation is the
+//!   refusal or failure (`device_failed`), the request's cancel, or a held
+//!   charge that can't be written (its cap revoked, granted again or
+//!   narrowed, or the write failed). Each drops the held charge with
+//!   nothing written and spends the reservation, and says in the error's
+//!   `refunded` whether its room is back on its cap, as a refused `{
+//!   signature }` says it of a charge given back (a cancel's error carries
+//!   no data). While the device signs, the reservation is the
 //!   operation's alone: no other settle finds it, and none is dropped for
 //!   room. A Ledger's reservation made with `now_s` is settled only so (or
 //!   `withheld`), and one made without, as a phone's, only with `{
@@ -88,10 +103,11 @@
 //!
 //! Each change sends one `approval.changed { store: "x402", key }`.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use fc_approval::stores::{Applied, CapStore, Charge, Effect, NarrowRefusal, StoreKind};
 use fc_approval::x402::{self, Built, Payment, Requirements};
+use fc_evm::U256;
 use fc_keys::Secp256k1Key;
 use fc_ledger::Operation;
 use fc_protocol::error::ErrorCode;
@@ -135,10 +151,32 @@ struct Held {
     generation: u64,
 }
 
+/// A Ledger payment's charge under a cap (design 0016, D2, as LDG-2's L5
+/// builds it): held in memory and never written until fc-ledger has
+/// checked the device's signature, then written before the signature is
+/// released. Until then it counts against its cap in every check
+/// ([`X402State::held`]), so open payments can't together pass the cap; a
+/// restart drops it with nothing written, so nothing is left to give back.
+#[derive(Debug, Clone)]
+struct Hold {
+    origin: String,
+    key: String,
+    /// The amount as the entry writes it.
+    amount: String,
+    generation: u64,
+    /// The core's clock, in seconds, when it was held: the cap's window is
+    /// read at it when the charge is written, as a charge at the
+    /// authorization's turn would have been.
+    at_s: u64,
+}
+
 /// What a reservation holds: its charge, and a device's payment until its
 /// signature is checked.
 struct Reservation {
     held: Option<Held>,
+    /// A Ledger payment's charge, held and not written ([`Hold`]): the
+    /// hold's number in [`X402State`].
+    hold: Option<u64>,
     /// Paid under a cap (`{ cap }`): its charge is what let it be paid, so
     /// it is `sent` only while that cap stands (`cap_changed`).
     by_cap: bool,
@@ -211,6 +249,10 @@ pub(super) struct X402State {
     reservations: VecDeque<(Zeroizing<String>, Reservation)>,
     generations: HashMap<(String, String), u64>,
     last_generation: u64,
+    /// The Ledger payments' charges held and not written, by number: a
+    /// reservation's on the device lane among them.
+    holds: BTreeMap<u64, Hold>,
+    last_hold: u64,
 }
 
 impl std::fmt::Debug for X402State {
@@ -262,12 +304,49 @@ impl X402State {
         Ok(id)
     }
 
-    /// Keeps reservation `id`, the newest, dropping the oldest for room.
+    /// Keeps reservation `id`, the newest, dropping the oldest for room: a
+    /// dropped one's written charge stands, and its held one goes.
     fn keep(&mut self, id: Zeroizing<String>, reservation: Reservation) {
-        if self.reservations.len() == MAX_RESERVATIONS {
-            self.reservations.pop_front();
+        if self.reservations.len() == MAX_RESERVATIONS
+            && let Some((_, dropped)) = self.reservations.pop_front()
+        {
+            self.release(dropped.hold);
         }
         self.reservations.push_back((id, reservation));
+    }
+
+    /// A Ledger payment's charge held: its number.
+    fn hold(&mut self, hold: Hold) -> u64 {
+        self.last_hold += 1;
+        self.holds.insert(self.last_hold, hold);
+        self.last_hold
+    }
+
+    /// Hold `id` released: nothing counts it any more.
+    fn release(&mut self, id: Option<u64>) -> Option<Hold> {
+        id.and_then(|id| self.holds.remove(&id))
+    }
+
+    /// What the open holds take of the cap under `origin` and `key` as it
+    /// stands: those held against it, not against one revoked or granted
+    /// again since, whose charges are never written.
+    fn held(&self, origin: &str, key: &str) -> U256 {
+        let Some(generation) = self.generation(origin, key) else {
+            return U256::ZERO;
+        };
+        self.holds
+            .values()
+            .filter(|hold| hold.origin == origin && hold.key == key)
+            .filter(|hold| hold.generation == generation)
+            .filter_map(|hold| x402::atomic(&hold.amount))
+            .fold(U256::ZERO, |sum, amount| {
+                sum.checked_add(&amount).unwrap_or(U256::MAX)
+            })
+    }
+
+    /// Whether the cap a hold was taken against still stands.
+    fn stands(&self, hold: &Hold) -> bool {
+        self.generation(&hold.origin, &hold.key) == Some(hold.generation)
     }
 
     /// How the device's payment at `at` is settled, if one waits there.
@@ -601,9 +680,13 @@ impl Approvals {
                         "a cap pays only for a request main attributes to a live tab",
                     ));
                 }
+                // What the open Ledger payments hold counts as spent.
                 let store = self.grants.view::<CapStore>(wall_s);
+                let holds = &self.x402;
                 let (index, _) = store
-                    .covering(&origin, requirements.accepts, wall_s)
+                    .covering_beyond(&origin, requirements.accepts, wall_s, |key| {
+                        holds.held(&origin, key)
+                    })
                     .ok_or_else(|| not_authorized("cap", "no active cap covers this payment"))?;
                 (Authority::Cap, index)
             }
@@ -675,22 +758,29 @@ impl Approvals {
         }
         // A cap's charge is written before anything is signed or handed to
         // a device: one the file lacks is not applied, and nothing is
-        // signed (`x402-at-sign`).
+        // signed (`x402-at-sign`). A Ledger payment made with `now_s` only
+        // holds it, in memory, until its signature (D2): written then,
+        // before the signature leaves ([`Self::x402_ledger_ended`]).
         let mut held = None;
+        let mut hold = None;
         if let Authority::Cap = authority {
             let tuple = tuple
                 .as_ref()
                 .ok_or_else(|| not_authorized("cap", "no active cap covers this payment"))?;
-            held = Some(
-                self.charge(&origin, tuple, wall_s, true)?
-                    .ok_or_else(|| not_authorized("cap", "no active cap covers this payment"))?,
-            );
+            if now_s.is_some() {
+                hold = Some(self.hold_charge(&origin, tuple, wall_s)?);
+            } else {
+                held =
+                    Some(self.charge(&origin, tuple, wall_s, true)?.ok_or_else(|| {
+                        not_authorized("cap", "no active cap covers this payment")
+                    })?);
+            }
         }
         let grant = fields.get("grant").filter(|g| !g.is_null());
         let Some(key) = key else {
             // A device's payment: the typed data and its hash, for the
             // device to sign; a token's grant and charge wait for it.
-            let charged = held.is_some();
+            let charged = held.is_some() || hold.is_some();
             let durable = held.as_ref().is_none_or(|held| held.1);
             let mut reply = json!({
                 "device": {
@@ -707,6 +797,7 @@ impl Approvals {
             let by_cap = matches!(authority, Authority::Cap);
             let reservation = self.x402.reserve(Reservation {
                 held: held.map(|(held, _)| held),
+                hold,
                 by_cap,
                 device: Some(Box::new(Device {
                     built,
@@ -737,6 +828,7 @@ impl Approvals {
         let charged = held.is_some();
         let reservation = self.x402.reserve(Reservation {
             held: held.map(|(held, _)| held),
+            hold: None,
             by_cap: matches!(authority, Authority::Cap),
             device: None,
         })?;
@@ -805,8 +897,10 @@ impl Approvals {
         let Some(generation) = self.x402.generation(origin, &key) else {
             return Ok(None);
         };
+        // What the open Ledger payments hold counts as spent (D2).
+        let holds = self.x402.held(origin, &key);
         let written = self.write::<CapStore, _>(origin, |store| {
-            let mut applied = store.charge(origin, &key, &tuple.amount, wall_s);
+            let mut applied = store.charge_beyond(origin, &key, &tuple.amount, wall_s, holds);
             if before_signing && applied.value.is_some() {
                 applied.effect = Effect::Widening;
             }
@@ -815,6 +909,83 @@ impl Approvals {
         Ok(written
             .value
             .map(|charge| (Held { charge, generation }, written.durable)))
+    }
+
+    /// A Ledger payment's charge held against the cap covering `tuple`
+    /// (design 0016, D2): checked as a charge is, the open holds counted as
+    /// spent, and kept in memory only. Its number.
+    fn hold_charge(
+        &mut self,
+        origin: &str,
+        tuple: &x402::Tuple,
+        wall_s: u64,
+    ) -> Result<u64, ErrorBody> {
+        let key = tuple.key();
+        let uncovered = || not_authorized("cap", "no active cap covers this payment");
+        let generation = self.x402.generation(origin, &key).ok_or_else(uncovered)?;
+        let cap = self
+            .grants
+            .view::<CapStore>(wall_s)
+            .active(origin, &key, wall_s)
+            .ok_or_else(uncovered)?;
+        let amount = x402::atomic(&tuple.amount).ok_or_else(uncovered)?;
+        let all = cap
+            .spent
+            .checked_add(&self.x402.held(origin, &key))
+            .and_then(|taken| taken.checked_add(&amount));
+        if all.is_none_or(|all| all > cap.cap) {
+            return Err(uncovered());
+        }
+        Ok(self.x402.hold(Hold {
+            origin: origin.to_owned(),
+            key,
+            amount: tuple.amount.clone(),
+            generation,
+            at_s: wall_s,
+        }))
+    }
+
+    /// A Ledger payment's held charge written, once fc-ledger has checked
+    /// the device's signature and before the signature leaves (design
+    /// 0016, D2): only to the cap it was held against, at the clock it was
+    /// held at, the other open holds counted; and applied only once
+    /// written (`x402-at-sign`), so a charge the file lacks releases
+    /// nothing. The charge and whether its write was flushed; or the
+    /// refusal, with whether the hold's room is back on its cap.
+    fn write_hold(&mut self, hold: Hold) -> Result<(Held, bool), (ErrorBody, bool)> {
+        if !self.x402.stands(&hold) {
+            return Err((
+                not_authorized(
+                    "cap_changed",
+                    "the cap this payment was held against was revoked or granted again",
+                ),
+                false,
+            ));
+        }
+        let others = self.x402.held(&hold.origin, &hold.key);
+        let Hold {
+            origin,
+            key,
+            amount,
+            generation,
+            at_s,
+        } = hold;
+        let written = self
+            .write::<CapStore, _>(&origin, |store| {
+                let mut applied = store.charge_beyond(&origin, &key, &amount, at_s, others);
+                if applied.value.is_some() {
+                    applied.effect = Effect::Widening;
+                }
+                applied
+            })
+            .map_err(|error| (error, true))?;
+        let charge = written.value.ok_or_else(|| {
+            (
+                not_authorized("cap", "the cap no longer covers this payment"),
+                true,
+            )
+        })?;
+        Ok((Held { charge, generation }, written.durable))
     }
 
     /// The grant a token bound: `{ cap_amount, window_seconds }` for the
@@ -913,6 +1084,13 @@ impl Approvals {
         let Some(taken) = self.x402.remove(at) else {
             return Err(crate::vault::internal());
         };
+        // A Ledger payment's held charge (D2), only ever withheld here: it
+        // goes, with nothing to write; its room is back while its cap
+        // stands.
+        if let Some(hold) = self.x402.release(taken.hold) {
+            let refunded = self.x402.stands(&hold);
+            return json_reply(id, &json!({ "refunded": refunded })).map(X402Reply::Now);
+        }
         // A cap's payment goes out only while the cap it was charged to
         // stands: one revoked, or revoked and granted again, since tells
         // main to withhold it. Its charge isn't moved to the new cap, and
@@ -1042,7 +1220,7 @@ impl Approvals {
     /// reserved authorization. Then fc-ledger's operation over the reserved
     /// one, with the account's record, for the device lane; the reservation
     /// goes with it ([`Settling`]). From the reservation found on, any
-    /// refusal gives its charge back and spends it, before the device.
+    /// refusal drops its held charge and spends it, before the device.
     fn x402_ledger(&mut self, id: &str, typed_data: &Value) -> Result<X402Reply, ErrorBody> {
         let at = self
             .x402
@@ -1069,10 +1247,18 @@ impl Approvals {
         }
     }
 
-    /// A Ledger payment that ends without a signature: its charge given
-    /// back (to the cap it was taken from, if that cap stands), and the
-    /// reservation spent. The error, with `refunded`.
+    /// A Ledger payment that ends without a signature: its held charge
+    /// dropped with nothing written (or a written one given back, to the
+    /// cap it was taken from, if that cap stands), and the reservation
+    /// spent. The error, with `refunded`: whether the charge's room is back
+    /// on its cap.
     fn x402_spent(&mut self, reservation: Reservation, error: ErrorBody) -> ErrorBody {
+        // A held charge (D2) goes with nothing written: its room is back
+        // while its cap stands.
+        if let Some(hold) = self.x402.release(reservation.hold) {
+            let refunded = self.x402.stands(&hold);
+            return with_refunded(error, refunded);
+        }
         let refunded = match reservation.held {
             // A refund whose write fails leaves the charge.
             Some(held) => self.give_back(held).is_ok_and(|(refunded, _)| refunded),
@@ -1085,9 +1271,11 @@ impl Approvals {
     /// 0016, D2): with the device's signature, which fc-ledger recovered to
     /// the record's address over the reserved digest, the payload, a
     /// token's grant written and its cap charged, as `{ signature }` does;
-    /// the reservation is kept again and waits for its outcome. Otherwise
-    /// (the device's refusal or failure, the lane's end, a cancel) its
-    /// charge is given back and the reservation spent.
+    /// the reservation is kept again and waits for its outcome. A cap's
+    /// held charge is written first ([`Self::write_hold`]), and one that
+    /// can't be written releases nothing. Otherwise (the device's refusal
+    /// or failure, the lane's end, a cancel) the held charge goes with
+    /// nothing written, and the reservation is spent.
     pub fn x402_ledger_ended(
         &mut self,
         id: u64,
@@ -1108,8 +1296,21 @@ impl Approvals {
         let Some(device) = reservation.device.take() else {
             return Err(self.x402_spent(reservation, crate::vault::internal()));
         };
-        let payload = device.built.payload(&signature);
+        // A cap's held charge, written now, before anything of the
+        // signature leaves: one the file lacks releases nothing, and the
+        // reservation is spent. A crash between this write and the reply
+        // charges once with nothing paid, the safe way round.
         let mut durable = true;
+        if let Some(hold) = self.x402.release(reservation.hold.take()) {
+            match self.write_hold(hold) {
+                Ok((held, flushed)) => {
+                    reservation.held = Some(held);
+                    durable &= flushed;
+                }
+                Err((error, refunded)) => return Err(with_refunded(error, refunded)),
+            }
+        }
+        let payload = device.built.payload(&signature);
         let mut grant_reply = None;
         if let Some(grant) = &device.token_grant {
             let (held, reply, flushed) = self.token_paid(
