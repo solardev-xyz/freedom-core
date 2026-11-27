@@ -797,7 +797,12 @@ impl Safes {
                 }
                 vec![self.quoted(id, &op, &quote, ctx)]
             }
-            Step::Mark => vec![failed(id, &crate::vault::internal())],
+            // No read is out while the mark is due: a stray reply changes
+            // nothing.
+            Step::Mark => {
+                self.ops.insert(id, op);
+                Vec::new()
+            }
         }
     }
 
