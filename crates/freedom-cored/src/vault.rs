@@ -1543,6 +1543,7 @@ impl Vault {
                 pending: &self.safe_pending,
                 clocks,
                 now: Instant::now(),
+                unlocked: self.state.is_unlocked(),
             };
             let mut out = self.safes.chain_read(tag, payload, past_due, &mut ctx);
             self.run_safe_marks(&mut out);
@@ -1733,6 +1734,7 @@ impl Vault {
                     pending: &self.safe_pending,
                     clocks,
                     now: Instant::now(),
+                    unlocked: self.state.is_unlocked(),
                 };
                 out.extend(self.safes.request(id, method, raw, context, &mut ctx));
                 self.run_safe_marks(&mut out);
@@ -2713,6 +2715,7 @@ impl Vault {
                 pending: &self.safe_pending,
                 clocks,
                 now: Instant::now(),
+                unlocked: self.state.is_unlocked(),
             };
             out.extend(self.safes.write(id, &self.state, &mut ctx));
             out.extend(self.approvals.take_events().into_iter().map(Out::Send));
@@ -2759,6 +2762,7 @@ impl Vault {
                 pending: &self.safe_pending,
                 clocks,
                 now: Instant::now(),
+                unlocked: self.state.is_unlocked(),
             };
             out.extend(self.safes.marked(id, written, &mut ctx));
         }

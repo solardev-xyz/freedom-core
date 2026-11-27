@@ -242,26 +242,43 @@ pub fn vault_signatures(
         if signed.len() >= threshold {
             break;
         }
-        let Ok(index) = u32::try_from(index) else {
-            continue;
-        };
-        if records.vault_signs(index).is_err() {
-            continue;
-        }
-        let signature = state.user_wallet(index).ok().and_then(|key| {
-            let key = key.signing_key();
-            (address_of(key) == address)
-                .then(|| sign_digest(key, hash).ok())
-                .flatten()
-        });
-        let checked = signature
-            .and_then(|signature| OwnerSignature::check(hash, &signature, &address, owners).ok());
-        match checked {
-            Some(checked) => signed.push(checked),
-            None => crate::log::warn("a vault owner's Safe signature was passed over", json!({})),
+        match vault_signature(state, records, index, &address, owners, hash) {
+            Ok(checked) => signed.push(checked),
+            Err(_) => crate::log::warn("a vault owner's Safe signature was passed over", json!({})),
         }
     }
     signed
+}
+
+/// One vault owner's signature over `hash` (a SafeTx's or a SafeMessage's),
+/// the owner at wallet index `index` whose record's address is `address`,
+/// checked as every owner's is against the record's `owners`: `vault_locked`
+/// while the vault is locked; the records' refusal of a key the vault
+/// doesn't sign for; and `internal` for a key that can't be derived, whose
+/// address isn't the record's, or whose signature doesn't check. The key is
+/// derived alone and wiped when dropped.
+pub fn vault_signature(
+    state: &VaultState,
+    records: &Records,
+    index: u64,
+    address: &[u8; 20],
+    owners: &[[u8; 20]],
+    hash: &[u8; 32],
+) -> Result<OwnerSignature, ErrorBody> {
+    if !state.is_unlocked() {
+        return Err(crate::vault::locked());
+    }
+    let index = u32::try_from(index).map_err(|_| crate::vault::internal())?;
+    records.vault_signs(index)?;
+    let key = state
+        .user_wallet(index)
+        .map_err(crate::vault::locked_or_internal)?;
+    let key = key.signing_key();
+    if address_of(key) != *address {
+        return Err(crate::vault::internal());
+    }
+    let signature = sign_digest(key, hash).map_err(|_| crate::vault::internal())?;
+    OwnerSignature::check(hash, &signature, address, owners).map_err(|_| crate::vault::internal())
 }
 
 #[cfg(test)]

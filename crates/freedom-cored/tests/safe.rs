@@ -6,7 +6,8 @@
 //! admits; `not_moved` before `vault_meta` is in `store_moved`. S3's
 //! `safe.prepare` and `safe.propose`, and S4's `safe.execute`, whose
 //! prepared send `sign.transaction` signs only as prepared, and
-//! `safe.executed`. The test plays main.
+//! `safe.executed`. S5's page Safe message, started by the page and
+//! completed by main. The test plays main.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -917,4 +918,149 @@ fn a_proposed_safe_tx_is_executed_through_the_prepared_send() {
     assert_eq!(file, json!({}));
     let reply = call(&mut core, 17, "chrome", "safe.pending", json!({}));
     assert_eq!(reply["result"]["states"], json!([]));
+}
+
+// --- SAFE-2's S5: a page's Safe message --------------------------------------
+
+/// The vector message `S2-personal-hex` over the wire: the vault imported,
+/// the Safe of A and B, 1 of 2, added and marked deployed through the
+/// core's own `accounts.*`; the page's `safe-message` token minted as
+/// `eip1193.request`'s approve mints it (here by main's word, a test
+/// build's hook); `safe.message_start`, a page's alone, reads the eight
+/// setup reads from both endpoints, the nonce last, and has A sign; the
+/// board's calls are the chrome's and main's, never a page's; main's
+/// `safe.message_complete` gives the reference's signature and ends the
+/// session.
+#[test]
+fn a_pages_safe_message_is_signed_and_completed() {
+    let v = vectors();
+    let case = v["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["id"] == "S2-personal-hex")
+        .unwrap()
+        .clone();
+    let owners: Vec<[u8; 20]> = ["A", "B"]
+        .iter()
+        .map(|name| fc_evm::parse_address(v["owners"][name]["address"].as_str().unwrap()).unwrap())
+        .collect();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("identity")).unwrap();
+    let mut core = spawn_env(
+        "serve",
+        &root.path().join("identity"),
+        &root.path().join("locks"),
+        &[],
+        &[MAINS_WORD],
+    );
+    std::fs::create_dir_all(&core.grant_root).unwrap();
+    core.store_moved = vec!["vault_meta", "safe_pending"];
+    assert!(core.hello()["result"].is_object());
+    let imported = call(
+        &mut core,
+        2,
+        "shell",
+        "vault.import",
+        json!({
+            "password_b64": base64::engine::general_purpose::STANDARD.encode("testpass1"),
+            "mnemonic_b64": base64::engine::general_purpose::STANDARD.encode(ABANDON),
+            "overwrite": true, "user_knows_password": true,
+        }),
+    );
+    assert!(imported["result"].is_object(), "{imported}");
+    let second = call(
+        &mut core,
+        3,
+        "shell",
+        "accounts.add_mnemonic",
+        json!({ "name": "B" }),
+    );
+    assert_eq!(second["result"]["wallet"]["index"], 1, "{second}");
+    let safe = call(
+        &mut core,
+        4,
+        "shell",
+        "accounts.add_safe",
+        json!({ "address": case["safe"]["address"], "owners": [0, 1], "threshold": 1, "salt_nonce": "0" }),
+    );
+    let index = safe["result"]["wallet"]["index"].as_u64().unwrap();
+    let marked = call(
+        &mut core,
+        5,
+        "shell",
+        "accounts.mark_safe_deployed",
+        json!({ "index": index, "chain_id": 100 }),
+    );
+    assert!(marked["result"].is_object(), "{marked}");
+    let configured = call(
+        &mut core,
+        6,
+        "shell",
+        "chain.configure",
+        json!({ "chains": [gnosis_of_two()] }),
+    );
+    assert!(configured["result"].is_object(), "{configured}");
+    let handle = "a1".repeat(32);
+    let issued = call(
+        &mut core,
+        7,
+        "page",
+        "approval.issue",
+        json!({
+            "kind": "safe-message", "account": index, "handle": handle,
+            "payload": {
+                "safe": case["safe"]["address"], "chain_id": "100",
+                "method": case["request"]["method"], "params": case["request"]["params"],
+            },
+        }),
+    );
+    let token = issued["result"]["token"].as_str().unwrap().to_owned();
+    let start = json!({
+        "safe": index, "request": case["request"],
+        "display": { "kind": "message", "site": "https://app.example", "method": "personal_sign" },
+        "authorization": { "token": token, "handle": handle },
+    });
+    // Only a page starts one; refused at the table, the token kept.
+    for (id, caller) in [(8, "chrome"), (9, "shell")] {
+        let reply = call(&mut core, id, caller, "safe.message_start", start.clone());
+        assert_eq!(reply["error"]["code"], "forbidden", "{caller}: {reply}");
+    }
+    send(&mut core, 10, "page", "safe.message_start", start);
+    let (reply, methods) = served_for(&mut core, 10, &owners);
+    let session = reply["result"]["session"].as_str().unwrap().to_owned();
+    let state = reply["result"]["state"].clone();
+    assert_eq!(session.len(), 32, "{reply}");
+    assert_eq!(state["hash"], case["hash"]);
+    assert_eq!(state["collected"], 1);
+    assert_eq!(state["complete"], true);
+    assert_eq!(methods.len(), 16, "{methods:?}");
+    assert_eq!(methods[..2], ["eth_getCode"; 2]);
+    assert_eq!(methods[14..], ["eth_call"; 2]);
+    // The board's calls: never a page's.
+    let named = json!({ "safe": index, "session": session });
+    for (id, method) in [
+        (11, "safe.message_sign"),
+        (12, "safe.message_state"),
+        (13, "safe.message_cancel"),
+        (14, "safe.message_complete"),
+    ] {
+        let reply = call(&mut core, id, "page", method, named.clone());
+        assert_eq!(reply["error"]["code"], "forbidden", "{method}: {reply}");
+    }
+    let reply = call(&mut core, 15, "chrome", "safe.message_state", named.clone());
+    assert_eq!(reply["result"], state, "{reply}");
+    // Signed already: the sweep reads nothing and answers the state.
+    let reply = call(&mut core, 16, "chrome", "safe.message_sign", named.clone());
+    assert_eq!(reply["result"]["collected"], 1, "{reply}");
+    let reply = call(
+        &mut core,
+        17,
+        "shell",
+        "safe.message_complete",
+        named.clone(),
+    );
+    assert_eq!(reply["result"]["signature"], case["signature"], "{reply}");
+    let reply = call(&mut core, 18, "chrome", "safe.message_state", named);
+    assert_eq!(reply["result"], Value::Null, "{reply}");
 }

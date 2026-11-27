@@ -281,6 +281,7 @@ macro_rules! ctx {
             pending: &$h.pending,
             clocks: CLOCKS,
             now: $h.now,
+            unlocked: $h.state.is_unlocked(),
         }
     };
 }
@@ -1400,3 +1401,7 @@ fn the_cost_is_exact_to_two_to_the_256() {
 mod propose;
 
 mod execute;
+
+// --- SAFE-2's S5: a page's Safe message ---------------------------------
+
+mod messages;

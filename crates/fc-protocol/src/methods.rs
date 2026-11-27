@@ -372,6 +372,20 @@ pub const METHODS: &[Method] = &[
     // reads no chain. Neither writes the identity files.
     row("safe.execute", CS, false, SESSION),
     row("safe.executed", SHELL, false, NOW),
+    // Design 0016, API (SAFE-2's S5): a page's Safe message. `start` is the
+    // page's request, after main's approve or the site's rule, and reads the
+    // setup and nonce first, the `session` class (#520); the board's calls
+    // are the chrome's, and main's own, which drives the approvals
+    // document's board and completes or cancels the page's session (the
+    // reference's `safe-boards.js` and `page-devices.js`). `sign` reads the
+    // chain before each owner's signature and may drive a Ledger owner
+    // (S6): the `device` class. The sessions are in memory: nothing writes
+    // the identity files.
+    row("safe.message_start", PAGE, false, SESSION),
+    row("safe.message_sign", CS, false, DEVICE),
+    row("safe.message_state", CS, false, NOW),
+    row("safe.message_cancel", CS, false, NOW),
+    row("safe.message_complete", CS, false, NOW),
     // Design 0013, "Payment history" (PRF-5g-2): the chrome reads and
     // clears (`payments:get-recent`, `:get-count`, `:get-by-id`,
     // `:clear`, `x402:get-receipts`); the writes and the repoll's are
@@ -597,6 +611,7 @@ mod tests {
                 "phone.result",
                 "safe.prepare",
                 "safe.propose",
+                "safe.message_start",
                 "eip1193.request",
                 "swarm.request",
             ]
@@ -763,6 +778,31 @@ mod tests {
                 );
             }
         }
+        // SAFE-2's S5: a page's Safe message starts only under `page`, for
+        // its own request, under the chain machine's bound; the board's calls
+        // are the chrome's and main's, and `sign` may drive a Ledger owner
+        // (the `device` class). None writes the identity files.
+        for (name, page, chrome, deadline) in [
+            ("safe.message_start", true, false, Deadline::Session),
+            ("safe.message_sign", false, true, Deadline::Device),
+            ("safe.message_state", false, true, Deadline::Immediate),
+            ("safe.message_cancel", false, true, Deadline::Immediate),
+            ("safe.message_complete", false, true, Deadline::Immediate),
+        ] {
+            let row = method(name).unwrap();
+            assert_eq!((row.deadline, row.mutates), (deadline, false), "{name}");
+            for (caller, allowed) in [
+                (CallerKind::Page, page),
+                (CallerKind::Chrome, chrome),
+                (CallerKind::Shell, chrome),
+            ] {
+                assert_eq!(
+                    matches!(admit(name, caller, V2), Admission::Allowed(_)),
+                    allowed,
+                    "{name} {caller:?}"
+                );
+            }
+        }
         // SAFE-2's S3: a site, the chrome and main each reach
         // `safe.prepare` and `safe.propose` (design 0016, API), under the
         // chain machine's bound, and neither writes the identity files.
@@ -920,8 +960,8 @@ mod tests {
     /// `null` and `"idle"`; each APDU has its own, 15 s or the user's 5
     /// minutes. The rows that may drive a Ledger carry it, and no other:
     /// `sign.*`, `ledger.*`, `x402.settle`, `safe.sign_owner` and
-    /// `safe.message_sign`, of which the table has `sign.*`, `ledger.*` and
-    /// `x402.settle` so far.
+    /// `safe.message_sign`, of which the table has `sign.*`, `ledger.*`,
+    /// `x402.settle` and `safe.message_sign` so far.
     #[test]
     fn the_device_deadline_class() {
         assert_eq!(Deadline::Device.default_ms(), None);
@@ -954,7 +994,8 @@ mod tests {
                 "sign.typed_data",
                 "ledger.accounts",
                 "ledger.add",
-                "x402.settle"
+                "x402.settle",
+                "safe.message_sign"
             ]
         );
         for m in METHODS {
@@ -970,6 +1011,7 @@ mod tests {
             ("ledger.accounts", Callers::ChromeOrShell, true),
             ("ledger.add", Callers::ChromeOrShell, true),
             ("x402.settle", Callers::Shell, false),
+            ("safe.message_sign", Callers::ChromeOrShell, false),
         ] {
             let row = method(name).unwrap();
             assert_eq!(
