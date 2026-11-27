@@ -2739,6 +2739,13 @@ impl Approvals {
         self.safes.end_safe(safe)
     }
 
+    /// Ends every open `safe-send` approval for `safe`, its messages' left:
+    /// its pending SafeTx is discarded (design 0016, `safe.discard`). How
+    /// many it ended.
+    pub fn end_safe_sends(&mut self, safe: &[u8; 20]) -> usize {
+        self.safes.end_sends(safe)
+    }
+
     /// The account's dApp grants revoked: the keys revoked, and whether the
     /// write is durable. A file a failed narrowing left behind memory is
     /// written even when memory names none of the account's grants

@@ -239,9 +239,17 @@ fn send(
 /// The check of [`safe`] against [`setup`], through a chain thread
 /// configured with `config`, main answering from `world`.
 fn run(config: Value, world: &World) -> Run {
+    run_scope(config, world, Scope::Signing)
+}
+
+/// The same, of `scope`.
+fn run_scope(config: Value, world: &World, scope: Scope) -> Run {
     let mut chain = Scripted::new(json!([config]));
     let mut tags = Tags::default();
-    let (mut evidence, first) = Evidence::start(safe(), setup(), DEADLINE_MS, &mut tags);
+    let (mut evidence, first) = match scope {
+        Scope::Signing => Evidence::start(safe(), setup(), DEADLINE_MS, &mut tags),
+        Scope::Status => Evidence::start_status(safe(), setup(), DEADLINE_MS, &mut tags),
+    };
     let mut steps = Vec::new();
     let mut reads = BTreeMap::new();
     let mut sources = BTreeMap::new();
@@ -709,6 +717,68 @@ fn an_unreadable_answer_is_safe_unverified() {
             Some(json!({ "safe": "unverified" }))
         );
     }
+}
+
+#[test]
+fn a_status_check_reads_no_nonce_and_signs_on_nothing() {
+    // The code alone, then the six: no nonce step.
+    let status = |world: &World| run_scope(mixed(), world, Scope::Status);
+    let run = status(&World::freedoms());
+    assert_eq!(run.outcome, Outcome::SetupUnchanged);
+    assert_eq!(run.steps, all_steps()[..2]);
+    assert!(!run.sources.contains_key(&Read::Nonce));
+    assert!(run.outcome.refusal().is_none());
+    assert_eq!(run.outcome.state(), json!({ "state": "unchanged" }));
+    // A nonce that would fail the signing check isn't read, so it fails
+    // nothing; the signing check still reads it and refuses.
+    for world in [
+        World::freedoms().served(Read::Nonce, Serve::Revert),
+        World::freedoms().served(Read::Nonce, Serve::OneEndpoint),
+        World::freedoms().with(Read::Nonce, json!("0x")),
+    ] {
+        let run = status(&world);
+        assert_eq!(run.outcome, Outcome::SetupUnchanged);
+        assert_eq!(run.steps.len(), 2);
+        let signing = self::run(mixed(), &world);
+        assert!(
+            matches!(
+                signing.outcome,
+                Outcome::Unverified {
+                    read: Read::Nonce,
+                    ..
+                }
+            ),
+            "{:?}",
+            signing.outcome
+        );
+        assert_eq!(signing.steps, all_steps());
+    }
+    // Every other outcome is the signing check's, as data.
+    let changed = World::freedoms().with(Read::Threshold, hex_words(&[uint(3)]));
+    assert_eq!(
+        status(&changed).outcome,
+        Outcome::Changed(vec![Change::Threshold])
+    );
+    assert_eq!(
+        status(&changed).outcome.state(),
+        json!({ "state": "changed", "changed": ["threshold"] })
+    );
+    let unverified = World::freedoms().served(Read::Owners, Serve::OneEndpoint);
+    assert_eq!(
+        status(&unverified).outcome.state(),
+        json!({ "state": "unverified", "read": "owners", "why": "unverified" })
+    );
+    let unreadable = World::freedoms().with(Read::Owners, json!("0xabc"));
+    assert_eq!(
+        status(&unreadable).outcome.state(),
+        json!({ "state": "unverified", "read": "owners", "why": "unreadable" })
+    );
+    let none = World::freedoms().with(Read::Code, json!("0x"));
+    assert_eq!(status(&none).outcome, Outcome::NotDeployed);
+    assert_eq!(
+        status(&none).outcome.state(),
+        json!({ "state": "not_deployed" })
+    );
 }
 
 /// A read's reply as the chain thread writes it.

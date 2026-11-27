@@ -542,6 +542,17 @@ impl SafeApprovals {
         before - self.entries.len()
     }
 
+    /// Ends every open `safe-send` approval for `safe`, whoever holds it,
+    /// and none of its messages': its pending SafeTx is discarded (design
+    /// 0016, `safe.discard`; a Safe has one pending SafeTx, and a newer
+    /// send approval ends the older one). How many it ended.
+    pub fn end_sends(&mut self, safe: &[u8; 20]) -> usize {
+        let before = self.entries.len();
+        self.entries
+            .retain(|entry| entry.approved.sent_safe() != Some(safe));
+        before - self.entries.len()
+    }
+
     /// Whether an owner's `sign.typed_data` request is one the approval
     /// covers. `presenter` is the caller's [`Holder`] (`None` for
     /// `chrome`, which presents none); `typed_data` the request's
@@ -1161,6 +1172,30 @@ mod tests {
         assert_eq!(safes.end_safe(&safe), 0);
         assert!(safes.end(&other));
         assert!(safes.is_empty());
+    }
+
+    /// A discard ends the Safe's send approvals, for every holder, and
+    /// neither its messages' nor another Safe's (design 0016,
+    /// `safe.discard`).
+    #[test]
+    fn a_discard_ends_only_that_safes_sends() {
+        let mut safes = SafeApprovals::new();
+        let mut rng = Counter(0);
+        let send = |safe| Approved::send(&send_payload(safe)).unwrap();
+        let message =
+            || Approved::message(&message_payload("personal_sign", json!(["hi"]))).unwrap();
+        safes.record(Holder::Wallet, send(SAFE), &mut rng).unwrap();
+        safes.record(page(2), message(), &mut rng).unwrap();
+        safes.record(page(3), send(OTHER_SAFE), &mut rng).unwrap();
+        // A newer send's approval for the Safe ends its older one.
+        safes.record(page(1), send(SAFE), &mut rng).unwrap();
+        assert_eq!(safes.len(), 3);
+        let safe = [0x11; 20];
+        assert_eq!(safes.end_sends(&safe), 1);
+        assert_eq!(safes.len(), 2);
+        assert_eq!(safes.end_sends(&safe), 0);
+        assert_eq!(safes.end_safe(&safe), 1);
+        assert_eq!(safes.len(), 1);
     }
 
     /// A Safe message is the approved Safe's, on its chain: Safe B's
