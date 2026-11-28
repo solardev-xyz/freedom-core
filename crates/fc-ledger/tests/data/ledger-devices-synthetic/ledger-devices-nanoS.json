@@ -1,0 +1,398 @@
+{
+ "meta": {
+  "synthetic": "Not device evidence: freedom-browser's scripts/ledger-record.js run against the fake node-hid (test/helpers/fake-node-hid.js) and a scripted Ethereum app holding the public test phrase, with simulated hands, by freedom-core crates/fc-ledger/tests/gen/synthetic-recordings.js. Real recordings go in vectors/ledger-devices/.",
+  "design": "0016, LDG-3",
+  "recorder": "freedom-browser scripts/ledger-record.js",
+  "freedomBrowserCommit": "acd434535f64a24a6932140279870bb76e068500",
+  "vectors": {
+   "repo": "solardev-xyz/freedom-core",
+   "commit": "b4e0cef4f24f4e80aaa9df6568c7c9737ade9589",
+   "release": "cored-v0.30.0",
+   "file": "vectors/ledger.json"
+  },
+  "recordedAt": "2026-11-28T00:06:03.318Z",
+  "host": {
+   "platform": "linux",
+   "arch": "x64",
+   "electron": null,
+   "node": "24.15.0"
+  },
+  "heldMs": 80,
+  "complete": true
+ },
+ "formats": {
+  "file": "vectors/ledger-devices.json's form (freedom-core design 0016, Vectors; LDG-3): one real Ledger's answers to Freedom's requests with the public test phrase on the device, recorded by freedom-browser's scripts/ledger-record.js, for the core's replay test (C1). One file per device.",
+  "device": "{ model (nanoSP, nanoX, stax, flex or nanoS), name, firmware (as the user read it from the device or Ledger Live), app { name, version } and b001 (its B0 01 answer, hex), mnemonicId (keys.json's abandon-12), account { path, address }: the first account, which the recorder checked before it recorded anything }",
+  "case": "{ id, attempt (from 1: a step the user tried again), from (the ledger.json case, at meta.vectors, whose operation, request and record these are), family, operation (the core's method), request (the core's wire form: ledger.accounts { scheme, start, count }; ledger.add { scheme, index, name }; sign.transaction { tx }; sign.message { message }; sign.typed_data { typed_data, expected_hash }), record { path, address } (a signature's account), stream, device (the file's model, firmware and app), hands, exchanges, outcome, then signer or address, hashes (the hash-only branch), after (the cancel case's new request: the old one's id and attempt), dropped (reports the HID host dropped: another channel's, such as an old request's late answer) }",
+  "stream": "core: main's own stream for the request (core/ledger-grammar.js's Admission, with wallet/ledger/apdu-binding.js for typed data), the core's by the joint contract (0016, Main's typed-data binding), played APDU by APDU through the Admission as main's relay will, the hash-only APDU after a 6D00 to the first E0 1A. reference: ledger.json's APDUs for the case, the JS reference's, whose name length bytes count UTF-16 units (deviation name-ascii, F-2): the core never sends them; recorded to show what a device does with them.",
+  "hands": "what the user was asked to do on the device: none (nothing shows), approve, reject, refuse (a contract call with blind signing off: the device should refuse it), unplug (at the prompt), leave (the cancel case's old request, left on screen until the recorder cancelled it), reject-old (the cancel case's new request, started at once: reject the old prompt, then approve this one), any (a reference stream: approve what shows, or dismiss an error).",
+  "exchange": "{ apdu (hex), row (the grammar's row), deadline_ms (what the core sends: 300000 for the APDU that waits for the user, else 15000), at_ms (when it was sent, from the session's start), then answer (hex, the status word last), failed (not_found, busy, disconnected, unresponsive or timeout) or cancelled: true (the recorder let go of it, as main does on the core's cancel), ms (until the answer or the failure), held (an APDU that doesn't wait for the user, answered after meta.heldMs or more: R2), hash_only: 'shown' (the 6D00 the hash-only APDU follows) }. The recorder gives every APDU 5 minutes, so an answer held for the user is measured rather than cut off at 15 s; the cancel case's new request runs under the core's deadline_ms, as Freedom will.",
+  "outcome": "{ status (the last answer's status word, hex) | failed | cancelled: true, as_asked: whether that is what the hands asked for }",
+  "signer": "a signature answered 9000: the address its v, r and s recover to over the core's digest (a transaction's keccak256 of its unsigned serialization, a message's EIP-191 hash, typed data's expected_hash), or null. address: for ledger.accounts and ledger.add, the address the device answered. hashes: the hash-only warning's { domain, message } and match, the user's word that the device showed the same.",
+  "timing": "R3: the time per APDU that doesn't wait for the user (held ones left out), overall and by CLA INS, and what the grammar's 2,048 APDUs would take at the median and at the 90th percentile.",
+  "held": "R2: of the APDUs that don't wait for the user, in the steps the user approved, how many were answered after meta.heldMs or more, by CLA INS, and in which steps."
+ },
+ "device": {
+  "model": "nanoS",
+  "name": "Nano S",
+  "firmware": "synthetic",
+  "app": {
+   "name": "Ethereum",
+   "version": "1.13.0"
+  },
+  "b001": "0108457468657265756d06312e31332e309000",
+  "mnemonicId": "abandon-12",
+  "account": {
+   "path": "44'/60'/0'/0/0",
+   "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+  }
+ },
+ "cases": [
+  {
+   "id": "discovery",
+   "attempt": 1,
+   "from": "discovery-live-0-1",
+   "family": "discovery",
+   "operation": "ledger.accounts",
+   "request": {
+    "scheme": "live",
+    "start": 0,
+    "count": 1
+   },
+   "stream": "core",
+   "device": {
+    "model": "nanoS",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "none",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "ledger.accounts",
+     "deadline_ms": 15000,
+     "at_ms": 9.4,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 7.5,
+     "held": false
+    }
+   ],
+   "outcome": {
+    "status": "9000",
+    "as_asked": true
+   },
+   "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+   "dropped": 0
+  },
+  {
+   "id": "typed-hash-only-mail",
+   "attempt": 1,
+   "from": "typed-hash-only-mail",
+   "family": "hash-only",
+   "operation": "sign.typed_data",
+   "request": {
+    "typed_data": {
+     "domain": {
+      "name": "Ether Mail",
+      "version": "1",
+      "chainId": 1,
+      "verifyingContract": "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC"
+     },
+     "types": {
+      "Person": [
+       {
+        "name": "name",
+        "type": "string"
+       },
+       {
+        "name": "wallet",
+        "type": "address"
+       }
+      ],
+      "Mail": [
+       {
+        "name": "from",
+        "type": "Person"
+       },
+       {
+        "name": "to",
+        "type": "Person"
+       },
+       {
+        "name": "contents",
+        "type": "string"
+       }
+      ]
+     },
+     "message": {
+      "from": {
+       "name": "Cow",
+       "wallet": "0xCD2a3d9F938E13CD947Ec05AbC7FE734Df8DD826"
+      },
+      "to": {
+       "name": "Bob",
+       "wallet": "0xbBbBBBBbbBBBbbbBbbBbbbbBBbBbbbbBbBbbBBbB"
+      },
+      "contents": "Hello, Bob!"
+     }
+    },
+    "expected_hash": "0xbe609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2"
+   },
+   "record": {
+    "path": "44'/60'/0'/0/0",
+    "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+   },
+   "stream": "core",
+   "device": {
+    "model": "nanoS",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "approve",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "signature.first",
+     "deadline_ms": 15000,
+     "at_ms": 20.4,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 10.7,
+     "held": false
+    },
+    {
+     "apdu": "b001000000",
+     "row": "signature.second",
+     "deadline_ms": 15000,
+     "at_ms": 31.3,
+     "answer": "0108457468657265756d06312e31332e309000",
+     "ms": 4.4,
+     "held": false
+    },
+    {
+     "apdu": "e01a00000c454950373132446f6d61696e",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 35.7,
+     "answer": "6d00",
+     "ms": 3.3,
+     "held": false,
+     "hash_only": "shown"
+    },
+    {
+     "apdu": "e00c000055058000002c8000003c800000000000000000000000f2cee375fa42b42143804025fc449deafd50cc031ca257e0b194a650a912090fc52c0ee5d84264471806290a3f2c4cecfc5490626bf912d01f240d7a274b371e",
+     "row": "hash-only",
+     "deadline_ms": 300000,
+     "at_ms": 39.1,
+     "answer": "1c5b9ee7ebad3acd6ca243732900203a8a9e59b871345cb9b229a1936e11f5ad8967c46a0d05027ccd880bcc49e18877a53b8e4813558a1fd165ebb875c4a447c29000",
+     "ms": 14.5
+    }
+   ],
+   "hashes": {
+    "domain": "0xf2cee375fa42b42143804025fc449deafd50cc031ca257e0b194a650a912090f",
+    "message": "0xc52c0ee5d84264471806290a3f2c4cecfc5490626bf912d01f240d7a274b371e",
+    "match": true
+   },
+   "outcome": {
+    "status": "9000",
+    "as_asked": true
+   },
+   "signer": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+   "dropped": 0
+  },
+  {
+   "id": "typed-hash-only-safe-tx",
+   "attempt": 1,
+   "from": "typed-hash-only-safe-tx",
+   "family": "hash-only",
+   "operation": "sign.typed_data",
+   "request": {
+    "typed_data": {
+     "domain": {
+      "chainId": 100,
+      "verifyingContract": "0x1234567890AbcdEF1234567890aBcdef12345678"
+     },
+     "types": {
+      "SafeTx": [
+       {
+        "name": "to",
+        "type": "address"
+       },
+       {
+        "name": "value",
+        "type": "uint256"
+       },
+       {
+        "name": "data",
+        "type": "bytes"
+       },
+       {
+        "name": "operation",
+        "type": "uint8"
+       },
+       {
+        "name": "safeTxGas",
+        "type": "uint256"
+       },
+       {
+        "name": "baseGas",
+        "type": "uint256"
+       },
+       {
+        "name": "gasPrice",
+        "type": "uint256"
+       },
+       {
+        "name": "gasToken",
+        "type": "address"
+       },
+       {
+        "name": "refundReceiver",
+        "type": "address"
+       },
+       {
+        "name": "nonce",
+        "type": "uint256"
+       }
+      ]
+     },
+     "message": {
+      "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+      "value": "1234567890123456789",
+      "data": "0x",
+      "operation": 0,
+      "safeTxGas": "0",
+      "baseGas": "0",
+      "gasPrice": "0",
+      "gasToken": "0x0000000000000000000000000000000000000000",
+      "refundReceiver": "0x0000000000000000000000000000000000000000",
+      "nonce": "3"
+     }
+    },
+    "expected_hash": "0xca3ef876ccf3a37b744cf5e32615a1803f823e75b471d1872ddaa1a61970f2a4"
+   },
+   "record": {
+    "path": "44'/60'/0'/0/0",
+    "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+   },
+   "stream": "core",
+   "device": {
+    "model": "nanoS",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "approve",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "signature.first",
+     "deadline_ms": 15000,
+     "at_ms": 58.2,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 13.5,
+     "held": false
+    },
+    {
+     "apdu": "b001000000",
+     "row": "signature.second",
+     "deadline_ms": 15000,
+     "at_ms": 71.8,
+     "answer": "0108457468657265756d06312e31332e309000",
+     "ms": 4.5,
+     "held": false
+    },
+    {
+     "apdu": "e01a00000c454950373132446f6d61696e",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 76.3,
+     "answer": "6d00",
+     "ms": 4.5,
+     "held": false,
+     "hash_only": "shown"
+    },
+    {
+     "apdu": "e00c000055058000002c8000003c800000000000000000000000e7b5fbc9641dcaa8760829e554e3567abb66891112c51a87f5c59efcb7ce1bdde5824f42f0ee82f60a13a2d133f6d59d355db5fd53029d6078ebc401e19796ef",
+     "row": "hash-only",
+     "deadline_ms": 300000,
+     "at_ms": 80.8,
+     "answer": "1cdf29ef7f57c91574604a1a2d7c41347eb581d8b547eaba6eb1fba822c017825958fb7695d837165451a0c1d9d8058937c2d2cd8289762fb49efecef86912f8819000",
+     "ms": 12.2
+    }
+   ],
+   "hashes": {
+    "domain": "0xe7b5fbc9641dcaa8760829e554e3567abb66891112c51a87f5c59efcb7ce1bdd",
+    "message": "0xe5824f42f0ee82f60a13a2d133f6d59d355db5fd53029d6078ebc401e19796ef",
+    "match": true
+   },
+   "outcome": {
+    "status": "9000",
+    "as_asked": true
+   },
+   "signer": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+   "dropped": 0
+  }
+ ],
+ "timing": {
+  "apdus": 7,
+  "median_ms": 4.5,
+  "p90_ms": 13.5,
+  "max_ms": 13.5,
+  "by_ins": {
+   "e002": {
+    "apdus": 3,
+    "median_ms": 10.7,
+    "p90_ms": 13.5,
+    "max_ms": 13.5
+   },
+   "b001": {
+    "apdus": 2,
+    "median_ms": 4.5,
+    "p90_ms": 4.5,
+    "max_ms": 4.5
+   },
+   "e01a": {
+    "apdus": 2,
+    "median_ms": 4.5,
+    "p90_ms": 4.5,
+    "max_ms": 4.5
+   }
+  },
+  "bound": 2048,
+  "bound_s": {
+   "median": 9,
+   "p90": 28
+  }
+ },
+ "held": {
+  "threshold_ms": 80,
+  "apdus": 6,
+  "held": 0,
+  "by_ins": {
+   "e002": {
+    "apdus": 2,
+    "held": 0,
+    "slowest_ms": 13.5
+   },
+   "b001": {
+    "apdus": 2,
+    "held": 0,
+    "slowest_ms": 4.5
+   },
+   "e01a": {
+    "apdus": 2,
+    "held": 0,
+    "slowest_ms": 4.5
+   }
+  },
+  "steps": []
+ }
+}

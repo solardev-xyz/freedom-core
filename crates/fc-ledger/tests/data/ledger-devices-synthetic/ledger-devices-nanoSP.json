@@ -1,0 +1,2704 @@
+{
+ "meta": {
+  "synthetic": "Not device evidence: freedom-browser's scripts/ledger-record.js run against the fake node-hid (test/helpers/fake-node-hid.js) and a scripted Ethereum app holding the public test phrase, with simulated hands, by freedom-core crates/fc-ledger/tests/gen/synthetic-recordings.js. Real recordings go in vectors/ledger-devices/.",
+  "design": "0016, LDG-3",
+  "recorder": "freedom-browser scripts/ledger-record.js",
+  "freedomBrowserCommit": "acd434535f64a24a6932140279870bb76e068500",
+  "vectors": {
+   "repo": "solardev-xyz/freedom-core",
+   "commit": "b4e0cef4f24f4e80aaa9df6568c7c9737ade9589",
+   "release": "cored-v0.30.0",
+   "file": "vectors/ledger.json"
+  },
+  "recordedAt": "2026-11-28T00:06:00.809Z",
+  "host": {
+   "platform": "linux",
+   "arch": "x64",
+   "electron": null,
+   "node": "24.15.0"
+  },
+  "heldMs": 80,
+  "complete": true
+ },
+ "formats": {
+  "file": "vectors/ledger-devices.json's form (freedom-core design 0016, Vectors; LDG-3): one real Ledger's answers to Freedom's requests with the public test phrase on the device, recorded by freedom-browser's scripts/ledger-record.js, for the core's replay test (C1). One file per device.",
+  "device": "{ model (nanoSP, nanoX, stax, flex or nanoS), name, firmware (as the user read it from the device or Ledger Live), app { name, version } and b001 (its B0 01 answer, hex), mnemonicId (keys.json's abandon-12), account { path, address }: the first account, which the recorder checked before it recorded anything }",
+  "case": "{ id, attempt (from 1: a step the user tried again), from (the ledger.json case, at meta.vectors, whose operation, request and record these are), family, operation (the core's method), request (the core's wire form: ledger.accounts { scheme, start, count }; ledger.add { scheme, index, name }; sign.transaction { tx }; sign.message { message }; sign.typed_data { typed_data, expected_hash }), record { path, address } (a signature's account), stream, device (the file's model, firmware and app), hands, exchanges, outcome, then signer or address, hashes (the hash-only branch), after (the cancel case's new request: the old one's id and attempt), dropped (reports the HID host dropped: another channel's, such as an old request's late answer) }",
+  "stream": "core: main's own stream for the request (core/ledger-grammar.js's Admission, with wallet/ledger/apdu-binding.js for typed data), the core's by the joint contract (0016, Main's typed-data binding), played APDU by APDU through the Admission as main's relay will, the hash-only APDU after a 6D00 to the first E0 1A. reference: ledger.json's APDUs for the case, the JS reference's, whose name length bytes count UTF-16 units (deviation name-ascii, F-2): the core never sends them; recorded to show what a device does with them.",
+  "hands": "what the user was asked to do on the device: none (nothing shows), approve, reject, refuse (a contract call with blind signing off: the device should refuse it), unplug (at the prompt), leave (the cancel case's old request, left on screen until the recorder cancelled it), reject-old (the cancel case's new request, started at once: reject the old prompt, then approve this one), any (a reference stream: approve what shows, or dismiss an error).",
+  "exchange": "{ apdu (hex), row (the grammar's row), deadline_ms (what the core sends: 300000 for the APDU that waits for the user, else 15000), at_ms (when it was sent, from the session's start), then answer (hex, the status word last), failed (not_found, busy, disconnected, unresponsive or timeout) or cancelled: true (the recorder let go of it, as main does on the core's cancel), ms (until the answer or the failure), held (an APDU that doesn't wait for the user, answered after meta.heldMs or more: R2), hash_only: 'shown' (the 6D00 the hash-only APDU follows) }. The recorder gives every APDU 5 minutes, so an answer held for the user is measured rather than cut off at 15 s; the cancel case's new request runs under the core's deadline_ms, as Freedom will.",
+  "outcome": "{ status (the last answer's status word, hex) | failed | cancelled: true, as_asked: whether that is what the hands asked for }",
+  "signer": "a signature answered 9000: the address its v, r and s recover to over the core's digest (a transaction's keccak256 of its unsigned serialization, a message's EIP-191 hash, typed data's expected_hash), or null. address: for ledger.accounts and ledger.add, the address the device answered. hashes: the hash-only warning's { domain, message } and match, the user's word that the device showed the same.",
+  "timing": "R3: the time per APDU that doesn't wait for the user (held ones left out), overall and by CLA INS, and what the grammar's 2,048 APDUs would take at the median and at the 90th percentile.",
+  "held": "R2: of the APDUs that don't wait for the user, in the steps the user approved, how many were answered after meta.heldMs or more, by CLA INS, and in which steps."
+ },
+ "device": {
+  "model": "nanoSP",
+  "name": "Nano S Plus",
+  "firmware": "synthetic",
+  "app": {
+   "name": "Ethereum",
+   "version": "1.13.0"
+  },
+  "b001": "0108457468657265756d06312e31332e309000",
+  "mnemonicId": "abandon-12",
+  "account": {
+   "path": "44'/60'/0'/0/0",
+   "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+  }
+ },
+ "cases": [
+  {
+   "id": "discovery",
+   "attempt": 1,
+   "from": "discovery-live-0-1",
+   "family": "discovery",
+   "operation": "ledger.accounts",
+   "request": {
+    "scheme": "live",
+    "start": 0,
+    "count": 1
+   },
+   "stream": "core",
+   "device": {
+    "model": "nanoSP",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "none",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "ledger.accounts",
+     "deadline_ms": 15000,
+     "at_ms": 15.7,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 11.1,
+     "held": false
+    }
+   ],
+   "outcome": {
+    "status": "9000",
+    "as_asked": true
+   },
+   "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+   "dropped": 0
+  },
+  {
+   "id": "tx-type0",
+   "attempt": 1,
+   "from": "tx-type0-chain-1-parity-0",
+   "family": "transaction",
+   "operation": "sign.transaction",
+   "request": {
+    "tx": {
+     "type": 0,
+     "chain_id": "1",
+     "nonce": "0",
+     "gas_limit": "21000",
+     "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+     "value": "1000000000000000",
+     "data": "0x",
+     "gas_price": "1000000000"
+    }
+   },
+   "record": {
+    "path": "44'/60'/0'/0/0",
+    "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+   },
+   "stream": "core",
+   "device": {
+    "model": "nanoSP",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "approve",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "signature.first",
+     "deadline_ms": 15000,
+     "at_ms": 32.4,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 9.7,
+     "held": false
+    },
+    {
+     "apdu": "b001000000",
+     "row": "signature.second",
+     "deadline_ms": 15000,
+     "at_ms": 42.4,
+     "answer": "0108457468657265756d06312e31332e309000",
+     "ms": 4.2,
+     "held": false
+    },
+    {
+     "apdu": "e004000040058000002c8000003c800000000000000000000000ea80843b9aca00825208948ba1f109551bd432803012645ac136ddd64dba7287038d7ea4c6800080018080",
+     "row": "sign.transaction",
+     "deadline_ms": 300000,
+     "at_ms": 46.6,
+     "answer": "256eeb08a55f09b999ae3baf22e073f7112bade5d5d4f5abc1098bbdd8de3a9ac6398471fd94d346e1f874e00a96e12eeb06a00100e65e07d3235ab139540c0b159000",
+     "ms": 21.8
+    }
+   ],
+   "outcome": {
+    "status": "9000",
+    "as_asked": true
+   },
+   "signer": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+   "dropped": 0
+  },
+  {
+   "id": "tx-type2",
+   "attempt": 1,
+   "from": "tx-type2-chain-1-parity-0",
+   "family": "transaction",
+   "operation": "sign.transaction",
+   "request": {
+    "tx": {
+     "type": 2,
+     "chain_id": "1",
+     "nonce": "2",
+     "gas_limit": "21000",
+     "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+     "value": "1000000000000000",
+     "data": "0x",
+     "max_fee_per_gas": "2000000000",
+     "max_priority_fee_per_gas": "1000000000"
+    }
+   },
+   "record": {
+    "path": "44'/60'/0'/0/0",
+    "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+   },
+   "stream": "core",
+   "device": {
+    "model": "nanoSP",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "approve",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "signature.first",
+     "deadline_ms": 15000,
+     "at_ms": 74.9,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 14.9,
+     "held": false
+    },
+    {
+     "apdu": "b001000000",
+     "row": "signature.second",
+     "deadline_ms": 15000,
+     "at_ms": 90,
+     "answer": "0108457468657265756d06312e31332e309000",
+     "ms": 4.6,
+     "held": false
+    },
+    {
+     "apdu": "e004000045058000002c8000003c80000000000000000000000002ee0102843b9aca008477359400825208948ba1f109551bd432803012645ac136ddd64dba7287038d7ea4c6800080c0",
+     "row": "sign.transaction",
+     "deadline_ms": 300000,
+     "at_ms": 94.6,
+     "answer": "009824ab93d543a8d4da52a45c1cef40d020e8e964864639573a7a3699c736781e121cbd7a3c7df8e735e875a6b1a47f4a842ae4cdae2caf75b11b4ea47bffdafd9000",
+     "ms": 15.2
+    }
+   ],
+   "outcome": {
+    "status": "9000",
+    "as_asked": true
+   },
+   "signer": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+   "dropped": 0
+  },
+  {
+   "id": "message",
+   "attempt": 1,
+   "from": "msg-steps",
+   "family": "message",
+   "operation": "sign.message",
+   "request": {
+    "message": "0x050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f76"
+   },
+   "record": {
+    "path": "44'/60'/0'/0/0",
+    "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+   },
+   "stream": "core",
+   "device": {
+    "model": "nanoSP",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "approve",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "signature.first",
+     "deadline_ms": 15000,
+     "at_ms": 116.3,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 14.6,
+     "held": false
+    },
+    {
+     "apdu": "b001000000",
+     "row": "signature.second",
+     "deadline_ms": 15000,
+     "at_ms": 131.2,
+     "answer": "0108457468657265756d06312e31332e309000",
+     "ms": 5.2,
+     "held": false
+    },
+    {
+     "apdu": "e008000096058000002c8000003c800000000000000000000000000000c8050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b6269",
+     "row": "sign.message",
+     "deadline_ms": 15000,
+     "at_ms": 136.6,
+     "answer": "9000",
+     "ms": 5.3,
+     "held": false
+    },
+    {
+     "apdu": "e00880004b70777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f76",
+     "row": "sign.message",
+     "deadline_ms": 300000,
+     "at_ms": 141.9,
+     "answer": "1c06392f61aa0e86164b2f44ade2b61ea1dc5811cf861dc9edc812c7ecbf1805a71b85b5f67243170579f94ae269be50ad1f5d18d3320e62b17bb88da30fa78e959000",
+     "ms": 15.3
+    }
+   ],
+   "outcome": {
+    "status": "9000",
+    "as_asked": true
+   },
+   "signer": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+   "dropped": 0
+  },
+  {
+   "id": "typed-mail",
+   "attempt": 1,
+   "from": "typed-mail",
+   "family": "typed-data",
+   "operation": "sign.typed_data",
+   "request": {
+    "typed_data": {
+     "domain": {
+      "name": "Ether Mail",
+      "version": "1",
+      "chainId": 1,
+      "verifyingContract": "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC"
+     },
+     "types": {
+      "Person": [
+       {
+        "name": "name",
+        "type": "string"
+       },
+       {
+        "name": "wallet",
+        "type": "address"
+       }
+      ],
+      "Mail": [
+       {
+        "name": "from",
+        "type": "Person"
+       },
+       {
+        "name": "to",
+        "type": "Person"
+       },
+       {
+        "name": "contents",
+        "type": "string"
+       }
+      ]
+     },
+     "message": {
+      "from": {
+       "name": "Cow",
+       "wallet": "0xCD2a3d9F938E13CD947Ec05AbC7FE734Df8DD826"
+      },
+      "to": {
+       "name": "Bob",
+       "wallet": "0xbBbBBBBbbBBBbbbBbbBbbbbBBbBbbbbBbBbbBBbB"
+      },
+      "contents": "Hello, Bob!"
+     }
+    },
+    "expected_hash": "0xbe609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2"
+   },
+   "record": {
+    "path": "44'/60'/0'/0/0",
+    "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+   },
+   "stream": "core",
+   "device": {
+    "model": "nanoSP",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "approve",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "signature.first",
+     "deadline_ms": 15000,
+     "at_ms": 161.8,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 15.4,
+     "held": false
+    },
+    {
+     "apdu": "b001000000",
+     "row": "signature.second",
+     "deadline_ms": 15000,
+     "at_ms": 177.5,
+     "answer": "0108457468657265756d06312e31332e309000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01a00000c454950373132446f6d61696e",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 182.3,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0605046e616d65",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 187.1,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff09050776657273696f6e",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 191.9,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0a422007636861696e4964",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 196.8,
+     "answer": "9000",
+     "ms": 5,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff130311766572696679696e67436f6e7472616374",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 201.8,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01a0000044d61696c",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 206.6,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0d0006506572736f6e0466726f6d",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 211.3,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0b0006506572736f6e02746f",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 216.1,
+     "answer": "9000",
+     "ms": 4.9,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0a0508636f6e74656e7473",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 221,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01a000006506572736f6e",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 225.8,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0605046e616d65",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 230.5,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff08030677616c6c6574",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 235.2,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01c00000c454950373132446f6d61696e",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 240.1,
+     "answer": "9000",
+     "ms": 4.9,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff0c000a4574686572204d61696c",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 245.1,
+     "answer": "9000",
+     "ms": 123.8,
+     "held": true
+    },
+    {
+     "apdu": "e01c00ff03000131",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 368.9,
+     "answer": "9000",
+     "ms": 123,
+     "held": true
+    },
+    {
+     "apdu": "e01c00ff03000101",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 492,
+     "answer": "9000",
+     "ms": 123,
+     "held": true
+    },
+    {
+     "apdu": "e01c00ff160014cccccccccccccccccccccccccccccccccccccccc",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 615.1,
+     "answer": "9000",
+     "ms": 122.5,
+     "held": true
+    },
+    {
+     "apdu": "e01c0000044d61696c",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 737.6,
+     "answer": "9000",
+     "ms": 4.9,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff050003436f77",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 742.6,
+     "answer": "9000",
+     "ms": 123,
+     "held": true
+    },
+    {
+     "apdu": "e01c00ff160014cd2a3d9f938e13cd947ec05abc7fe734df8dd826",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 865.6,
+     "answer": "9000",
+     "ms": 123.9,
+     "held": true
+    },
+    {
+     "apdu": "e01c00ff050003426f62",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 989.6,
+     "answer": "9000",
+     "ms": 124.3,
+     "held": true
+    },
+    {
+     "apdu": "e01c00ff160014bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1113.9,
+     "answer": "9000",
+     "ms": 123.3,
+     "held": true
+    },
+    {
+     "apdu": "e01c00ff0d000b48656c6c6f2c20426f6221",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1237.3,
+     "answer": "9000",
+     "ms": 124.5,
+     "held": true
+    },
+    {
+     "apdu": "e00c000115058000002c8000003c800000000000000000000000",
+     "row": "sign.typed_data.sign",
+     "deadline_ms": 300000,
+     "at_ms": 1361.8,
+     "answer": "1c5b9ee7ebad3acd6ca243732900203a8a9e59b871345cb9b229a1936e11f5ad8967c46a0d05027ccd880bcc49e18877a53b8e4813558a1fd165ebb875c4a447c29000",
+     "ms": 19.9
+    }
+   ],
+   "outcome": {
+    "status": "9000",
+    "as_asked": true
+   },
+   "signer": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+   "dropped": 0
+  },
+  {
+   "id": "typed-safe-tx",
+   "attempt": 1,
+   "from": "typed-safe-tx",
+   "family": "typed-data",
+   "operation": "sign.typed_data",
+   "request": {
+    "typed_data": {
+     "domain": {
+      "chainId": 100,
+      "verifyingContract": "0x1234567890AbcdEF1234567890aBcdef12345678"
+     },
+     "types": {
+      "SafeTx": [
+       {
+        "name": "to",
+        "type": "address"
+       },
+       {
+        "name": "value",
+        "type": "uint256"
+       },
+       {
+        "name": "data",
+        "type": "bytes"
+       },
+       {
+        "name": "operation",
+        "type": "uint8"
+       },
+       {
+        "name": "safeTxGas",
+        "type": "uint256"
+       },
+       {
+        "name": "baseGas",
+        "type": "uint256"
+       },
+       {
+        "name": "gasPrice",
+        "type": "uint256"
+       },
+       {
+        "name": "gasToken",
+        "type": "address"
+       },
+       {
+        "name": "refundReceiver",
+        "type": "address"
+       },
+       {
+        "name": "nonce",
+        "type": "uint256"
+       }
+      ]
+     },
+     "message": {
+      "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+      "value": "1234567890123456789",
+      "data": "0x",
+      "operation": 0,
+      "safeTxGas": "0",
+      "baseGas": "0",
+      "gasPrice": "0",
+      "gasToken": "0x0000000000000000000000000000000000000000",
+      "refundReceiver": "0x0000000000000000000000000000000000000000",
+      "nonce": "3"
+     }
+    },
+    "expected_hash": "0xca3ef876ccf3a37b744cf5e32615a1803f823e75b471d1872ddaa1a61970f2a4"
+   },
+   "record": {
+    "path": "44'/60'/0'/0/0",
+    "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+   },
+   "stream": "core",
+   "device": {
+    "model": "nanoSP",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "approve",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "signature.first",
+     "deadline_ms": 15000,
+     "at_ms": 1390.1,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 12.2,
+     "held": false
+    },
+    {
+     "apdu": "b001000000",
+     "row": "signature.second",
+     "deadline_ms": 15000,
+     "at_ms": 1402.7,
+     "answer": "0108457468657265756d06312e31332e309000",
+     "ms": 4.9,
+     "held": false
+    },
+    {
+     "apdu": "e01a00000c454950373132446f6d61696e",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1407.6,
+     "answer": "9000",
+     "ms": 4.9,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0a422007636861696e4964",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1412.6,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff130311766572696679696e67436f6e7472616374",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1417.3,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01a000006536166655478",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1422.2,
+     "answer": "9000",
+     "ms": 3.8,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff040302746f",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1426,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0842200576616c7565",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1430.8,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff06070464617461",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1435.6,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0c4201096f7065726174696f6e",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1440.4,
+     "answer": "9000",
+     "ms": 4.9,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0c422009736166655478476173",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1445.4,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0a42200762617365476173",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1450.1,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0b4220086761735072696365",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1454.9,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0a0308676173546f6b656e",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1459.8,
+     "answer": "9000",
+     "ms": 3.8,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff10030e726566756e645265636569766572",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1463.6,
+     "answer": "9000",
+     "ms": 5,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff084220056e6f6e6365",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1468.6,
+     "answer": "9000",
+     "ms": 4.9,
+     "held": false
+    },
+    {
+     "apdu": "e01c00000c454950373132446f6d61696e",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1473.6,
+     "answer": "9000",
+     "ms": 5,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff03000164",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1478.6,
+     "answer": "9000",
+     "ms": 5,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff1600141234567890abcdef1234567890abcdef12345678",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1483.6,
+     "answer": "9000",
+     "ms": 5,
+     "held": false
+    },
+    {
+     "apdu": "e01c000006536166655478",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1488.6,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff1600148ba1f109551bd432803012645ac136ddd64dba72",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1493.6,
+     "answer": "9000",
+     "ms": 5,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff0a0008112210f47de98115",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1498.6,
+     "answer": "9000",
+     "ms": 4.9,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff020000",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1503.6,
+     "answer": "9000",
+     "ms": 5,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff03000100",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1508.6,
+     "answer": "9000",
+     "ms": 5.4,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff03000100",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1514,
+     "answer": "9000",
+     "ms": 5.1,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff03000100",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1519.2,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff03000100",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1524,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff1600140000000000000000000000000000000000000000",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1528.8,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff1600140000000000000000000000000000000000000000",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1533.6,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff03000103",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1538.3,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e00c000115058000002c8000003c800000000000000000000000",
+     "row": "sign.typed_data.sign",
+     "deadline_ms": 300000,
+     "at_ms": 1543.1,
+     "answer": "1cdf29ef7f57c91574604a1a2d7c41347eb581d8b547eaba6eb1fba822c017825958fb7695d837165451a0c1d9d8058937c2d2cd8289762fb49efecef86912f8819000",
+     "ms": 17.5
+    }
+   ],
+   "outcome": {
+    "status": "9000",
+    "as_asked": true
+   },
+   "signer": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+   "dropped": 0
+  },
+  {
+   "id": "typed-eip3009",
+   "attempt": 1,
+   "from": "typed-eip3009-transfer-with-authorization",
+   "family": "typed-data",
+   "operation": "sign.typed_data",
+   "request": {
+    "typed_data": {
+     "domain": {
+      "name": "USD Coin",
+      "version": "2",
+      "chainId": 8453,
+      "verifyingContract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+     },
+     "types": {
+      "TransferWithAuthorization": [
+       {
+        "name": "from",
+        "type": "address"
+       },
+       {
+        "name": "to",
+        "type": "address"
+       },
+       {
+        "name": "value",
+        "type": "uint256"
+       },
+       {
+        "name": "validAfter",
+        "type": "uint256"
+       },
+       {
+        "name": "validBefore",
+        "type": "uint256"
+       },
+       {
+        "name": "nonce",
+        "type": "bytes32"
+       }
+      ]
+     },
+     "message": {
+      "from": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+      "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+      "value": "10000",
+      "validAfter": "1767225000",
+      "validBefore": "1767225600",
+      "nonce": "0x4242424242424242424242424242424242424242424242424242424242424242"
+     }
+    },
+    "expected_hash": "0x478bd984e8e1944026f33eb1ab458258c9b0ebcb349494f75fd1d63b3504b04c"
+   },
+   "record": {
+    "path": "44'/60'/0'/0/0",
+    "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+   },
+   "stream": "core",
+   "device": {
+    "model": "nanoSP",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "approve",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "signature.first",
+     "deadline_ms": 15000,
+     "at_ms": 1571.2,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 12,
+     "held": false
+    },
+    {
+     "apdu": "b001000000",
+     "row": "signature.second",
+     "deadline_ms": 15000,
+     "at_ms": 1583.4,
+     "answer": "0108457468657265756d06312e31332e309000",
+     "ms": 3.5,
+     "held": false
+    },
+    {
+     "apdu": "e01a00000c454950373132446f6d61696e",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1586.8,
+     "answer": "9000",
+     "ms": 4.4,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0605046e616d65",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1591.3,
+     "answer": "9000",
+     "ms": 4.5,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff09050776657273696f6e",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1595.8,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0a422007636861696e4964",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1600.6,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff130311766572696679696e67436f6e7472616374",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1605.2,
+     "answer": "9000",
+     "ms": 3.6,
+     "held": false
+    },
+    {
+     "apdu": "e01a0000195472616e7366657257697468417574686f72697a6174696f6e",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1608.9,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff06030466726f6d",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1613.7,
+     "answer": "9000",
+     "ms": 5.2,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff040302746f",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1619,
+     "answer": "9000",
+     "ms": 4.9,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0842200576616c7565",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1623.9,
+     "answer": "9000",
+     "ms": 5.3,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0d42200a76616c69644166746572",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1629.2,
+     "answer": "9000",
+     "ms": 5,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0e42200b76616c69644265666f7265",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1634.2,
+     "answer": "9000",
+     "ms": 4.9,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff084620056e6f6e6365",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1639.1,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01c00000c454950373132446f6d61696e",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1644,
+     "answer": "9000",
+     "ms": 4.9,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff0a000855534420436f696e",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1648.9,
+     "answer": "9000",
+     "ms": 4.5,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff03000132",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1653.5,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff0400022105",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1658.2,
+     "answer": "9000",
+     "ms": 3.7,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff160014833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1661.9,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01c0000195472616e7366657257697468417574686f72697a6174696f6e",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1666.7,
+     "answer": "9000",
+     "ms": 5.8,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff1600149858effd232b4033e47d90003d41ec34ecaeda94",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1672.6,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff1600148ba1f109551bd432803012645ac136ddd64dba72",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1677.4,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff0400022710",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1682.2,
+     "answer": "9000",
+     "ms": 3.6,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff0600046955b6a8",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1685.8,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff0600046955b900",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1690.6,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff2200204242424242424242424242424242424242424242424242424242424242424242",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1695.3,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e00c000115058000002c8000003c800000000000000000000000",
+     "row": "sign.typed_data.sign",
+     "deadline_ms": 300000,
+     "at_ms": 1700.2,
+     "answer": "1b1c2a2cbd0e42b91e5f7a1eb14597f5884f9a930af55fb1f3f9d3dd6f64aa5f524d77c68c0e31eeec1f58e7b5054327734d5fb11027cd734860c3f1426ec4d7bf9000",
+     "ms": 17.3
+    }
+   ],
+   "outcome": {
+    "status": "9000",
+    "as_asked": true
+   },
+   "signer": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+   "dropped": 0
+  },
+  {
+   "id": "name-field-ascii-253",
+   "attempt": 1,
+   "from": "name-field-ascii-253",
+   "family": "name-length",
+   "operation": "sign.typed_data",
+   "request": {
+    "typed_data": {
+     "domain": {
+      "name": "N"
+     },
+     "types": {
+      "M": [
+       {
+        "name": "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "type": "string"
+       }
+      ]
+     },
+     "message": {
+      "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff": "x"
+     }
+    },
+    "expected_hash": "0x4c3a5da276494a1614fbc8eda510a53f2297dc97790a98ddee74d3d801b7bdd1"
+   },
+   "record": {
+    "path": "44'/60'/0'/0/0",
+    "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+   },
+   "stream": "core",
+   "device": {
+    "model": "nanoSP",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "approve",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "signature.first",
+     "deadline_ms": 15000,
+     "at_ms": 1728.9,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 13.2,
+     "held": false
+    },
+    {
+     "apdu": "b001000000",
+     "row": "signature.second",
+     "deadline_ms": 15000,
+     "at_ms": 1742.3,
+     "answer": "0108457468657265756d06312e31332e309000",
+     "ms": 4.5,
+     "held": false
+    },
+    {
+     "apdu": "e01a00000c454950373132446f6d61696e",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1746.8,
+     "answer": "9000",
+     "ms": 4.5,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0605046e616d65",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1751.3,
+     "answer": "9000",
+     "ms": 4.4,
+     "held": false
+    },
+    {
+     "apdu": "e01a0000014d",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1755.8,
+     "answer": "9000",
+     "ms": 4.5,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ffff05fd66666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1760.3,
+     "answer": "9000",
+     "ms": 3.5,
+     "held": false
+    },
+    {
+     "apdu": "e01c00000c454950373132446f6d61696e",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1763.8,
+     "answer": "9000",
+     "ms": 4.6,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff0300014e",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1768.4,
+     "answer": "9000",
+     "ms": 4.5,
+     "held": false
+    },
+    {
+     "apdu": "e01c0000014d",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1772.9,
+     "answer": "9000",
+     "ms": 4.5,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff03000178",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1777.4,
+     "answer": "9000",
+     "ms": 4.5,
+     "held": false
+    },
+    {
+     "apdu": "e00c000115058000002c8000003c800000000000000000000000",
+     "row": "sign.typed_data.sign",
+     "deadline_ms": 300000,
+     "at_ms": 1781.9,
+     "answer": "1cee95b415946fc21ac352bdf3f5667b77d36ecc90b5b73d59b63ee1a38ba47b705d3fb93d56b99168c1b78434f06eb42a1f3b4e5eb9aa477c7f80e96ec2c4a2479000",
+     "ms": 13
+    }
+   ],
+   "outcome": {
+    "status": "9000",
+    "as_asked": true
+   },
+   "signer": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+   "dropped": 0
+  },
+  {
+   "id": "name-primary-type-ascii-255",
+   "attempt": 1,
+   "from": "name-primary-type-ascii-255",
+   "family": "name-length",
+   "operation": "sign.typed_data",
+   "request": {
+    "typed_data": {
+     "domain": {
+      "name": "N"
+     },
+     "types": {
+      "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP": [
+       {
+        "name": "v",
+        "type": "uint8"
+       }
+      ]
+     },
+     "message": {
+      "v": 1
+     }
+    },
+    "expected_hash": "0x9686b03f68de0643fb68d353dd927df2285aab5716b3c4b872519f3b5f044c06"
+   },
+   "record": {
+    "path": "44'/60'/0'/0/0",
+    "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+   },
+   "stream": "core",
+   "device": {
+    "model": "nanoSP",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "approve",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "signature.first",
+     "deadline_ms": 15000,
+     "at_ms": 1799.7,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 14.4,
+     "held": false
+    },
+    {
+     "apdu": "b001000000",
+     "row": "signature.second",
+     "deadline_ms": 15000,
+     "at_ms": 1814.4,
+     "answer": "0108457468657265756d06312e31332e309000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01a00000c454950373132446f6d61696e",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1819.1,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0605046e616d65",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1823.8,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01a0000ff505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1828.6,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0442010176",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1833.4,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01c00000c454950373132446f6d61696e",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1838.1,
+     "answer": "9000",
+     "ms": 4.6,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff0300014e",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1842.8,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01c0000ff505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1847.5,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff03000101",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1852.3,
+     "answer": "9000",
+     "ms": 4.6,
+     "held": false
+    },
+    {
+     "apdu": "e00c000115058000002c8000003c800000000000000000000000",
+     "row": "sign.typed_data.sign",
+     "deadline_ms": 300000,
+     "at_ms": 1857,
+     "answer": "1c59dc70a2b50237bacce7716543c88cafcd58bbe16eeda4bd5e7973ddd402e9ae713cd5ac22ca1409c4c94fb050321075b2498e75b214ed8865959a7722c34d049000",
+     "ms": 17.9
+    }
+   ],
+   "outcome": {
+    "status": "9000",
+    "as_asked": true
+   },
+   "signer": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+   "dropped": 0
+  },
+  {
+   "id": "name-field-e-acute-252",
+   "attempt": 1,
+   "from": "name-field-e-acute-252",
+   "family": "name-length",
+   "operation": "sign.typed_data",
+   "request": {
+    "typed_data": {
+     "domain": {
+      "name": "N"
+     },
+     "types": {
+      "M": [
+       {
+        "name": "faaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaé",
+        "type": "string"
+       }
+      ]
+     },
+     "message": {
+      "faaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaé": "x"
+     }
+    },
+    "expected_hash": "0x230c0764fbc5f43fc791eb778d27ef9d48464d6d1515f56e07cf4cab94f03e85"
+   },
+   "record": {
+    "path": "44'/60'/0'/0/0",
+    "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+   },
+   "stream": "reference",
+   "device": {
+    "model": "nanoSP",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "any",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "signature.first",
+     "deadline_ms": 15000,
+     "at_ms": 1881.9,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 14.6,
+     "held": false
+    },
+    {
+     "apdu": "b001000000",
+     "row": "signature.second",
+     "deadline_ms": 15000,
+     "at_ms": 1896.6,
+     "answer": "0108457468657265756d06312e31332e309000",
+     "ms": 4.5,
+     "held": false
+    },
+    {
+     "apdu": "e01a00000c454950373132446f6d61696e",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1901.2,
+     "answer": "9000",
+     "ms": 4.1,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0605046e616d65",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1905.4,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01a0000014d",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1910.1,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01a00fffe05fb66616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161c3a9",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1914.9,
+     "answer": "9000",
+     "ms": 3.6,
+     "held": false
+    },
+    {
+     "apdu": "e01c00000c454950373132446f6d61696e",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1918.6,
+     "answer": "9000",
+     "ms": 4.6,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff0300014e",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1923.2,
+     "answer": "9000",
+     "ms": 4.6,
+     "held": false
+    },
+    {
+     "apdu": "e01c0000014d",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1927.9,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff03000178",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 1932.7,
+     "answer": "9000",
+     "ms": 5.2,
+     "held": false
+    },
+    {
+     "apdu": "e00c000115058000002c8000003c800000000000000000000000",
+     "row": "sign.typed_data.sign",
+     "deadline_ms": 300000,
+     "at_ms": 1937.9,
+     "answer": "1cc43aabb24e47f0d1db3e78096a7a1424eb09b8db302eafd5e974894fcd5ea7f373860d7037ad8c18ebfdbd141eb37520c9710f13b297927af6bb7454ee18aa039000",
+     "ms": 19
+    }
+   ],
+   "outcome": {
+    "status": "9000",
+    "as_asked": true
+   },
+   "signer": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+   "dropped": 0
+  },
+  {
+   "id": "name-field-e-acute-253",
+   "attempt": 1,
+   "from": "name-field-e-acute-253",
+   "family": "name-length",
+   "operation": "sign.typed_data",
+   "request": {
+    "typed_data": {
+     "domain": {
+      "name": "N"
+     },
+     "types": {
+      "M": [
+       {
+        "name": "faaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaé",
+        "type": "string"
+       }
+      ]
+     },
+     "message": {
+      "faaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaé": "x"
+     }
+    },
+    "expected_hash": "0x37d335f10f70b9a0dfc13f671bed32529804d75a808564068fc60fdce5497bfe"
+   },
+   "record": {
+    "path": "44'/60'/0'/0/0",
+    "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+   },
+   "stream": "reference",
+   "device": {
+    "model": "nanoSP",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "any",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "signature.first",
+     "deadline_ms": 15000,
+     "at_ms": 1963.7,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 15.6,
+     "held": false
+    },
+    {
+     "apdu": "b001000000",
+     "row": "signature.second",
+     "deadline_ms": 15000,
+     "at_ms": 1979.4,
+     "answer": "0108457468657265756d06312e31332e309000",
+     "ms": 4.5,
+     "held": false
+    },
+    {
+     "apdu": "e01a00000c454950373132446f6d61696e",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1984,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0605046e616d65",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1988.8,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01a0000014d",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1993.6,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ffff05fc6661616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161c3a9",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 1998.4,
+     "answer": "9000",
+     "ms": 5,
+     "held": false
+    },
+    {
+     "apdu": "e01c00000c454950373132446f6d61696e",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 2003.5,
+     "answer": "9000",
+     "ms": 4.9,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff0300014e",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 2008.4,
+     "answer": "9000",
+     "ms": 4.9,
+     "held": false
+    },
+    {
+     "apdu": "e01c0000014d",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 2013.3,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff03000178",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 2018.1,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e00c000115058000002c8000003c800000000000000000000000",
+     "row": "sign.typed_data.sign",
+     "deadline_ms": 300000,
+     "at_ms": 2022.8,
+     "answer": "1c3db75dfe069fc1069108aa9553deb29e8044cf459a353690d21e69b38ce09b591597229f2ea2296c90d75e4250852918cff6bd3a494d32afef243eb2bded97dd9000",
+     "ms": 14.3
+    }
+   ],
+   "outcome": {
+    "status": "9000",
+    "as_asked": true
+   },
+   "signer": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+   "dropped": 0
+  },
+  {
+   "id": "name-field-emoji-252",
+   "attempt": 1,
+   "from": "name-field-emoji-252",
+   "family": "name-length",
+   "operation": "sign.typed_data",
+   "request": {
+    "typed_data": {
+     "domain": {
+      "name": "N"
+     },
+     "types": {
+      "M": [
+       {
+        "name": "faaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa😀",
+        "type": "string"
+       }
+      ]
+     },
+     "message": {
+      "faaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa😀": "x"
+     }
+    },
+    "expected_hash": "0xd086ea791ce31ea1db0c84bb9394ded6ad80bcb5fc8e42432928cfa5b3c8c452"
+   },
+   "record": {
+    "path": "44'/60'/0'/0/0",
+    "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+   },
+   "stream": "reference",
+   "device": {
+    "model": "nanoSP",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "any",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "signature.first",
+     "deadline_ms": 15000,
+     "at_ms": 2042.7,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 8.4,
+     "held": false
+    },
+    {
+     "apdu": "b001000000",
+     "row": "signature.second",
+     "deadline_ms": 15000,
+     "at_ms": 2051.3,
+     "answer": "0108457468657265756d06312e31332e309000",
+     "ms": 4.4,
+     "held": false
+    },
+    {
+     "apdu": "e01a00000c454950373132446f6d61696e",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 2055.7,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0605046e616d65",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 2060.4,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01a0000014d",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 2065.2,
+     "answer": "9000",
+     "ms": 4.6,
+     "held": false
+    },
+    {
+     "apdu": "e01a00fffe05fa6661616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161f09f9880",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 2069.9,
+     "answer": "9000",
+     "ms": 4.6,
+     "held": false
+    },
+    {
+     "apdu": "e01c00000c454950373132446f6d61696e",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 2074.5,
+     "answer": "9000",
+     "ms": 4.6,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff0300014e",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 2079.1,
+     "answer": "9000",
+     "ms": 4.6,
+     "held": false
+    },
+    {
+     "apdu": "e01c0000014d",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 2083.7,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff03000178",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 2088.4,
+     "answer": "9000",
+     "ms": 4.6,
+     "held": false
+    },
+    {
+     "apdu": "e00c000115058000002c8000003c800000000000000000000000",
+     "row": "sign.typed_data.sign",
+     "deadline_ms": 300000,
+     "at_ms": 2093.1,
+     "answer": "1bed06472933e4111e03a9c365a712d9e511c2c49a001f536662152967e65a0e1e29a5c8d92d22c3c69216291b3e9edcd6f7a3b67f74d828ae03154794412233689000",
+     "ms": 16.6
+    }
+   ],
+   "outcome": {
+    "status": "9000",
+    "as_asked": true
+   },
+   "signer": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+   "dropped": 0
+  },
+  {
+   "id": "name-field-emoji-253",
+   "attempt": 1,
+   "from": "name-field-emoji-253",
+   "family": "name-length",
+   "operation": "sign.typed_data",
+   "request": {
+    "typed_data": {
+     "domain": {
+      "name": "N"
+     },
+     "types": {
+      "M": [
+       {
+        "name": "faaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa😀",
+        "type": "string"
+       }
+      ]
+     },
+     "message": {
+      "faaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa😀": "x"
+     }
+    },
+    "expected_hash": "0x17da58881e8c3e1eaa4642a72a8b7511a031676661c5c1964fcf2ad74c1a3df4"
+   },
+   "record": {
+    "path": "44'/60'/0'/0/0",
+    "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+   },
+   "stream": "reference",
+   "device": {
+    "model": "nanoSP",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "any",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "signature.first",
+     "deadline_ms": 15000,
+     "at_ms": 2115.8,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 13,
+     "held": false
+    },
+    {
+     "apdu": "b001000000",
+     "row": "signature.second",
+     "deadline_ms": 15000,
+     "at_ms": 2128.9,
+     "answer": "0108457468657265756d06312e31332e309000",
+     "ms": 4.5,
+     "held": false
+    },
+    {
+     "apdu": "e01a00000c454950373132446f6d61696e",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 2133.4,
+     "answer": "9000",
+     "ms": 4.6,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ff0605046e616d65",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 2138.1,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01a0000014d",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 2142.8,
+     "answer": "9000",
+     "ms": 4.9,
+     "held": false
+    },
+    {
+     "apdu": "e01a00ffff05fb666161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161f09f9880",
+     "row": "sign.typed_data.definitions",
+     "deadline_ms": 15000,
+     "at_ms": 2147.7,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e01c00000c454950373132446f6d61696e",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 2152.5,
+     "answer": "9000",
+     "ms": 4.6,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff0300014e",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 2157.2,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e01c0000014d",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 2162,
+     "answer": "9000",
+     "ms": 5.1,
+     "held": false
+    },
+    {
+     "apdu": "e01c00ff03000178",
+     "row": "sign.typed_data.values",
+     "deadline_ms": 15000,
+     "at_ms": 2167.1,
+     "answer": "9000",
+     "ms": 4.9,
+     "held": false
+    },
+    {
+     "apdu": "e00c000115058000002c8000003c800000000000000000000000",
+     "row": "sign.typed_data.sign",
+     "deadline_ms": 300000,
+     "at_ms": 2172,
+     "answer": "1bb65ca274731e8de930ccc12612d036556dd677a419ee2170d322475d80f46ab2001927e340762993c61bfd6b87e4cc93c8a0821bcd53c126d8d331f39e73a6ff9000",
+     "ms": 16.9
+    }
+   ],
+   "outcome": {
+    "status": "9000",
+    "as_asked": true
+   },
+   "signer": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+   "dropped": 0
+  },
+  {
+   "id": "add",
+   "attempt": 1,
+   "from": "add-live-0",
+   "family": "add",
+   "operation": "ledger.add",
+   "request": {
+    "scheme": "live",
+    "index": 0,
+    "name": "Ledger 1"
+   },
+   "stream": "core",
+   "device": {
+    "model": "nanoSP",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "approve",
+   "exchanges": [
+    {
+     "apdu": "e002010015058000002c8000003c800000000000000000000000",
+     "row": "ledger.add",
+     "deadline_ms": 300000,
+     "at_ms": 2194.1,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 16.8
+    }
+   ],
+   "outcome": {
+    "status": "9000",
+    "as_asked": true
+   },
+   "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+   "dropped": 0
+  },
+  {
+   "id": "reject",
+   "attempt": 1,
+   "from": "msg-live-125",
+   "family": "message",
+   "operation": "sign.message",
+   "request": {
+    "message": "0x030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b52596067"
+   },
+   "record": {
+    "path": "44'/60'/0'/0/0",
+    "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+   },
+   "stream": "core",
+   "device": {
+    "model": "nanoSP",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "reject",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "signature.first",
+     "deadline_ms": 15000,
+     "at_ms": 2213,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 12.7,
+     "held": false
+    },
+    {
+     "apdu": "b001000000",
+     "row": "signature.second",
+     "deadline_ms": 15000,
+     "at_ms": 2225.8,
+     "answer": "0108457468657265756d06312e31332e309000",
+     "ms": 4.6,
+     "held": false
+    },
+    {
+     "apdu": "e008000096058000002c8000003c8000000000000000000000000000007d030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b52596067",
+     "row": "sign.message",
+     "deadline_ms": 300000,
+     "at_ms": 2230.4,
+     "answer": "6985",
+     "ms": 7.9
+    }
+   ],
+   "outcome": {
+    "status": "6985",
+    "as_asked": true
+   },
+   "signer": null,
+   "dropped": 0
+  },
+  {
+   "id": "contract-call-blind-off",
+   "attempt": 1,
+   "from": "tx-steps",
+   "family": "transaction",
+   "operation": "sign.transaction",
+   "request": {
+    "tx": {
+     "type": 2,
+     "chain_id": "1",
+     "nonce": "0",
+     "gas_limit": "90000",
+     "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+     "value": "1000000000000000",
+     "data": "0x030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930",
+     "max_fee_per_gas": "2000000000",
+     "max_priority_fee_per_gas": "1000000000"
+    }
+   },
+   "record": {
+    "path": "44'/60'/0'/0/0",
+    "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+   },
+   "stream": "core",
+   "device": {
+    "model": "nanoSP",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "refuse",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "signature.first",
+     "deadline_ms": 15000,
+     "at_ms": 2241.4,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 13.2,
+     "held": false
+    },
+    {
+     "apdu": "b001000000",
+     "row": "signature.second",
+     "deadline_ms": 15000,
+     "at_ms": 2254.7,
+     "answer": "0108457468657265756d06312e31332e309000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e0040000ff058000002c8000003c80000000000000000000000002f9015d0180843b9aca00847735940083015f90948ba1f109551bd432803012645ac136ddd64dba7287038d7ea4c68000b9012c030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6",
+     "row": "sign.transaction",
+     "deadline_ms": 15000,
+     "at_ms": 2259.5,
+     "answer": "9000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e004800077fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930c0",
+     "row": "sign.transaction",
+     "deadline_ms": 300000,
+     "at_ms": 2264.3,
+     "answer": "6a80",
+     "ms": 5.1
+    }
+   ],
+   "outcome": {
+    "status": "6a80",
+    "as_asked": true
+   },
+   "signer": null,
+   "dropped": 0
+  },
+  {
+   "id": "contract-call-blind-on",
+   "attempt": 1,
+   "from": "tx-steps",
+   "family": "transaction",
+   "operation": "sign.transaction",
+   "request": {
+    "tx": {
+     "type": 2,
+     "chain_id": "1",
+     "nonce": "0",
+     "gas_limit": "90000",
+     "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+     "value": "1000000000000000",
+     "data": "0x030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930",
+     "max_fee_per_gas": "2000000000",
+     "max_priority_fee_per_gas": "1000000000"
+    }
+   },
+   "record": {
+    "path": "44'/60'/0'/0/0",
+    "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+   },
+   "stream": "core",
+   "device": {
+    "model": "nanoSP",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "approve",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "signature.first",
+     "deadline_ms": 15000,
+     "at_ms": 2273.3,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 14.1,
+     "held": false
+    },
+    {
+     "apdu": "b001000000",
+     "row": "signature.second",
+     "deadline_ms": 15000,
+     "at_ms": 2287.7,
+     "answer": "0108457468657265756d06312e31332e309000",
+     "ms": 4.5,
+     "held": false
+    },
+    {
+     "apdu": "e0040000ff058000002c8000003c80000000000000000000000002f9015d0180843b9aca00847735940083015f90948ba1f109551bd432803012645ac136ddd64dba7287038d7ea4c68000b9012c030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6",
+     "row": "sign.transaction",
+     "deadline_ms": 15000,
+     "at_ms": 2292.2,
+     "answer": "9000",
+     "ms": 4.6,
+     "held": false
+    },
+    {
+     "apdu": "e004800077fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930c0",
+     "row": "sign.transaction",
+     "deadline_ms": 300000,
+     "at_ms": 2296.8,
+     "answer": "019ee91d779410c4c62b83046d05214ae72109adfba7164dac854bbc3d3c7aaeb550b0f1ad3a20f75b5caab3e3ea6f41b46560067569f37e5fcfd698d334d84dec9000",
+     "ms": 14.9
+    }
+   ],
+   "outcome": {
+    "status": "9000",
+    "as_asked": true
+   },
+   "signer": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+   "dropped": 0
+  },
+  {
+   "id": "unplug",
+   "attempt": 1,
+   "from": "msg-live-126",
+   "family": "message",
+   "operation": "sign.message",
+   "request": {
+    "message": "0x030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e"
+   },
+   "record": {
+    "path": "44'/60'/0'/0/0",
+    "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+   },
+   "stream": "core",
+   "device": {
+    "model": "nanoSP",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "unplug",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "signature.first",
+     "deadline_ms": 15000,
+     "at_ms": 2320,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 13.4,
+     "held": false
+    },
+    {
+     "apdu": "b001000000",
+     "row": "signature.second",
+     "deadline_ms": 15000,
+     "at_ms": 2333.5,
+     "answer": "0108457468657265756d06312e31332e309000",
+     "ms": 4.6,
+     "held": false
+    },
+    {
+     "apdu": "e008000096058000002c8000003c8000000000000000000000000000007e030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b52596067",
+     "row": "sign.message",
+     "deadline_ms": 15000,
+     "at_ms": 2338.2,
+     "answer": "9000",
+     "ms": 4.9,
+     "held": false
+    },
+    {
+     "apdu": "e0088000016e",
+     "row": "sign.message",
+     "deadline_ms": 300000,
+     "at_ms": 2343.2,
+     "failed": "disconnected",
+     "ms": 14.1
+    }
+   ],
+   "outcome": {
+    "failed": "disconnected",
+    "as_asked": true
+   },
+   "signer": null,
+   "dropped": 0
+  },
+  {
+   "id": "cancel-old",
+   "attempt": 1,
+   "from": "msg-live-275",
+   "family": "message",
+   "operation": "sign.message",
+   "request": {
+    "message": "0x030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81"
+   },
+   "record": {
+    "path": "44'/60'/0'/0/0",
+    "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+   },
+   "stream": "core",
+   "device": {
+    "model": "nanoSP",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "leave",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "signature.first",
+     "deadline_ms": 15000,
+     "at_ms": 2385.8,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 11.7,
+     "held": false
+    },
+    {
+     "apdu": "b001000000",
+     "row": "signature.second",
+     "deadline_ms": 15000,
+     "at_ms": 2397.7,
+     "answer": "0108457468657265756d06312e31332e309000",
+     "ms": 4.5,
+     "held": false
+    },
+    {
+     "apdu": "e008000096058000002c8000003c80000000000000000000000000000113030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b52596067",
+     "row": "sign.message",
+     "deadline_ms": 15000,
+     "at_ms": 2402.2,
+     "answer": "9000",
+     "ms": 4.7,
+     "held": false
+    },
+    {
+     "apdu": "e0088000966e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81",
+     "row": "sign.message",
+     "deadline_ms": 300000,
+     "at_ms": 2406.9,
+     "cancelled": true,
+     "ms": 30.6
+    }
+   ],
+   "outcome": {
+    "cancelled": true,
+    "as_asked": true
+   },
+   "signer": null,
+   "dropped": 0
+  },
+  {
+   "id": "cancel-new",
+   "attempt": 1,
+   "from": "msg-live-1",
+   "family": "message",
+   "operation": "sign.message",
+   "request": {
+    "message": "0x03"
+   },
+   "record": {
+    "path": "44'/60'/0'/0/0",
+    "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+   },
+   "stream": "core",
+   "device": {
+    "model": "nanoSP",
+    "firmware": "synthetic",
+    "app": {
+     "name": "Ethereum",
+     "version": "1.13.0"
+    }
+   },
+   "hands": "reject-old",
+   "exchanges": [
+    {
+     "apdu": "e002000015058000002c8000003c800000000000000000000000",
+     "row": "signature.first",
+     "deadline_ms": 15000,
+     "at_ms": 2439.9,
+     "answer": "410437b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299a6179912b7451c09896c4098eca7ce6b2e58330672795e847c4d6af44e02423028393835384566464432333242343033334534376439303030334434314543333445636145646139349000",
+     "ms": 36.5,
+     "held": false
+    },
+    {
+     "apdu": "b001000000",
+     "row": "signature.second",
+     "deadline_ms": 15000,
+     "at_ms": 2476.7,
+     "answer": "0108457468657265756d06312e31332e309000",
+     "ms": 4.8,
+     "held": false
+    },
+    {
+     "apdu": "e00800001a058000002c8000003c8000000000000000000000000000000103",
+     "row": "sign.message",
+     "deadline_ms": 300000,
+     "at_ms": 2481.6,
+     "answer": "1b7eef0edcbdc71d789b7efdac46ad69d7e0b705901f9eb583d85b94ddc402049c7a2cc025d2e16d1e38ab327c4e632545e8e7db6622377ea5a9284cc6ae3996209000",
+     "ms": 15.4
+    }
+   ],
+   "outcome": {
+    "status": "9000",
+    "as_asked": true
+   },
+   "signer": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+   "dropped": 1,
+   "after": {
+    "id": "cancel-old",
+    "attempt": 1
+   }
+  }
+ ],
+ "timing": {
+  "apdus": 156,
+  "median_ms": 4.8,
+  "p90_ms": 11.7,
+  "max_ms": 36.5,
+  "by_ins": {
+   "e002": {
+    "apdus": 19,
+    "median_ms": 13.2,
+    "p90_ms": 15.6,
+    "max_ms": 36.5
+   },
+   "b001": {
+    "apdus": 18,
+    "median_ms": 4.6,
+    "p90_ms": 4.9,
+    "max_ms": 5.2
+   },
+   "e008": {
+    "apdus": 3,
+    "median_ms": 4.9,
+    "p90_ms": 5.3,
+    "max_ms": 5.3
+   },
+   "e01a": {
+    "apdus": 62,
+    "median_ms": 4.7,
+    "p90_ms": 4.9,
+    "max_ms": 5.3
+   },
+   "e01c": {
+    "apdus": 52,
+    "median_ms": 4.8,
+    "p90_ms": 5,
+    "max_ms": 5.8
+   },
+   "e004": {
+    "apdus": 2,
+    "median_ms": 4.8,
+    "p90_ms": 4.8,
+    "max_ms": 4.8
+   }
+  },
+  "bound": 2048,
+  "bound_s": {
+   "median": 10,
+   "p90": 24
+  }
+ },
+ "held": {
+  "threshold_ms": 80,
+  "apdus": 111,
+  "held": 9,
+  "by_ins": {
+   "e002": {
+    "apdus": 9,
+    "held": 0,
+    "slowest_ms": 15.4
+   },
+   "b001": {
+    "apdus": 9,
+    "held": 0,
+    "slowest_ms": 5.2
+   },
+   "e008": {
+    "apdus": 1,
+    "held": 0,
+    "slowest_ms": 5.3
+   },
+   "e01a": {
+    "apdus": 46,
+    "held": 0,
+    "slowest_ms": 5.3
+   },
+   "e01c": {
+    "apdus": 45,
+    "held": 9,
+    "slowest_ms": 124.5
+   },
+   "e004": {
+    "apdus": 1,
+    "held": 0,
+    "slowest_ms": 4.6
+   }
+  },
+  "steps": [
+   "typed-mail"
+  ]
+ }
+}
