@@ -937,7 +937,7 @@ Once decided:
 
 **2026-11-25, SWM-3's stores:** the coordinator's technical calls, proposed, which the user may veto. Building the stores' codecs (SWM-3 part 2) against SWM-1's vectors found:
 - **The manifest check is two steps:** the legacy and backoff checks, then main's fetch of a `bzz:` manifest, then the decision, so the backoff still saves fetches.
-- **A file that doesn't parse** is copied aside, and its empty replacement written at the next change, as the reference does.
+- **A feed file that doesn't parse** is copied aside, and its empty replacement written at the next change, as the reference does. A manifest store whose primary doesn't parse is read from its `.bak` instead.
 - **Reads have the stores' bounds too:** a feed store past 16 MiB is kept aside; a manifest store past 1 MiB falls back to its `.bak`.
 - **`history-bound` trims** after each insert and at open, finished rows first, and never takes the row just inserted.
 - **New deviations:**
