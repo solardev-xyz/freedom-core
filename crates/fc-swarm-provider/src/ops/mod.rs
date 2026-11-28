@@ -465,6 +465,9 @@ fn main_op(method: &str, op: &str) -> Option<&'static str> {
     ops.iter().copied().find(|name| *name == op)
 }
 
+/// `params`' properties, as JSON gives them.
+type Props = [(JsString, JsValue)];
+
 /// An op's members, each read from the typed form.
 #[derive(Debug)]
 pub(crate) struct Members {
@@ -474,7 +477,7 @@ pub(crate) struct Members {
 impl Members {
     /// `params`' `op`, which must be an object's string member, and its
     /// properties, none of the others decoded yet.
-    fn op(params: &JsValue) -> Result<(String, &[(JsString, JsValue)]), Refused> {
+    fn op(params: &JsValue) -> Result<(String, &Props), Refused> {
         let JsValue::Object(props) = params else {
             return Err(invalid("params must be an object"));
         };
@@ -492,7 +495,7 @@ impl Members {
     }
 
     /// Every property but `op`, each read from the typed form.
-    fn read(props: &[(JsString, JsValue)]) -> Result<Members, Refused> {
+    fn read(props: &Props) -> Result<Members, Refused> {
         let mut members = Vec::with_capacity(props.len());
         for (name, value) in props {
             if name != "op" {
