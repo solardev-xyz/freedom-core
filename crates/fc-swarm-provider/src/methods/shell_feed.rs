@@ -6,7 +6,18 @@
 //! In the reference's order:
 //! - **the signer** (swarm-signer.js's `resolveSwarmSigner({ mode:
 //!   'bee-wallet' })`, which main's caller resolves first): the vault's
-//!   owner of the Bee wallet key; a locked vault is `Vault is locked`;
+//!   owner of the Bee wallet key; a locked vault is `Vault is locked`. Main
+//!   names the owner it showed (`owner`, core PR K2), as the reference's
+//!   caller holds its signer's frozen `owner`: when the vault's isn't that
+//!   one (a vault replaced or imported since main read it), the operation
+//!   ends here, before any node call, with
+//!   [`OWNER_CHANGED_MESSAGE`](crate::machine::shell::OWNER_CHANGED_MESSAGE)
+//!   (code `owner_changed`; deviation `feed-owner`). The owner stays fixed
+//!   for the rest of the operation: the manifest, the lookup and the read
+//!   are under it, and the update's signature is checked against it before
+//!   its upload (`writes::signature`, as `createSwarmSigner` checks each one
+//!   against its `expectedOwner`), so a vault that signs under another key
+//!   meanwhile uploads nothing;
 //! - **the batch:** the given one, else one `/stamps` read and
 //!   `selectBestBatch(4096)` (`null` is `noUsableBatchError`);
 //! - **create:** `POST /feeds/<o>/<t>` (`createFeedManifest`), answered `{
@@ -92,7 +103,7 @@ impl ShellFeed {
             op: call.op,
             topic: call.topic,
             batch: call.batch,
-            owner: [0; 20],
+            owner: call.owner,
             stage: Stage::Owner(cx.owner(SignKey::BeeWallet)),
         }
     }
@@ -105,8 +116,12 @@ impl ShellFeed {
     ) -> ShellStep {
         match std::mem::replace(&mut self.stage, Stage::Gone) {
             Stage::Owner(asked) if asked == id => match owner(SignKey::BeeWallet, event) {
-                Ok(owner) => {
-                    self.owner = owner;
+                // Not the owner main showed: nothing asked of the node,
+                // nothing signed (K2).
+                Ok(owner) if owner != self.owner => {
+                    ShellStep::Done(ShellOutcome::Error(ShellError::owner_changed()))
+                }
+                Ok(_) => {
                     if self.op == FeedOp::Read {
                         let (next, call) = NextIndex::head(self.owner, self.topic);
                         self.stage = Stage::Read {

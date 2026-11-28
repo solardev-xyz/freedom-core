@@ -466,7 +466,7 @@
     "gsoc": "bee-js's gsocMine (write-side.json's shape): the signer's index, key, owner and SOC address, or its error.",
     "errors": "http_error: a node error at each call site (bee-js's JSON and array-buffer calls, #1057's fetchNode, the SOC upload, page-upload.js): the error's class, message and data, and isChunkNotFoundError (fetchNode at 500, which readFeedPayload reads as an empty feed, and at 503, which reaches its own text); past 8 KiB, `core` is the same reader over the first 8,192 bytes (error-body-bound). mapping: the method cases that show nodeWriteError's and mapChunkReadError's mappings.",
     "stores": "feeds: feed-store.js's operations from a file's text, each result or error, and the files after (backups included); manifests: permission-manifests.js's check, decide, useIndividual, disconnect and get over scripted manifests, the grants and files after; history: publish-history.js's operations (after a first session's, `seeded`, with a BLOB cell written into one of its rows where `blob` says), the schema, pragmas and rows (a BLOB cell as { blob: hex }). Local time is UTC (generate.js sets TZ). A case marked deviation records the reference's outcome, and `core` the core's: index-allocation's as text, history-bound's row count, and for the others what the case records, each answer in the form the case's own take: feeds `ops` (each operation's answer) and `files`; manifests `steps`, `grants_after` and `files`, or `load: unreadable` (the core reads neither the file nor a .bak copy: no step reads the store, and nothing is written); history `ops` and `rows`, with `refused` { reason: blob, column } for a read the core refuses (history-blobs). Where the core's answers are the reference's own over another input, that input is: for store-refusal, the operations but the refused one, whose answer is the reference's refusal; for store-shapes, the feed store as the core holds it (`core_before`, each feed map rebuilt as sanitizeV2OriginEntry does) or a manifest file that doesn't parse, beside the same .bak copy; for legacy-dates, the legacy file with each timestamp the core doesn't take removed.",
-    "shell": "main's own methods (design 0015, Methods main calls; SWM-4's D5, D7 and D12), each case recorded from the reference's own code over the fake node and the stores: { id, method, row (a node method's grammar row in swarm-grammar.json), deviation, world, concurrent, steps, core, after }. world: node (as `node` above), clock, vault, and for a store op feeds and manifests (the files' text or null), grants, accounts (accounts.list's wallets), history (publish-history.sqlite's rows, each cell as stored, a BLOB as { blob: hex }). A step: caller (shell or chrome); params in the wire form, a node method's as main's JSON (swarm.publish { kind, parts: [{ path?, bytes, base64 | part }], name?, content_type?, index_document?, encrypt?, batch?, pin, deferred, history? }, swarm.feed { op, key, topic, reference?, min_index?, batch? }, swarm.stamps { id? }, swarm.upload_status { tag_uid }), a store op's as `op` (a string) and each member typed (`typed` above); parts, part k's bytes main streams for a { part: k }; part_abort { part, error_code }, main ending a part its read failed on (the errno's name); clock and vault, the world's change before the step; reference { call, args (typed; a path or signer the run makes is named in <…>), result | result_typed | error }, the reference's own call and its outcome (a batch as `stamps.mapped` writes it); handler { channel, answer | answer_typed }, the IPC handler main keeps around the core's answer (freedom://publish's history wrap, `{ success }`); answer, the core's, always typed (D5): { result_typed } or { error_typed }: a node method's error is the error its service throws as main's callers read it { message, code?, status?, capacity? }, a store op's { name, message, code? }; swarm.publish answers normalizeUploadResult's { reference, tag_uid, batch, bytes }, swarm.stamps mapPostageBatch's fields then the raw batch's exists and propagating (booleans) and batchTTL (a finite number); requests, every node request (as in `methods`, with its row's verdict) and reply { status, status_text, headers, body { bytes, base64 } up to 8 KiB else { bytes, sha256 } }; fetch { url, answer }, D6's shell.swarm_manifest for a check and main's answer ({ status, body_base64 } with at most 8 KiB + 1 bytes, or { failed: true }); files { feeds, manifests } as the step answered. A manifest check's token is crypto.randomBytes(24) in base64url, the nth SHA-256(`swarm vectors token <n>`)'s first 24 bytes. concurrent: the steps run at once, as it says. after: the files, the grants and, for swarm.publish and swarm.history, the history (getEntries(), or the rows). A case marked deviation records the reference's outcome; `core` holds the core's: answers (each step's answer, in order), files (each step's files as it answers), history (the rows as the core leaves them, beside answers, for picked-read-text, whose core makes its upload call and main ends its body with the part's abort), or for index-probe the methods' text (the lookup's request is marked, and the core asks feed_head with the reply's swarm-feed-index headers)."
+    "shell": "main's own methods (design 0015, Methods main calls; SWM-4's D5, D7 and D12), each case recorded from the reference's own code over the fake node and the stores: { id, method, row (a node method's grammar row in swarm-grammar.json), deviation, world, concurrent, steps, core, after }. world: node (as `node` above), clock, vault, and for a store op feeds and manifests (the files' text or null), grants, accounts (accounts.list's wallets), history (publish-history.sqlite's rows, each cell as stored, a BLOB as { blob: hex }). A step: caller (shell or chrome); params in the wire form, a node method's as main's JSON (swarm.publish { kind, parts: [{ path?, bytes, base64 | part }], name?, content_type?, index_document?, encrypt?, batch?, pin, deferred, history? }, swarm.feed { op, key, owner (40 lowercase hex, the Bee wallet's owner main showed: core PR K2), topic, reference?, min_index?, batch? }, swarm.stamps { id? }, swarm.upload_status { tag_uid }), a store op's as `op` (a string) and each member typed (`typed` above); parts, part k's bytes main streams for a { part: k }; part_abort { part, error_code }, main ending a part its read failed on (the errno's name); clock and vault, the world's change before the step; reference { call, args (typed; a path or signer the run makes is named in <…>), result | result_typed | error }, the reference's own call and its outcome (a batch as `stamps.mapped` writes it); handler { channel, answer | answer_typed }, the IPC handler main keeps around the core's answer (freedom://publish's history wrap, `{ success }`); answer, the core's, always typed (D5): { result_typed } or { error_typed }: a node method's error is the error its service throws as main's callers read it { message, code?, status?, capacity? }, a store op's { name, message, code? }; swarm.publish answers normalizeUploadResult's { reference, tag_uid, batch, bytes }, swarm.stamps mapPostageBatch's fields then the raw batch's exists and propagating (booleans) and batchTTL (a finite number); requests, every node request (as in `methods`, with its row's verdict) and reply { status, status_text, headers, body { bytes, base64 } up to 8 KiB else { bytes, sha256 } }; fetch { url, answer }, D6's shell.swarm_manifest for a check and main's answer ({ status, body_base64 } with at most 8 KiB + 1 bytes, or { failed: true }); files { feeds, manifests } as the step answered. A manifest check's token is crypto.randomBytes(24) in base64url, the nth SHA-256(`swarm vectors token <n>`)'s first 24 bytes. concurrent: the steps run at once, as it says. after: the files, the grants and, for swarm.publish and swarm.history, the history (getEntries(), or the rows). A case marked deviation records the reference's outcome; `core` holds the core's: answers (each step's answer, in order), files (each step's files as it answers), history (the rows as the core leaves them, beside answers, for picked-read-text, whose core makes its upload call and main ends its body with the part's abort), or for index-probe the methods' text (the lookup's request is marked, and the core asks feed_head with the reply's swarm-feed-index headers). feed-owner's cases name another vault's Bee wallet (keys.json's abandon-24) as the owner main showed, the vault's being abandon-12's: the reference runs with its caller's signer frozen at that owner (createSwarmSigner), and the core answers its refusal with no node request."
   },
   "deviations": {
     "feed-entry-bound": {
@@ -752,6 +752,13 @@
     },
     "store-writes": {
       "note": "no case: the files' bytes are the same; the durable write (0001, 0013) is the core's"
+    },
+    "feed-owner": {
+      "cases": [
+        "shell/feed-create-owner-changed",
+        "shell/feed-update-owner-changed",
+        "shell/feed-read-owner-changed"
+      ]
     }
   },
   "methods": [
@@ -125764,6 +125771,7 @@
             "key": {
               "kind": "bee_wallet"
             },
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
             "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
             "batch": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
           },
@@ -125897,6 +125905,7 @@
             "key": {
               "kind": "bee_wallet"
             },
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
             "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
           },
           "reference": {
@@ -126043,6 +126052,7 @@
             "key": {
               "kind": "bee_wallet"
             },
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
             "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
           },
           "reference": {
@@ -126170,6 +126180,7 @@
             "key": {
               "kind": "bee_wallet"
             },
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
             "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
           },
           "reference": {
@@ -126343,6 +126354,7 @@
             "key": {
               "kind": "bee_wallet"
             },
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
             "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
             "reference": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
           },
@@ -126581,6 +126593,7 @@
             "key": {
               "kind": "bee_wallet"
             },
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
             "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
             "reference": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
           },
@@ -126788,6 +126801,7 @@
             "key": {
               "kind": "bee_wallet"
             },
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
             "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
             "reference": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
             "min_index": 9
@@ -127006,6 +127020,7 @@
             "key": {
               "kind": "bee_wallet"
             },
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
             "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
             "reference": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
             "min_index": 2
@@ -127233,6 +127248,7 @@
             "key": {
               "kind": "bee_wallet"
             },
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
             "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
             "reference": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
           },
@@ -127681,6 +127697,7 @@
             "key": {
               "kind": "bee_wallet"
             },
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
             "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
             "reference": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
             "batch": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
@@ -127858,6 +127875,7 @@
             "key": {
               "kind": "bee_wallet"
             },
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
             "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
             "reference": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
           },
@@ -128080,6 +128098,7 @@
             "key": {
               "kind": "bee_wallet"
             },
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
             "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
             "reference": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
           },
@@ -128271,6 +128290,7 @@
             "key": {
               "kind": "bee_wallet"
             },
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
             "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
           },
           "reference": {
@@ -128391,6 +128411,7 @@
             "key": {
               "kind": "bee_wallet"
             },
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
             "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
           },
           "reference": {
@@ -128538,6 +128559,7 @@
             "key": {
               "kind": "bee_wallet"
             },
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
             "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
           },
           "reference": {
@@ -128892,6 +128914,7 @@
             "key": {
               "kind": "bee_wallet"
             },
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
             "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
           },
           "reference": {
@@ -128971,6 +128994,529 @@
         }
       ],
       "core": "feed_head with swarm-only-root-chunk instead of the whole latest payload; the same index",
+      "after": {
+        "history": []
+      }
+    },
+    {
+      "id": "feed-create-owner-changed",
+      "method": "swarm.feed",
+      "row": "swarm.feed:create",
+      "deviation": "feed-owner",
+      "world": {
+        "node": {
+          "stamps": {
+            "stamps": [
+              {
+                "batchID": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+                "utilization": 0,
+                "usable": true,
+                "label": "freedom",
+                "depth": 22,
+                "amount": "100000000000",
+                "bucketDepth": 16,
+                "blockNumber": 1000,
+                "immutableFlag": true,
+                "exists": true,
+                "batchTTL": 864000
+              }
+            ]
+          }
+        },
+        "clock": 1767225600123,
+        "vault": "unlocked"
+      },
+      "steps": [
+        {
+          "caller": "shell",
+          "params": {
+            "op": "create",
+            "key": {
+              "kind": "bee_wallet"
+            },
+            "owner": "f785bd075874b8423d3583728a981399f31e95aa",
+            "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
+          },
+          "reference": {
+            "call": "createFeed",
+            "args": {
+              "array": [
+                {
+                  "string": "<the shown owner's signer>"
+                },
+                {
+                  "string": "freedom-agent/publications"
+                }
+              ]
+            },
+            "result": {
+              "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
+              "owner": "0xf785bD075874b8423D3583728a981399f31e95aA",
+              "manifestReference": "b8b76f0203fd9e7224e971ebc620d7ee994948ed32a60e24a0f232d8395285b0",
+              "bzzUrl": "bzz://b8b76f0203fd9e7224e971ebc620d7ee994948ed32a60e24a0f232d8395285b0"
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "topic",
+                  {
+                    "string": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
+                  }
+                ],
+                [
+                  "owner",
+                  {
+                    "string": "0xf785bD075874b8423D3583728a981399f31e95aA"
+                  }
+                ],
+                [
+                  "manifestReference",
+                  {
+                    "string": "b8b76f0203fd9e7224e971ebc620d7ee994948ed32a60e24a0f232d8395285b0"
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "string": "bzz://b8b76f0203fd9e7224e971ebc620d7ee994948ed32a60e24a0f232d8395285b0"
+                  }
+                ]
+              ]
+            }
+          },
+          "requests": [
+            {
+              "via": "fetch",
+              "method": "GET",
+              "path": "/stamps",
+              "headers": [
+                [
+                  "accept",
+                  "application/json, text/plain, */*"
+                ]
+              ],
+              "status": 200,
+              "form": "stamps",
+              "reply": {
+                "status": 200,
+                "status_text": "OK",
+                "headers": [
+                  [
+                    "content-type",
+                    "application/json; charset=utf-8"
+                  ],
+                  [
+                    "content-length",
+                    "263"
+                  ]
+                ],
+                "body": {
+                  "bytes": 263,
+                  "base64": "eyJzdGFtcHMiOlt7ImJhdGNoSUQiOiJhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExIiwidXRpbGl6YXRpb24iOjAsInVzYWJsZSI6dHJ1ZSwibGFiZWwiOiJmcmVlZG9tIiwiZGVwdGgiOjIyLCJhbW91bnQiOiIxMDAwMDAwMDAwMDAiLCJidWNrZXREZXB0aCI6MTYsImJsb2NrTnVtYmVyIjoxMDAwLCJpbW11dGFibGVGbGFnIjp0cnVlLCJleGlzdHMiOnRydWUsImJhdGNoVFRMIjo4NjQwMDB9XX0="
+                }
+              }
+            },
+            {
+              "via": "fetch",
+              "method": "POST",
+              "path": "/feeds/f785bd075874b8423d3583728a981399f31e95aa/535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
+              "headers": [
+                [
+                  "accept",
+                  "application/json, text/plain, */*"
+                ],
+                [
+                  "swarm-postage-batch-id",
+                  "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+                ]
+              ],
+              "status": 201,
+              "form": "feed_manifest",
+              "reply": {
+                "status": 201,
+                "status_text": "Created",
+                "headers": [
+                  [
+                    "content-type",
+                    "application/json; charset=utf-8"
+                  ],
+                  [
+                    "content-length",
+                    "80"
+                  ]
+                ],
+                "body": {
+                  "bytes": 80,
+                  "base64": "eyJyZWZlcmVuY2UiOiJiOGI3NmYwMjAzZmQ5ZTcyMjRlOTcxZWJjNjIwZDdlZTk5NDk0OGVkMzJhNjBlMjRhMGYyMzJkODM5NTI4NWIwIn0="
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "core": {
+        "answers": [
+          {
+            "error_typed": {
+              "object": [
+                [
+                  "message",
+                  {
+                    "string": "The Bee wallet this feed request names is no longer the vault's"
+                  }
+                ],
+                [
+                  "code",
+                  {
+                    "string": "owner_changed"
+                  }
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      "after": {
+        "history": []
+      }
+    },
+    {
+      "id": "feed-update-owner-changed",
+      "method": "swarm.feed",
+      "row": "swarm.feed:update",
+      "deviation": "feed-owner",
+      "world": {
+        "node": {
+          "stamps": {
+            "stamps": [
+              {
+                "batchID": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+                "utilization": 0,
+                "usable": true,
+                "label": "freedom",
+                "depth": 22,
+                "amount": "100000000000",
+                "bucketDepth": 16,
+                "blockNumber": 1000,
+                "immutableFlag": true,
+                "exists": true,
+                "batchTTL": 864000
+              }
+            ]
+          }
+        },
+        "clock": 1767225600123,
+        "vault": "unlocked"
+      },
+      "steps": [
+        {
+          "caller": "shell",
+          "params": {
+            "op": "update",
+            "key": {
+              "kind": "bee_wallet"
+            },
+            "owner": "f785bd075874b8423d3583728a981399f31e95aa",
+            "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
+            "reference": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+          },
+          "reference": {
+            "call": "updateFeed",
+            "args": {
+              "array": [
+                {
+                  "string": "<the shown owner's signer>"
+                },
+                {
+                  "string": "freedom-agent/publications"
+                },
+                {
+                  "string": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+                },
+                {
+                  "undefined": true
+                }
+              ]
+            },
+            "error": {
+              "name": "Error",
+              "message": "The identity core returned a chunk signature that does not match"
+            }
+          },
+          "answer": {
+            "error_typed": {
+              "object": [
+                [
+                  "message",
+                  {
+                    "string": "The identity core returned a chunk signature that does not match"
+                  }
+                ]
+              ]
+            }
+          },
+          "requests": [
+            {
+              "via": "fetch",
+              "method": "GET",
+              "path": "/stamps",
+              "headers": [
+                [
+                  "accept",
+                  "application/json, text/plain, */*"
+                ]
+              ],
+              "status": 200,
+              "form": "stamps",
+              "reply": {
+                "status": 200,
+                "status_text": "OK",
+                "headers": [
+                  [
+                    "content-type",
+                    "application/json; charset=utf-8"
+                  ],
+                  [
+                    "content-length",
+                    "263"
+                  ]
+                ],
+                "body": {
+                  "bytes": 263,
+                  "base64": "eyJzdGFtcHMiOlt7ImJhdGNoSUQiOiJhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExIiwidXRpbGl6YXRpb24iOjAsInVzYWJsZSI6dHJ1ZSwibGFiZWwiOiJmcmVlZG9tIiwiZGVwdGgiOjIyLCJhbW91bnQiOiIxMDAwMDAwMDAwMDAiLCJidWNrZXREZXB0aCI6MTYsImJsb2NrTnVtYmVyIjoxMDAwLCJpbW11dGFibGVGbGFnIjp0cnVlLCJleGlzdHMiOnRydWUsImJhdGNoVFRMIjo4NjQwMDB9XX0="
+                }
+              }
+            },
+            {
+              "via": "fetch",
+              "method": "GET",
+              "path": "/feeds/f785bd075874b8423d3583728a981399f31e95aa/535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
+              "headers": [
+                [
+                  "accept",
+                  "application/json, text/plain, */*"
+                ]
+              ],
+              "status": 404,
+              "deviation": "index-probe",
+              "reply": {
+                "status": 404,
+                "status_text": "Not Found",
+                "headers": [
+                  [
+                    "content-type",
+                    "application/json; charset=utf-8"
+                  ],
+                  [
+                    "content-length",
+                    "34"
+                  ]
+                ],
+                "body": {
+                  "bytes": 34,
+                  "base64": "eyJjb2RlIjo0MDQsIm1lc3NhZ2UiOiJOb3QgRm91bmQifQ=="
+                }
+              }
+            },
+            {
+              "via": "fetch",
+              "method": "GET",
+              "path": "/chunks/58ea5922d5395899468414d04a0e20ea827c57b42ba3fc8d0808c20f36e8dcf6",
+              "headers": [
+                [
+                  "accept",
+                  "application/json, text/plain, */*"
+                ]
+              ],
+              "status": 404,
+              "form": "chunk",
+              "reply": {
+                "status": 404,
+                "status_text": "Not Found",
+                "headers": [
+                  [
+                    "content-type",
+                    "application/json; charset=utf-8"
+                  ],
+                  [
+                    "content-length",
+                    "34"
+                  ]
+                ],
+                "body": {
+                  "bytes": 34,
+                  "base64": "eyJjb2RlIjo0MDQsIm1lc3NhZ2UiOiJOb3QgRm91bmQifQ=="
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "core": {
+        "answers": [
+          {
+            "error_typed": {
+              "object": [
+                [
+                  "message",
+                  {
+                    "string": "The Bee wallet this feed request names is no longer the vault's"
+                  }
+                ],
+                [
+                  "code",
+                  {
+                    "string": "owner_changed"
+                  }
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      "after": {
+        "history": []
+      }
+    },
+    {
+      "id": "feed-read-owner-changed",
+      "method": "swarm.feed",
+      "row": "swarm.feed:read",
+      "deviation": "feed-owner",
+      "world": {
+        "node": {},
+        "clock": 1767225600123,
+        "vault": "unlocked"
+      },
+      "steps": [
+        {
+          "caller": "shell",
+          "params": {
+            "op": "read",
+            "key": {
+              "kind": "bee_wallet"
+            },
+            "owner": "f785bd075874b8423d3583728a981399f31e95aa",
+            "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
+          },
+          "reference": {
+            "call": "readFeedState",
+            "args": {
+              "array": [
+                {
+                  "string": "<the shown owner>"
+                },
+                {
+                  "string": "freedom-agent/publications"
+                }
+              ]
+            },
+            "result": {
+              "exists": false
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "exists",
+                  {
+                    "boolean": false
+                  }
+                ]
+              ]
+            }
+          },
+          "requests": [
+            {
+              "via": "fetch",
+              "method": "GET",
+              "path": "/feeds/f785bd075874b8423d3583728a981399f31e95aa/535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
+              "headers": [
+                [
+                  "accept",
+                  "application/json, text/plain, */*"
+                ]
+              ],
+              "status": 404,
+              "deviation": "index-probe",
+              "reply": {
+                "status": 404,
+                "status_text": "Not Found",
+                "headers": [
+                  [
+                    "content-type",
+                    "application/json; charset=utf-8"
+                  ],
+                  [
+                    "content-length",
+                    "34"
+                  ]
+                ],
+                "body": {
+                  "bytes": 34,
+                  "base64": "eyJjb2RlIjo0MDQsIm1lc3NhZ2UiOiJOb3QgRm91bmQifQ=="
+                }
+              }
+            },
+            {
+              "via": "fetch",
+              "method": "GET",
+              "path": "/chunks/58ea5922d5395899468414d04a0e20ea827c57b42ba3fc8d0808c20f36e8dcf6",
+              "headers": [
+                [
+                  "accept",
+                  "application/json, text/plain, */*"
+                ]
+              ],
+              "status": 404,
+              "form": "chunk",
+              "reply": {
+                "status": 404,
+                "status_text": "Not Found",
+                "headers": [
+                  [
+                    "content-type",
+                    "application/json; charset=utf-8"
+                  ],
+                  [
+                    "content-length",
+                    "34"
+                  ]
+                ],
+                "body": {
+                  "bytes": 34,
+                  "base64": "eyJjb2RlIjo0MDQsIm1lc3NhZ2UiOiJOb3QgRm91bmQifQ=="
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "core": {
+        "answers": [
+          {
+            "error_typed": {
+              "object": [
+                [
+                  "message",
+                  {
+                    "string": "The Bee wallet this feed request names is no longer the vault's"
+                  }
+                ],
+                [
+                  "code",
+                  {
+                    "string": "owner_changed"
+                  }
+                ]
+              ]
+            }
+          }
+        ]
+      },
       "after": {
         "history": []
       }

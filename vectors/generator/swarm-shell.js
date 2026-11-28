@@ -47,6 +47,11 @@ const AGENT_TOPIC = 'freedom-agent/publications';
 const BODY_INLINE = 8192;
 // D6: main hands the core at most 8 KiB + 1 bytes of a manifest's body.
 const MANIFEST_BODY_MOST = 8 * 1024 + 1;
+// swarm.feed's refusal when the vault's Bee wallet isn't the owner main
+// named (design 0015's deviation feed-owner, core PR K2): the core's own
+// stated code and text.
+const OWNER_CHANGED = 'owner_changed';
+const OWNER_CHANGED_MESSAGE = 'The Bee wallet this feed request names is no longer the vault\'s';
 // The text bee-js's error carries when storer peers don't know a batch yet
 // (ant-storage-api.js's isBatchNotYetKnownError).
 const NOT_YET_KNOWN = 'pushsync: chunk rejected by 3 peer(s) as not found on-chain';
@@ -479,13 +484,16 @@ function feedCases(env) {
   const topic = env.beeJs.Topic.fromString(AGENT_TOPIC).toHex();
   const signer = (ref) => ref.load('./swarm-signer.js').resolveSwarmSigner({ mode: 'bee-wallet' });
   const key = { kind: 'bee_wallet' };
+  // The owner main showed (core PR K2), in `<o>`'s form: the Bee wallet's,
+  // as the signer main's caller resolved names it.
+  const owner = env.keyOf('bee').address.slice(2).toLowerCase();
   const latest = (reply) => [{ key: 'bee', topic: AGENT_TOPIC, reply }];
   const at = (index, next = index + 1) => ({ status: 200,
     headers: { 'swarm-feed-index': index.toString(16).padStart(16, '0'), 'swarm-feed-index-next': next.toString(16).padStart(16, '0') }, body_utf8: 'x' });
   const missing = { status: 404, json: { code: 404, message: 'Not Found' } };
   const create = (id, batch, nodeSpec) => ({
     id: `feed-${id}`, method: 'swarm.feed', row: 'swarm.feed:create', node: nodeSpec,
-    params: { op: 'create', key, topic, ...(batch ? { batch } : {}) },
+    params: { op: 'create', key, owner, topic, ...(batch ? { batch } : {}) },
     run: async (ref) => {
       const s = await signer(ref);
       const args = batch ? ['<the Bee wallet signer>', AGENT_TOPIC, batch] : ['<the Bee wallet signer>', AGENT_TOPIC];
@@ -502,7 +510,7 @@ function feedCases(env) {
   const indexProbe = { id: 'index-probe', core: 'feed_head with swarm-only-root-chunk instead of the whole latest payload; the same index' };
   const update = (id, { reference = C.REF, minIndex, batch, nodeSpec }) => ({
     id: `feed-${id}`, method: 'swarm.feed', row: 'swarm.feed:update', node: nodeSpec, deviation: indexProbe,
-    params: { op: 'update', key, topic, reference, ...(minIndex !== undefined ? { min_index: minIndex } : {}), ...(batch ? { batch } : {}) },
+    params: { op: 'update', key, owner, topic, reference, ...(minIndex !== undefined ? { min_index: minIndex } : {}), ...(batch ? { batch } : {}) },
     run: async (ref) => {
       const s = await signer(ref);
       const options = minIndex !== undefined ? { minIndex } : undefined;
@@ -525,16 +533,47 @@ function feedCases(env) {
   // lookup is index-probe's, as the update's is.
   const read = (id, nodeSpec) => ({
     id: `feed-${id}`, method: 'swarm.feed', row: 'swarm.feed:read', node: nodeSpec, deviation: indexProbe,
-    params: { op: 'read', key, topic },
+    params: { op: 'read', key, owner, topic },
     run: async (ref) => {
-      const owner = env.keyOf('bee').address;
-      return service('readFeedState', ['<the Bee wallet address>', AGENT_TOPIC], () => ref.feedService.readFeedState(owner, AGENT_TOPIC), (v) => v);
+      const address = env.keyOf('bee').address;
+      return service('readFeedState', ['<the Bee wallet address>', AGENT_TOPIC], () => ref.feedService.readFeedState(address, AGENT_TOPIC), (v) => v);
     },
   });
   out.push(read('read-latest', { latest: latest(at(2)) }));
   out.push(read('read-empty', { latest: latest(missing), probes: probes(undefined) }));
   out.push(read('read-probe', { latest: latest(missing), probes: probes(4, [5]) }));
   out.push(read('read-node-500', { latest: latest({ status: 500, json: { code: 500, message: 'feed lookup failed' } }) }));
+  // feed-owner (core PR K2): main names the owner it showed, another vault's
+  // Bee wallet (keys.json's abandon-24: the vault was replaced or imported
+  // since main read it), while the vault's is abandon-12's. The reference's
+  // caller holds the signer resolveSwarmSigner gave it then, frozen at that
+  // owner (createSwarmSigner): createFeed posts that owner's manifest,
+  // updateFeed looks that owner's index up and refuses the vault's signature
+  // under the other key before its upload, and readFeedState reads that
+  // owner's feed. The core refuses each before any node call, with its own
+  // stated text and code.
+  const shown = env.otherBee.address;
+  const shownOwner = shown.slice(2).toLowerCase();
+  const feedOwner = { id: 'feed-owner', core: { answers: [typedError({ message: OWNER_CHANGED_MESSAGE, code: OWNER_CHANGED })] } };
+  const frozen = (ref) => ref.load('./swarm-signer.js').createSwarmSigner(key, shown);
+  out.push({
+    id: 'feed-create-owner-changed', method: 'swarm.feed', row: 'swarm.feed:create', node: { stamps: STAMPS }, deviation: feedOwner,
+    params: { op: 'create', key, owner: shownOwner, topic },
+    run: async (ref) => service('createFeed', ['<the shown owner\'s signer>', AGENT_TOPIC],
+      () => ref.feedService.createFeed(frozen(ref), AGENT_TOPIC), (v) => v),
+  });
+  out.push({
+    id: 'feed-update-owner-changed', method: 'swarm.feed', row: 'swarm.feed:update', node: { stamps: STAMPS }, deviation: feedOwner,
+    params: { op: 'update', key, owner: shownOwner, topic, reference: C.REF },
+    run: async (ref) => service('updateFeed', ['<the shown owner\'s signer>', AGENT_TOPIC, C.REF, undefined],
+      () => ref.feedService.updateFeed(frozen(ref), AGENT_TOPIC, C.REF, undefined), (v) => v),
+  });
+  out.push({
+    id: 'feed-read-owner-changed', method: 'swarm.feed', row: 'swarm.feed:read', node: {}, deviation: feedOwner,
+    params: { op: 'read', key, owner: shownOwner, topic },
+    run: async (ref) => service('readFeedState', ['<the shown owner>', AGENT_TOPIC],
+      () => ref.feedService.readFeedState(shown, AGENT_TOPIC), (v) => v),
+  });
   return out;
 }
 

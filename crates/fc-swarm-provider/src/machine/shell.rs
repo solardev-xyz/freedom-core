@@ -56,6 +56,15 @@ pub const IDLE_MS: u64 = 60_000;
 /// D13: a whole node reply under such a request comes within this long.
 pub const WHOLE_REPLY_MS: u64 = 300_000;
 
+/// `swarm.feed`'s refusal code when the vault's Bee wallet is no longer
+/// the owner main named (core PR K2), before any node call: as the feed
+/// store's `identity_taken` refuses what a prompt showed once another
+/// identity took it.
+pub const OWNER_CHANGED: &str = "owner_changed";
+/// Its message.
+pub const OWNER_CHANGED_MESSAGE: &str =
+    "The Bee wallet this feed request names is no longer the vault's";
+
 /// The largest safe integer.
 const MAX_SAFE: f64 = 9_007_199_254_740_991.0;
 
@@ -249,6 +258,15 @@ impl ShellError {
     /// What bee-js threw reading a reply (zod's, `mapPostageBatch`'s).
     pub(crate) fn js(err: &JsError) -> ShellError {
         ShellError::new(err.message.clone())
+    }
+
+    /// `swarm.feed`'s refusal when the vault's Bee wallet isn't the owner
+    /// main named (K2): [`OWNER_CHANGED_MESSAGE`], code [`OWNER_CHANGED`].
+    pub(crate) fn owner_changed() -> ShellError {
+        ShellError {
+            code: Some(OWNER_CHANGED),
+            ..ShellError::new(OWNER_CHANGED_MESSAGE)
+        }
     }
 
     /// `{ message, code?, status?, capacity? }`.
@@ -452,12 +470,17 @@ pub enum FeedOp {
     Read,
 }
 
-/// `swarm.feed`'s params: `{ op, key: { kind: "bee_wallet" }, topic,
-/// reference?, min_index?, batch? }`; a read takes only `op`, `key` and
-/// `topic`.
+/// `swarm.feed`'s params: `{ op, key: { kind: "bee_wallet" }, owner,
+/// topic, reference?, min_index?, batch? }`; a read takes only `op`,
+/// `key`, `owner` and `topic`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeedCall {
     pub op: FeedOp,
+    /// The Bee wallet's owner main showed (core PR K2), which the vault's
+    /// must still be: compared with the owner the vault answers before any
+    /// node call, and every signature the operation gets checked against
+    /// it before its upload.
+    pub owner: [u8; 20],
     /// The feed's topic, `Topic.fromString(…)`'s 32 bytes, which main
     /// computes.
     pub topic: [u8; 32],
@@ -574,6 +597,21 @@ fn hex_bytes<const N: usize>(value: &JsValue) -> Option<[u8; N]> {
         return None;
     }
     crate::chunks::unhex::<N>(&s.as_str().to_ascii_lowercase())
+}
+
+/// An owner as design 0015 writes `<o>` and `shell.swarm_api`'s
+/// `feed.owner`: 40 hex digits, lowercase, with no `0x`.
+fn owner_hex(value: &JsValue) -> Option<[u8; 20]> {
+    let JsValue::String(s) = value else {
+        return None;
+    };
+    if !s.is_well_formed()
+        || s.len() != 40
+        || !s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return None;
+    }
+    crate::chunks::unhex::<20>(s.as_str())
 }
 
 /// A header value as main sends it (design 0015, `shell.swarm_api`: byte
@@ -780,7 +818,15 @@ fn parse_feed(params: &JsValue) -> Result<FeedCall, Invalid> {
     let m = Members::of(
         params,
         "params",
-        &["op", "key", "topic", "reference", "min_index", "batch"],
+        &[
+            "op",
+            "key",
+            "owner",
+            "topic",
+            "reference",
+            "min_index",
+            "batch",
+        ],
     )?;
     let (update, read) = match m.need("op")? {
         JsValue::String(s) if *s == "create" => (false, false),
@@ -794,6 +840,9 @@ fn parse_feed(params: &JsValue) -> Result<FeedCall, Invalid> {
         JsValue::String(s) if *s == "bee_wallet" => {}
         _ => return Err(key.bad("kind", "only bee_wallet")),
     }
+    // The owner main showed, in `<o>`'s form (K2).
+    let owner =
+        owner_hex(m.need("owner")?).ok_or_else(|| m.bad("owner", "not 40 lowercase hex"))?;
     let topic = hex_bytes::<32>(m.need("topic")?).ok_or_else(|| m.bad("topic", "not 64 hex"))?;
     let batch = m.batch("batch")?;
     if read && batch.is_some() {
@@ -820,7 +869,12 @@ fn parse_feed(params: &JsValue) -> Result<FeedCall, Invalid> {
         }
         if read { FeedOp::Read } else { FeedOp::Create }
     };
-    Ok(FeedCall { op, topic, batch })
+    Ok(FeedCall {
+        op,
+        owner,
+        topic,
+        batch,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1165,8 +1219,34 @@ mod tests {
             ),
             (
                 ShellMethod::Feed,
-                r#"{"op":"update","key":{"kind":"bee_wallet"},"topic":"00"}"#,
+                r#"{"op":"update","key":{"kind":"bee_wallet"},"owner":"1111111111111111111111111111111111111111","topic":"00"}"#,
                 "params.topic: not 64 hex",
+            ),
+            // K2: the owner main showed, in `<o>`'s form only.
+            (
+                ShellMethod::Feed,
+                r#"{"op":"read","key":{"kind":"bee_wallet"},"topic":"00"}"#,
+                "params.owner: missing",
+            ),
+            (
+                ShellMethod::Feed,
+                r#"{"op":"read","key":{"kind":"bee_wallet"},"owner":"0x1111111111111111111111111111111111111111","topic":"00"}"#,
+                "params.owner: not 40 lowercase hex",
+            ),
+            (
+                ShellMethod::Feed,
+                r#"{"op":"read","key":{"kind":"bee_wallet"},"owner":"6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0","topic":"00"}"#,
+                "params.owner: not 40 lowercase hex",
+            ),
+            (
+                ShellMethod::Feed,
+                r#"{"op":"read","key":{"kind":"bee_wallet"},"owner":"111111111111111111111111111111111111111","topic":"00"}"#,
+                "params.owner: not 40 lowercase hex",
+            ),
+            (
+                ShellMethod::Feed,
+                r#"{"op":"read","key":{"kind":"bee_wallet"},"owner":null,"topic":"00"}"#,
+                "params.owner: not 40 lowercase hex",
             ),
             (
                 ShellMethod::Stamps,
@@ -1191,7 +1271,8 @@ mod tests {
         let call = parse(
             ShellMethod::Feed,
             &format!(
-                r#"{{"op":"update","key":{{"kind":"bee_wallet"}},"topic":"{topic}","reference":"{}"}}"#,
+                r#"{{"op":"update","key":{{"kind":"bee_wallet"}},"owner":"{}","topic":"{topic}","reference":"{}"}}"#,
+                "e0".repeat(20),
                 "cd".repeat(64)
             ),
         )
@@ -1203,6 +1284,7 @@ mod tests {
                     reference: vec![0xcd; 64],
                     min_index: 0
                 },
+                owner: [0xe0; 20],
                 topic: [0xab; 32],
                 batch: None,
             })

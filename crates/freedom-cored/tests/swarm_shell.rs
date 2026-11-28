@@ -1259,7 +1259,9 @@ fn main_s_own_node_methods_through_the_pipe() {
     let owner = fc_evm::address_of(&keys.bee);
     let topic = "77".repeat(32);
     let feed = |op: &str, extra: Value| {
-        let mut params = json!({ "op": op, "key": { "kind": "bee_wallet" }, "topic": topic });
+        let mut params = json!({
+            "op": op, "key": { "kind": "bee_wallet" }, "owner": logic::hex(&owner), "topic": topic,
+        });
         for (k, v) in extra.as_object().unwrap() {
             params[k] = v.clone();
         }
@@ -1376,6 +1378,198 @@ fn main_s_own_node_methods_through_the_pipe() {
     assert_eq!(
         thrown,
         Got::Thrown(fc_json::parse(r#"{"message":"Swarm node is not ready"}"#).unwrap())
+    );
+}
+
+/// The test mnemonic's Bee wallet (keys.json's `abandon-12`, the core's
+/// vault in these tests) in `<o>`'s form: the `owner` main names for
+/// `swarm.feed` (K2).
+fn bee_owner() -> String {
+    bee_owner_of("abandon-12")
+}
+
+/// A keys.json vector's Bee wallet in `<o>`'s form.
+fn bee_owner_of(id: &str) -> String {
+    let text = logic::text_of("keys.json");
+    let index = Index::new(&text).unwrap();
+    let vector = get(index.root(), "vectors")
+        .children()
+        .find(|v| get(*v, "id").is_str(id))
+        .unwrap();
+    let address = logic::string(get(get(vector, "beeWallet"), "address"));
+    address.strip_prefix("0x").unwrap().to_ascii_lowercase()
+}
+
+/// The other mnemonic the vault is replaced with, as `vault.import` takes
+/// it (keys.json's `legal-12`, as the last update's owner shows).
+const LEGAL: &str = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+
+/// `swarm.feed` takes the Bee wallet's owner main showed (K2), through the
+/// binary:
+/// - a malformed `owner` (absent, `null`, a number, `0x`, upper or mixed
+///   case, 39 or 41 digits, not hex) is `invalid_argument`, with nothing
+///   asked of main or the vault;
+/// - an owner the vault doesn't hold is refused for each op, with a batch
+///   or none, before any node call: `owner_changed` and its text;
+/// - the vault replaced (`vault.import` with `overwrite`, another mnemonic)
+///   after an update's owner check, while its lookup is out: the vault
+///   signs under the new key, and the update refuses that signature before
+///   its upload (`createSwarmSigner`'s text), nothing uploaded; the next
+///   request naming the old owner is refused `owner_changed`, and one
+///   naming the new owner goes on.
+#[test]
+fn swarm_feed_takes_the_owner_main_showed() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    let mut main = store_main();
+    main.world(json!({ "reset": true, "clock": T0 }));
+    let owner = bee_owner();
+    let topic = "77".repeat(32);
+    let reference = "ef".repeat(32);
+    let batch = "a1".repeat(32);
+    let params = |op: &str, owner: Option<Value>, extra: Value| {
+        let mut params = json!({ "op": op, "key": { "kind": "bee_wallet" }, "topic": topic });
+        if let Some(owner) = owner {
+            params["owner"] = owner;
+        }
+        for (k, v) in extra.as_object().unwrap() {
+            params[k] = v.clone();
+        }
+        params
+    };
+    let refused_text = r#"{"message":"The Bee wallet this feed request names is no longer the vault's","code":"owner_changed"}"#;
+
+    // Malformed owners: refused as the params are read.
+    let checksummed = fc_evm::checksum_address(&logic::unhex(&owner).try_into().unwrap());
+    for bad in [
+        None,
+        Some(json!(null)),
+        Some(json!(7)),
+        Some(json!(checksummed.clone())),
+        Some(json!(format!("0x{owner}"))),
+        Some(json!(checksummed[2..].to_owned())),
+        Some(json!(owner.to_uppercase())),
+        Some(json!(owner[..39].to_owned())),
+        Some(json!(format!("{owner}0"))),
+        Some(json!(format!("{}zz", &owner[..38]))),
+    ] {
+        for op in ["create", "update", "read"] {
+            let extra = if op == "update" {
+                json!({ "reference": reference })
+            } else {
+                json!({})
+            };
+            let sent = params(op, bad.clone(), extra);
+            let id = main.own_request("swarm.feed", &sent, "shell");
+            let reply = main.core.response(id);
+            assert_eq!(
+                reply["error"]["code"], "invalid_argument",
+                "{sent}: {reply}"
+            );
+            assert!(
+                reply["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("params.owner: "),
+                "{sent}: {reply}"
+            );
+        }
+    }
+    main.settled();
+
+    // Another vault's Bee wallet: each op refused before any node call.
+    let other = bee_owner_of("abandon-24");
+    assert_ne!(other, owner);
+    for (op, extra) in [
+        ("create", json!({})),
+        ("create", json!({ "batch": batch })),
+        ("update", json!({ "reference": reference })),
+        (
+            "update",
+            json!({ "reference": reference, "batch": batch, "min_index": 3 }),
+        ),
+        ("read", json!({})),
+    ] {
+        let mut own = OwnMain::new(|call: &NodeCall, _: &[u8]| panic!("a node call {call:?}"));
+        let sent = params(op, Some(json!(other)), extra);
+        let thrown = got(&main.play_own(&mut own, "swarm.feed", &sent, "shell"));
+        assert_eq!(
+            thrown,
+            Got::Thrown(fc_json::parse(refused_text).unwrap()),
+            "{sent}"
+        );
+        assert!(own.calls.is_empty(), "{sent}");
+    }
+
+    // The vault replaced while an update's lookup is out.
+    let update = params(
+        "update",
+        Some(json!(owner)),
+        json!({ "reference": reference, "batch": batch }),
+    );
+    let request = main.own_request("swarm.feed", &update, "shell");
+    let call = main.recv();
+    assert_eq!(call["method"], "shell.swarm_api", "{call}");
+    assert_eq!(call["params"]["form"], "feed_head", "{call}");
+    assert!(
+        call["params"]["path"].as_str().unwrap().contains(&owner),
+        "{call}"
+    );
+    let id = main.id();
+    let imported = main.core.call(
+        id,
+        "vault.import",
+        json!({
+            "password_b64": STANDARD.encode(swarm_world::PASSWORD),
+            "mnemonic_b64": STANDARD.encode(LEGAL),
+            "overwrite": true,
+        }),
+    );
+    assert!(imported["result"].is_object(), "{imported}");
+    main.answer(
+        call["id"].as_u64().unwrap(),
+        json!({
+            "status": 200, "status_text": "OK",
+            "headers": [["swarm-feed-index", "0000000000000002"], ["swarm-feed-index-next", "0000000000000003"]],
+            "body_base64": "",
+        }),
+    );
+    // No soc_up: the answer is next.
+    let answer = main.recv();
+    assert_eq!(answer["type"], "response", "{answer}");
+    assert_eq!(answer["id"], request, "{answer}");
+    assert_eq!(
+        got(&answer),
+        Got::Thrown(
+            fc_json::parse(
+                r#"{"message":"The identity core returned a chunk signature that does not match"}"#
+            )
+            .unwrap()
+        )
+    );
+    main.settled();
+    // The old owner is refused now; the new one's update goes on.
+    let mut own = OwnMain::new(|call: &NodeCall, _: &[u8]| panic!("a node call {call:?}"));
+    let thrown = got(&main.play_own(&mut own, "swarm.feed", &update, "shell"));
+    assert_eq!(thrown, Got::Thrown(fc_json::parse(refused_text).unwrap()));
+    let legal = bee_owner_of("legal-12");
+    let mut own = OwnMain::new(honest(usable_stamps(), None));
+    let updated = value_of(got(&main.play_own(
+        &mut own,
+        "swarm.feed",
+        &params(
+            "update",
+            Some(json!(legal)),
+            json!({ "reference": reference, "batch": batch }),
+        ),
+        "shell",
+    )));
+    assert_eq!(field(&updated, "index"), &JsValue::Number(0.0));
+    let (soc, _) = own.calls.last().unwrap();
+    assert!(
+        soc.path.starts_with(&format!("/soc/{legal}/")),
+        "{}",
+        soc.path
     );
 }
 
@@ -2337,7 +2531,7 @@ fn every_shell_case_through_the_pipe() {
     assert_eq!(
         counts,
         [
-            ("swarm.feed", 16),
+            ("swarm.feed", 19),
             ("swarm.history", 4),
             ("swarm.identities", 21),
             ("swarm.manifest", 15),
@@ -2374,9 +2568,12 @@ fn play_shell_node(main: &mut Main, case: &JsValue, grammar: V<'_, '_>) {
     let clock = num(field(world, "clock")) as u64;
     let deviation = case.get("deviation").map(str_of);
     let picked_read = deviation == Some("picked-read-text");
+    // The owner main names isn't the vault's Bee wallet (K2): the core
+    // refuses before any node call.
+    let feed_owner = deviation == Some("feed-owner");
     match deviation {
         None => assert!(case.get("core").is_none(), "{id}"),
-        Some("picked-read-text" | "index-probe") => {}
+        Some("picked-read-text" | "index-probe" | "feed-owner") => {}
         Some(other) => panic!("{id}: deviation {other}"),
     }
     main.world(json!({ "reset": true, "clock": clock }));
@@ -2387,7 +2584,11 @@ fn play_shell_node(main: &mut Main, case: &JsValue, grammar: V<'_, '_>) {
     let steps = field(case, "steps").as_array().unwrap();
     assert_eq!(steps.len(), 1, "{id}");
     let step = &steps[0];
-    let wants = want_calls(step);
+    let wants = if feed_owner {
+        Vec::new()
+    } else {
+        want_calls(step)
+    };
     let replies: Vec<Event> = wants.iter().map(|w| w.reply.clone()).collect();
     let mut n = 0usize;
     let mut own = OwnMain::new(move |call: &NodeCall, _: &[u8]| {
@@ -2418,13 +2619,13 @@ fn play_shell_node(main: &mut Main, case: &JsValue, grammar: V<'_, '_>) {
     for (k, (got, want)) in own.calls.iter().zip(&wants).enumerate() {
         check_call(id, k, got, want);
     }
-    let core = case.get("core").filter(|_| picked_read);
+    let core = case.get("core").filter(|_| picked_read || feed_owner);
     let want = match core {
         Some(core) => &field(core, "answers").as_array().unwrap()[0],
         None => field(step, "answer"),
     };
     assert_eq!(typed_answer(&answer), recorded_answer(want), "{id}");
-    let rows = match core {
+    let rows = match core.filter(|_| picked_read) {
         Some(core) => field(core, "history"),
         None => field(field(case, "after"), "history"),
     };
@@ -2976,8 +3177,8 @@ fn wait_for(marker: &Path) {
 /// signature. The request's ID.
 fn own_update_to_its_signature(main: &mut Main) -> u64 {
     let update = json!({
-        "op": "update", "key": { "kind": "bee_wallet" }, "topic": "77".repeat(32),
-        "reference": "ef".repeat(32), "batch": "a1".repeat(32),
+        "op": "update", "key": { "kind": "bee_wallet" }, "owner": bee_owner(),
+        "topic": "77".repeat(32), "reference": "ef".repeat(32), "batch": "a1".repeat(32),
     });
     let request = main.own_request("swarm.feed", &update, "shell");
     let call = main.recv();
