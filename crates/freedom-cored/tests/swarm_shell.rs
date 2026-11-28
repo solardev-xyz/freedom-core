@@ -10,10 +10,12 @@
 //!   manifest fetched by main through `shell.swarm_manifest` (D6). The
 //!   method machines' own feed changes go through the keeper as
 //!   `test.swarm_feed_change` makes them; their reads are read from the
-//!   file the core left; the publish machines' history statements are run
-//!   on the core's database directly. Each case: every answer (the case's
-//!   `core` where a deviation changes it), the files the core left on disk,
-//!   the Swarm grants as `approval.grants` reads them, the history's rows.
+//!   file the core left; `addEntry` and `updateEntry` go through main's
+//!   `swarm.history` `add` and `update`, and the rows a case seeds before
+//!   the history's reopen are run on the core's database directly. Each
+//!   case: every answer (the case's `core` where a deviation changes it),
+//!   the files the core left on disk, the Swarm grants as `approval.grants`
+//!   reads them, the history's rows.
 //! - **Main's own node methods** (`swarm.publish`, `swarm.feed`,
 //!   `swarm.stamps`, `swarm.upload_status`): a picked file and a
 //!   collection published, their parts streamed through `shell.swarm_part`
@@ -24,6 +26,10 @@
 //!   (`forbidden`), an op only main makes refused to the chrome,
 //!   admission's `busy` for main, `shell.swarm_manifest`'s answers and its
 //!   bound, and `approval.changed` after a projection's write.
+//! - **`swarm.history`'s `add` and `update`** (the 2026-11-28 amendment's
+//!   K1): main's alone (the chrome and a page `forbidden`), their params
+//!   read strictly, `add`'s bound keeping the row it inserted with the
+//!   clock set back, and a write that fails thrown with the history's text.
 //! - **D17:** a user's Swarm grant change, which the event loop writes,
 //!   detaches what a manifest managed of it in the swarm thread's manifest
 //!   store, after a check in flight and before main's next op of the site;
@@ -864,8 +870,12 @@ fn update_entry(
 }
 
 fn history_op(main: &mut Main, op: &str, members: &[(&str, JsValue)]) -> Got {
+    history_op_from(main, op, members, "chrome")
+}
+
+fn history_op_from(main: &mut Main, op: &str, members: &[(&str, JsValue)], caller: &str) -> Got {
     let mut own = OwnMain::new(|call, _| panic!("a history op called the node: {call:?}"));
-    got(&main.play_own(&mut own, "swarm.history", &op_params(op, members), "chrome"))
+    got(&main.play_own(&mut own, "swarm.history", &op_params(op, members), caller))
 }
 
 fn play_history(main: &mut Main, case: &JsValue) {
@@ -944,13 +954,14 @@ fn play_history(main: &mut Main, case: &JsValue) {
         let args = field(op, "args").as_array().unwrap().to_vec();
         let arg = |i: usize| args.get(i).cloned().unwrap_or(JsValue::Undefined);
         let want = core_ops.map_or(op, |answers| &answers[n]);
-        let to_got = |r: Result<JsValue, JsValue>| match r {
-            Ok(value) => Got::Value(value),
-            Err(thrown) => Got::Thrown(thrown),
-        };
         let answer = match str_of(field(op, "op")) {
-            "addEntry" => to_got(add_entry(&conn, &arg(0), now)),
-            "updateEntry" => to_got(update_entry(&conn, &arg(0), &arg(1), now)),
+            "addEntry" => history_op_from(main, "add", &[("entry", arg(0))], "shell"),
+            "updateEntry" => history_op_from(
+                main,
+                "update",
+                &[("id", arg(0)), ("updates", arg(1))],
+                "shell",
+            ),
             "getEntries" => history_op(main, "list", &[]),
             "clearEntries" => history_op(main, "clear", &[]),
             "removeEntry" => history_op(main, "remove", &[("id", arg(0))]),
@@ -1429,6 +1440,209 @@ fn callers_are_enforced() {
         got(&main.play_own(&mut own, "swarm.history", &op_params("list", &[]), "chrome")),
         Got::Value(JsValue::Array(Vec::new()))
     );
+}
+
+/// `swarm.history`'s `add` and `update` (the 2026-11-28 amendment's K1),
+/// through the binary: main's alone (the chrome's call `forbidden` by the
+/// op's name alone, a malformed member too, a page's by the method table,
+/// nothing written); params read
+/// strictly (an unknown member, an untyped one, bytes or a BigInt:
+/// `invalid_argument`); main's rows written and read back; `add`'s bound
+/// (deviation `history-bound`) trimming the oldest finished row and keeping
+/// the one it inserted, the clock set back so that it is the oldest; and a
+/// write that fails (the test hooks' `swarm_history:write`) thrown with the
+/// history's fixed text, nothing written.
+#[test]
+fn main_s_history_ops_through_the_pipe() {
+    let dir = tempfile::tempdir().unwrap();
+    let hooks = dir.path().join("fail");
+    let mut main = swarm_world::main_with(
+        &["swarm"],
+        &[(
+            "FREEDOM_CORED_TEST_GRANT_WRITE_FAIL",
+            hooks.to_str().unwrap(),
+        )],
+    );
+    let root = main.core.grant_root.clone();
+    set_up(&mut main, &Dir::new(), &JsValue::Object(Vec::new()), T0);
+    let parse = |text: &str| fc_json::parse(text).unwrap();
+    let entry = parse(
+        r#"{"type":"directory","name":"site","status":"uploading","origin":"freedom://agent","bytesSize":4096}"#,
+    );
+    let add = op_params("add", &[("entry", entry.clone())]);
+    let update = op_params(
+        "update",
+        &[
+            ("id", JsValue::Number(1.0)),
+            ("updates", parse(r#"{"status":"completed"}"#)),
+        ],
+    );
+    for (op, params) in [("add", &add), ("update", &update)] {
+        let id = main.own_request("swarm.history", params, "chrome");
+        let reply = main.core.response(id);
+        assert_eq!(reply["error"]["code"], "forbidden", "{op}: {reply}");
+        assert_eq!(
+            reply["error"]["message"],
+            format!("{op} is main's own op"),
+            "{op}"
+        );
+        let id = main.id();
+        let frame = format!(
+            r#"{{"type":"request","id":{id},"method":"swarm.history","params":{params},"context":{{"caller":"page","page":{}}}}}"#,
+            swarm_world::page("https://a.example")
+        );
+        main.core
+            .send_raw(&common::raw_frame(0x01, frame.as_bytes()));
+        let reply = main.core.response(id);
+        assert_eq!(reply["error"]["code"], "forbidden", "{op} page: {reply}");
+    }
+    // Refused on the op's name alone: a malformed member, which main's call
+    // gets `invalid_argument` for (below), is still `forbidden` from the
+    // chrome.
+    for params in [
+        json!({ "op": "add", "entry": {} }),
+        json!({ "entry": "raw", "op": "add" }),
+        json!({ "op": "add", "entry": { "bigint": "x" } }),
+        json!({ "op": "update", "id": 1, "updates": {} }),
+        json!({ "updates": { "string": 5 }, "op": "update" }),
+    ] {
+        let id = main.own_request("swarm.history", &params, "chrome");
+        let reply = main.core.response(id);
+        assert_eq!(reply["error"]["code"], "forbidden", "{params}: {reply}");
+        let id = main.own_request("swarm.history", &params, "shell");
+        let reply = main.core.response(id);
+        assert_eq!(
+            reply["error"]["code"], "invalid_argument",
+            "{params}: {reply}"
+        );
+    }
+    for params in [
+        json!({ "op": "add", "entry": { "object": [] }, "extra": { "null": true } }),
+        json!({ "op": "update", "id": { "number": "1" }, "entry": { "object": [] } }),
+        json!({ "op": "add", "entry": {} }),
+        json!({ "op": "update", "id": 1 }),
+        json!({ "op": "add", "entry": { "object": [["name", { "bytes": 1, "kind": "Buffer", "base64": "YQ==" }]] } }),
+        json!({ "op": "update", "id": { "bigint": "1" } }),
+    ] {
+        let id = main.own_request("swarm.history", &params, "shell");
+        let reply = main.core.response(id);
+        assert_eq!(
+            reply["error"]["code"], "invalid_argument",
+            "{params}: {reply}"
+        );
+    }
+    assert_eq!(stored_rows(&root).stringify(), "[]", "nothing written");
+    // Main's rows: the agent's before its upload, then its outcome.
+    let iso = |text: &str| Some(JsValue::string(text));
+    let Got::Value(row) = history_op_from(&mut main, "add", &[("entry", entry.clone())], "shell")
+    else {
+        panic!("add");
+    };
+    assert_eq!(row.get("id"), Some(&JsValue::Number(1.0)));
+    assert_eq!(row.get("origin"), Some(&JsValue::string("freedom://agent")));
+    assert_eq!(
+        row.get("timestamp"),
+        iso("2026-01-01T00:00:00.123Z").as_ref()
+    );
+    assert_eq!(row.get("completedAt"), Some(&JsValue::Null));
+    main.world(json!({ "clock": T0 + 5000 }));
+    let Got::Value(row) = got(&main.play_own(
+        &mut OwnMain::new(|call, _| panic!("{call:?}")),
+        "swarm.history",
+        &update,
+        "shell",
+    )) else {
+        panic!("update");
+    };
+    assert_eq!(row.get("status"), Some(&JsValue::string("completed")));
+    assert_eq!(
+        row.get("completedAt"),
+        iso("2026-01-01T00:00:05.123Z").as_ref()
+    );
+    assert_eq!(
+        history_op_from(
+            &mut main,
+            "update",
+            &[
+                ("id", JsValue::Number(2.0)),
+                ("updates", parse(r#"{"status":"failed"}"#)),
+            ],
+            "shell",
+        ),
+        Got::Value(JsValue::Null),
+        "a missing row"
+    );
+    // The bound: 10,000 rows, the second half finished, then an insert with
+    // the clock set back.
+    set_up(&mut main, &Dir::new(), &JsValue::Object(Vec::new()), T0);
+    {
+        let conn = history_db(&root);
+        conn.execute_batch("BEGIN").unwrap();
+        for i in 1..=history::MAX_ROWS as i64 {
+            let status = if i > 5000 { "completed" } else { "uploading" };
+            conn.execute(
+                "INSERT INTO publishes (type, status, started_at) VALUES ('data', ?1, ?2)",
+                rusqlite::params![status, T0 as i64 + i],
+            )
+            .unwrap();
+        }
+        conn.execute_batch("COMMIT").unwrap();
+    }
+    let early = T0 - 1_000_000;
+    main.world(json!({ "clock": early }));
+    let Got::Value(row) = history_op_from(&mut main, "add", &[("entry", entry.clone())], "shell")
+    else {
+        panic!("add at the bound");
+    };
+    assert_eq!(row.get("id"), Some(&JsValue::Number(10_001.0)));
+    assert_eq!(
+        row.get("timestamp"),
+        iso("2025-12-31T23:43:20.123Z").as_ref()
+    );
+    let ids = || -> Vec<i64> {
+        let conn = history_db(&root);
+        let mut statement = conn
+            .prepare("SELECT id FROM publishes ORDER BY id")
+            .unwrap();
+        statement
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let kept: Vec<i64> = (1..=10_001).filter(|i| *i != 5001).collect();
+    assert_eq!(
+        ids(),
+        kept,
+        "the oldest finished row trimmed, the new one kept"
+    );
+    // A write that fails: the history's text, nothing written.
+    std::fs::write(&hooks, "swarm_history:write\n").unwrap();
+    for (op, params) in [("add", &add), ("update", &update)] {
+        let Got::Thrown(thrown) = got(&main.play_own(
+            &mut OwnMain::new(|call, _| panic!("{call:?}")),
+            "swarm.history",
+            params,
+            "shell",
+        )) else {
+            panic!("{op}: thrown");
+        };
+        assert_eq!(thrown.get("name"), Some(&JsValue::string("Error")), "{op}");
+        assert_eq!(
+            thrown.get("message"),
+            Some(&JsValue::string(
+                "The publish history could not be read or written"
+            )),
+            "{op}"
+        );
+        assert_eq!(thrown.get("code"), None, "{op}");
+    }
+    std::fs::remove_file(&hooks).unwrap();
+    assert_eq!(ids(), kept, "nothing written");
+    let Got::Value(JsValue::Array(ref rows)) = history_op(&mut main, "list", &[]) else {
+        panic!("list");
+    };
+    assert_eq!(rows.len(), history::MAX_ROWS);
 }
 
 /// Admission's `busy` for main's own methods (D5, "Budgets"): with one
@@ -2124,7 +2338,7 @@ fn every_shell_case_through_the_pipe() {
         counts,
         [
             ("swarm.feed", 16),
-            ("swarm.history", 2),
+            ("swarm.history", 4),
             ("swarm.identities", 21),
             ("swarm.manifest", 15),
             ("swarm.publish", 20),

@@ -684,7 +684,8 @@
         "stores/history-blob-name",
         "stores/history-blob-started-at-date",
         "stores/history-blob-started-at-throws",
-        "shell/history-list-blob"
+        "shell/history-list-blob",
+        "shell/history-update-blob"
       ]
     },
     "store-shapes": {
@@ -139573,6 +139574,6140 @@
             "tag_uid": null,
             "batch_id": null,
             "origin": "https://app.example",
+            "bytes_size": null,
+            "started_at": {
+              "blob": "61"
+            },
+            "completed_at": 1767225600123,
+            "error_message": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "history-add-update",
+      "method": "swarm.history",
+      "world": {
+        "feeds": null,
+        "manifests": null,
+        "grants": {},
+        "vault": "unlocked",
+        "clock": 1767225600123,
+        "history": [
+          {
+            "id": 1,
+            "type": "data",
+            "name": "Text",
+            "status": "completed",
+            "reference": "abababababababababababababababababababababababababababababababab",
+            "bzz_url": "bzz://abababababababababababababababababababababababababababababababab",
+            "tag_uid": 100,
+            "batch_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "origin": "freedom://publish",
+            "bytes_size": 4,
+            "started_at": 1767225600123,
+            "completed_at": 1767225600123,
+            "error_message": null
+          }
+        ]
+      },
+      "steps": [
+        {
+          "caller": "shell",
+          "params": {
+            "op": "add",
+            "entry": {
+              "object": [
+                [
+                  "type",
+                  {
+                    "string": "data"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": "Text"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "uploading"
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "freedom://publish"
+                  }
+                ]
+              ]
+            }
+          },
+          "reference": {
+            "call": "addEntry",
+            "result": {
+              "id": 2,
+              "type": "data",
+              "name": "Text",
+              "status": "uploading",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": "freedom://publish",
+              "bytesSize": null,
+              "timestamp": "2026-01-01T00:00:00.123Z",
+              "completedAt": null,
+              "errorMessage": null
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "2"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "data"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": "Text"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "uploading"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "freedom://publish"
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:00.123Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "null": true
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "update",
+            "id": {
+              "number": "2"
+            },
+            "updates": {
+              "object": [
+                [
+                  "status",
+                  {
+                    "string": "completed"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "string": "abababababababababababababababababababababababababababababababab"
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "string": "bzz://abababababababababababababababababababababababababababababababab"
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "number": "101"
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "string": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "number": "5"
+                  }
+                ]
+              ]
+            }
+          },
+          "clock": 1767225602623,
+          "reference": {
+            "call": "updateEntry",
+            "result": {
+              "id": 2,
+              "type": "data",
+              "name": "Text",
+              "status": "completed",
+              "reference": "abababababababababababababababababababababababababababababababab",
+              "bzzUrl": "bzz://abababababababababababababababababababababababababababababababab",
+              "tagUid": 101,
+              "batchIdUsed": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+              "origin": "freedom://publish",
+              "bytesSize": 5,
+              "timestamp": "2026-01-01T00:00:00.123Z",
+              "completedAt": "2026-01-01T00:00:02.623Z",
+              "errorMessage": null
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "2"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "data"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": "Text"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "completed"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "string": "abababababababababababababababababababababababababababababababab"
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "string": "bzz://abababababababababababababababababababababababababababababababab"
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "number": "101"
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "string": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "freedom://publish"
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "number": "5"
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:00.123Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "string": "2026-01-01T00:00:02.623Z"
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "null": true
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "add",
+            "entry": {
+              "object": [
+                [
+                  "type",
+                  {
+                    "string": "file"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": "notes.txt"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "uploading"
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "freedom://publish"
+                  }
+                ]
+              ]
+            }
+          },
+          "reference": {
+            "call": "addEntry",
+            "result": {
+              "id": 3,
+              "type": "file",
+              "name": "notes.txt",
+              "status": "uploading",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": "freedom://publish",
+              "bytesSize": null,
+              "timestamp": "2026-01-01T00:00:02.623Z",
+              "completedAt": null,
+              "errorMessage": null
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "3"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "file"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": "notes.txt"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "uploading"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "freedom://publish"
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:02.623Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "null": true
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "update",
+            "id": {
+              "number": "3"
+            },
+            "updates": {
+              "object": [
+                [
+                  "status",
+                  {
+                    "string": "failed"
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "string": "Could not read \"notes.txt\" (EACCES)"
+                  }
+                ]
+              ]
+            }
+          },
+          "reference": {
+            "call": "updateEntry",
+            "result": {
+              "id": 3,
+              "type": "file",
+              "name": "notes.txt",
+              "status": "failed",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": "freedom://publish",
+              "bytesSize": null,
+              "timestamp": "2026-01-01T00:00:02.623Z",
+              "completedAt": "2026-01-01T00:00:02.623Z",
+              "errorMessage": "Could not read \"notes.txt\" (EACCES)"
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "3"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "file"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": "notes.txt"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "failed"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "freedom://publish"
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:02.623Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "string": "2026-01-01T00:00:02.623Z"
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "string": "Could not read \"notes.txt\" (EACCES)"
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "add",
+            "entry": {
+              "object": [
+                [
+                  "type",
+                  {
+                    "string": "directory"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": "site (private draft link)"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "uploading"
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "freedom://agent"
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "number": "4096"
+                  }
+                ]
+              ]
+            }
+          },
+          "clock": 1767225603123,
+          "reference": {
+            "call": "addEntry",
+            "result": {
+              "id": 4,
+              "type": "directory",
+              "name": "site (private draft link)",
+              "status": "uploading",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": "freedom://agent",
+              "bytesSize": 4096,
+              "timestamp": "2026-01-01T00:00:03.123Z",
+              "completedAt": null,
+              "errorMessage": null
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "4"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "directory"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": "site (private draft link)"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "uploading"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "freedom://agent"
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "number": "4096"
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:03.123Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "null": true
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "update",
+            "id": {
+              "number": "4"
+            },
+            "updates": {
+              "object": [
+                [
+                  "status",
+                  {
+                    "string": "uploading"
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "undefined": true
+                  }
+                ]
+              ]
+            }
+          },
+          "reference": {
+            "call": "updateEntry",
+            "result": {
+              "id": 4,
+              "type": "directory",
+              "name": "site (private draft link)",
+              "status": "uploading",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": "freedom://agent",
+              "bytesSize": 4096,
+              "timestamp": "2026-01-01T00:00:03.123Z",
+              "completedAt": null,
+              "errorMessage": null
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "4"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "directory"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": "site (private draft link)"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "uploading"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "freedom://agent"
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "number": "4096"
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:03.123Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "null": true
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "update",
+            "id": {
+              "number": "4"
+            },
+            "updates": {
+              "object": [
+                [
+                  "status",
+                  {
+                    "string": "completed"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "string": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "string": "bzz://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "number": "7"
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "string": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+                  }
+                ]
+              ]
+            }
+          },
+          "clock": 1767225609123,
+          "reference": {
+            "call": "updateEntry",
+            "result": {
+              "id": 4,
+              "type": "directory",
+              "name": "site (private draft link)",
+              "status": "completed",
+              "reference": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "bzzUrl": "bzz://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "tagUid": 7,
+              "batchIdUsed": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+              "origin": "freedom://agent",
+              "bytesSize": 4096,
+              "timestamp": "2026-01-01T00:00:03.123Z",
+              "completedAt": "2026-01-01T00:00:09.123Z",
+              "errorMessage": null
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "4"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "directory"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": "site (private draft link)"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "completed"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "string": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "string": "bzz://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "number": "7"
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "string": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "freedom://agent"
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "number": "4096"
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:03.123Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "string": "2026-01-01T00:00:09.123Z"
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "null": true
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "add",
+            "entry": {
+              "object": [
+                [
+                  "type",
+                  {
+                    "string": "file"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": "report.txt"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "uploading"
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "freedom://agent"
+                  }
+                ]
+              ]
+            }
+          },
+          "reference": {
+            "call": "addEntry",
+            "result": {
+              "id": 5,
+              "type": "file",
+              "name": "report.txt",
+              "status": "uploading",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": "freedom://agent",
+              "bytesSize": null,
+              "timestamp": "2026-01-01T00:00:09.123Z",
+              "completedAt": null,
+              "errorMessage": null
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "5"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "file"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": "report.txt"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "uploading"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "freedom://agent"
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:09.123Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "null": true
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "update",
+            "id": {
+              "number": "5"
+            },
+            "updates": {
+              "object": [
+                [
+                  "status",
+                  {
+                    "string": "failed"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "string": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "string": "bzz://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                  }
+                ]
+              ]
+            }
+          },
+          "reference": {
+            "call": "updateEntry",
+            "result": {
+              "id": 5,
+              "type": "file",
+              "name": "report.txt",
+              "status": "failed",
+              "reference": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "bzzUrl": "bzz://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": "freedom://agent",
+              "bytesSize": null,
+              "timestamp": "2026-01-01T00:00:09.123Z",
+              "completedAt": "2026-01-01T00:00:09.123Z",
+              "errorMessage": null
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "5"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "file"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": "report.txt"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "failed"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "string": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "string": "bzz://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "freedom://agent"
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:09.123Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "string": "2026-01-01T00:00:09.123Z"
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "null": true
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "update",
+            "id": {
+              "number": "99"
+            },
+            "updates": {
+              "object": [
+                [
+                  "status",
+                  {
+                    "string": "failed"
+                  }
+                ]
+              ]
+            }
+          },
+          "reference": {
+            "call": "updateEntry",
+            "result": null
+          },
+          "answer": {
+            "result_typed": {
+              "null": true
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "add",
+            "entry": {
+              "object": [
+                [
+                  "type",
+                  {
+                    "string": "data"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": "Text"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "failed"
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "freedom://agent"
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "string": "no usable stamp"
+                  }
+                ]
+              ]
+            }
+          },
+          "reference": {
+            "call": "addEntry",
+            "result": {
+              "id": 6,
+              "type": "data",
+              "name": "Text",
+              "status": "failed",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": "freedom://agent",
+              "bytesSize": null,
+              "timestamp": "2026-01-01T00:00:09.123Z",
+              "completedAt": "2026-01-01T00:00:09.123Z",
+              "errorMessage": "no usable stamp"
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "6"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "data"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": "Text"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "failed"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "freedom://agent"
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:09.123Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "string": "2026-01-01T00:00:09.123Z"
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "string": "no usable stamp"
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "add"
+          },
+          "reference": {
+            "call": "addEntry",
+            "result": {
+              "id": 7,
+              "type": "data",
+              "name": null,
+              "status": "uploading",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": null,
+              "bytesSize": null,
+              "timestamp": "2026-01-01T00:00:09.123Z",
+              "completedAt": null,
+              "errorMessage": null
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "7"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "data"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "uploading"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:09.123Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "null": true
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "add",
+            "entry": {
+              "object": []
+            }
+          },
+          "reference": {
+            "call": "addEntry",
+            "result": {
+              "id": 8,
+              "type": "data",
+              "name": null,
+              "status": "uploading",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": null,
+              "bytesSize": null,
+              "timestamp": "2026-01-01T00:00:09.123Z",
+              "completedAt": null,
+              "errorMessage": null
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "8"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "data"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "uploading"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:09.123Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "null": true
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "add",
+            "entry": {
+              "object": [
+                [
+                  "type",
+                  {
+                    "string": ""
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": ""
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": ""
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "string": ""
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "string": ""
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "number": "0"
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "string": ""
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": ""
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "number": "0"
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "string": ""
+                  }
+                ]
+              ]
+            }
+          },
+          "reference": {
+            "call": "addEntry",
+            "result": {
+              "id": 9,
+              "type": "data",
+              "name": null,
+              "status": "uploading",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": 0,
+              "batchIdUsed": null,
+              "origin": null,
+              "bytesSize": 0,
+              "timestamp": "2026-01-01T00:00:09.123Z",
+              "completedAt": null,
+              "errorMessage": null
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "9"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "data"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "uploading"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "number": "0"
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "number": "0"
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:09.123Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "null": true
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "add",
+            "entry": {
+              "object": [
+                [
+                  "type",
+                  {
+                    "string": "chunk"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "completed"
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "https://app.example"
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "number": "NaN"
+                  }
+                ]
+              ]
+            }
+          },
+          "reference": {
+            "call": "addEntry",
+            "result": {
+              "id": 10,
+              "type": "chunk",
+              "name": null,
+              "status": "completed",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": "https://app.example",
+              "bytesSize": null,
+              "timestamp": "2026-01-01T00:00:09.123Z",
+              "completedAt": "2026-01-01T00:00:09.123Z",
+              "errorMessage": null
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "10"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "chunk"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "completed"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "https://app.example"
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:09.123Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "string": "2026-01-01T00:00:09.123Z"
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "null": true
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "add",
+            "entry": {
+              "number": "5"
+            }
+          },
+          "reference": {
+            "call": "addEntry",
+            "result": {
+              "id": 11,
+              "type": "data",
+              "name": null,
+              "status": "uploading",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": null,
+              "bytesSize": null,
+              "timestamp": "2026-01-01T00:00:09.123Z",
+              "completedAt": null,
+              "errorMessage": null
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "11"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "data"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "uploading"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:09.123Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "null": true
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "update",
+            "id": {
+              "string": "2"
+            },
+            "updates": {
+              "object": [
+                [
+                  "errorMessage",
+                  {
+                    "string": "later"
+                  }
+                ]
+              ]
+            }
+          },
+          "reference": {
+            "call": "updateEntry",
+            "result": {
+              "id": 2,
+              "type": "data",
+              "name": "Text",
+              "status": "completed",
+              "reference": "abababababababababababababababababababababababababababababababab",
+              "bzzUrl": "bzz://abababababababababababababababababababababababababababababababab",
+              "tagUid": 101,
+              "batchIdUsed": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+              "origin": "freedom://publish",
+              "bytesSize": 5,
+              "timestamp": "2026-01-01T00:00:00.123Z",
+              "completedAt": "2026-01-01T00:00:02.623Z",
+              "errorMessage": "later"
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "2"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "data"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": "Text"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "completed"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "string": "abababababababababababababababababababababababababababababababab"
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "string": "bzz://abababababababababababababababababababababababababababababababab"
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "number": "101"
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "string": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "freedom://publish"
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "number": "5"
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:00.123Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "string": "2026-01-01T00:00:02.623Z"
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "string": "later"
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "update",
+            "id": {
+              "number": "7"
+            }
+          },
+          "reference": {
+            "call": "updateEntry",
+            "result": {
+              "id": 7,
+              "type": "data",
+              "name": null,
+              "status": "uploading",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": null,
+              "bytesSize": null,
+              "timestamp": "2026-01-01T00:00:09.123Z",
+              "completedAt": null,
+              "errorMessage": null
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "7"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "data"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "uploading"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:09.123Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "null": true
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "update",
+            "id": {
+              "number": "8"
+            },
+            "updates": {
+              "object": []
+            }
+          },
+          "reference": {
+            "call": "updateEntry",
+            "result": {
+              "id": 8,
+              "type": "data",
+              "name": null,
+              "status": "uploading",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": null,
+              "bytesSize": null,
+              "timestamp": "2026-01-01T00:00:09.123Z",
+              "completedAt": null,
+              "errorMessage": null
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "8"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "data"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "uploading"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:09.123Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "null": true
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "update",
+            "updates": {
+              "object": [
+                [
+                  "status",
+                  {
+                    "string": "failed"
+                  }
+                ]
+              ]
+            }
+          },
+          "reference": {
+            "call": "updateEntry",
+            "result": null
+          },
+          "answer": {
+            "result_typed": {
+              "null": true
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "update",
+            "id": {
+              "null": true
+            },
+            "updates": {
+              "object": [
+                [
+                  "status",
+                  {
+                    "string": "failed"
+                  }
+                ]
+              ]
+            }
+          },
+          "reference": {
+            "call": "updateEntry",
+            "result": null
+          },
+          "answer": {
+            "result_typed": {
+              "null": true
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "update",
+            "id": {
+              "number": "3"
+            },
+            "updates": {
+              "object": [
+                [
+                  "status",
+                  {
+                    "string": "completed"
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "number": "Infinity"
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "number": "1.5"
+                  }
+                ]
+              ]
+            }
+          },
+          "reference": {
+            "call": "updateEntry",
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "3"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "file"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": "notes.txt"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "completed"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "number": "Infinity"
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "freedom://publish"
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "number": "1.5"
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:02.623Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "string": "2026-01-01T00:00:09.123Z"
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "string": "Could not read \"notes.txt\" (EACCES)"
+                  }
+                ]
+              ]
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "3"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "file"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": "notes.txt"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "completed"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "number": "Infinity"
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "freedom://publish"
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "number": "1.5"
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:02.623Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "string": "2026-01-01T00:00:09.123Z"
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "string": "Could not read \"notes.txt\" (EACCES)"
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "update",
+            "id": {
+              "number": "3"
+            },
+            "updates": {
+              "object": [
+                [
+                  "reference",
+                  {
+                    "array": [
+                      {
+                        "string": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                      }
+                    ]
+                  }
+                ]
+              ]
+            }
+          },
+          "reference": {
+            "call": "updateEntry",
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "3"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "file"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": "notes.txt"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "completed"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "string": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "number": "Infinity"
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "freedom://publish"
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "number": "1.5"
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:02.623Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "string": "2026-01-01T00:00:09.123Z"
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "string": "Could not read \"notes.txt\" (EACCES)"
+                  }
+                ]
+              ]
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "object": [
+                [
+                  "id",
+                  {
+                    "number": "3"
+                  }
+                ],
+                [
+                  "type",
+                  {
+                    "string": "file"
+                  }
+                ],
+                [
+                  "name",
+                  {
+                    "string": "notes.txt"
+                  }
+                ],
+                [
+                  "status",
+                  {
+                    "string": "completed"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "string": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                  }
+                ],
+                [
+                  "bzzUrl",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "tagUid",
+                  {
+                    "number": "Infinity"
+                  }
+                ],
+                [
+                  "batchIdUsed",
+                  {
+                    "null": true
+                  }
+                ],
+                [
+                  "origin",
+                  {
+                    "string": "freedom://publish"
+                  }
+                ],
+                [
+                  "bytesSize",
+                  {
+                    "number": "1.5"
+                  }
+                ],
+                [
+                  "timestamp",
+                  {
+                    "string": "2026-01-01T00:00:02.623Z"
+                  }
+                ],
+                [
+                  "completedAt",
+                  {
+                    "string": "2026-01-01T00:00:09.123Z"
+                  }
+                ],
+                [
+                  "errorMessage",
+                  {
+                    "string": "Could not read \"notes.txt\" (EACCES)"
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "add",
+            "entry": {
+              "null": true
+            }
+          },
+          "reference": {
+            "call": "addEntry",
+            "error": {
+              "name": "TypeError",
+              "message": "Cannot read properties of null (reading 'status')"
+            }
+          },
+          "answer": {
+            "error_typed": {
+              "object": [
+                [
+                  "name",
+                  {
+                    "string": "TypeError"
+                  }
+                ],
+                [
+                  "message",
+                  {
+                    "string": "Cannot read properties of null (reading 'status')"
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "update",
+            "id": {
+              "number": "2"
+            },
+            "updates": {
+              "null": true
+            }
+          },
+          "reference": {
+            "call": "updateEntry",
+            "error": {
+              "name": "TypeError",
+              "message": "Cannot read properties of null (reading 'status')"
+            }
+          },
+          "answer": {
+            "error_typed": {
+              "object": [
+                [
+                  "name",
+                  {
+                    "string": "TypeError"
+                  }
+                ],
+                [
+                  "message",
+                  {
+                    "string": "Cannot read properties of null (reading 'status')"
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "add",
+            "entry": {
+              "object": [
+                [
+                  "name",
+                  {
+                    "boolean": true
+                  }
+                ]
+              ]
+            }
+          },
+          "reference": {
+            "call": "addEntry",
+            "error": {
+              "name": "TypeError",
+              "message": "SQLite3 can only bind numbers, strings, bigints, buffers, and null"
+            }
+          },
+          "answer": {
+            "error_typed": {
+              "object": [
+                [
+                  "name",
+                  {
+                    "string": "TypeError"
+                  }
+                ],
+                [
+                  "message",
+                  {
+                    "string": "SQLite3 can only bind numbers, strings, bigints, buffers, and null"
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "add",
+            "entry": {
+              "object": [
+                [
+                  "type",
+                  {
+                    "array": [
+                      {
+                        "string": "data"
+                      },
+                      {
+                        "string": "file"
+                      }
+                    ]
+                  }
+                ]
+              ]
+            }
+          },
+          "reference": {
+            "call": "addEntry",
+            "error": {
+              "name": "RangeError",
+              "message": "Too many parameter values were provided"
+            }
+          },
+          "answer": {
+            "error_typed": {
+              "object": [
+                [
+                  "name",
+                  {
+                    "string": "RangeError"
+                  }
+                ],
+                [
+                  "message",
+                  {
+                    "string": "Too many parameter values were provided"
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "shell",
+          "params": {
+            "op": "update",
+            "id": {
+              "number": "2"
+            },
+            "updates": {
+              "object": [
+                [
+                  "bzzUrl",
+                  {
+                    "object": [
+                      [
+                        "a",
+                        {
+                          "number": "1"
+                        }
+                      ]
+                    ]
+                  }
+                ]
+              ]
+            }
+          },
+          "reference": {
+            "call": "updateEntry",
+            "error": {
+              "name": "RangeError",
+              "message": "Too few parameter values were provided"
+            }
+          },
+          "answer": {
+            "error_typed": {
+              "object": [
+                [
+                  "name",
+                  {
+                    "string": "RangeError"
+                  }
+                ],
+                [
+                  "message",
+                  {
+                    "string": "Too few parameter values were provided"
+                  }
+                ]
+              ]
+            }
+          }
+        },
+        {
+          "caller": "chrome",
+          "params": {
+            "op": "list"
+          },
+          "reference": {
+            "call": "getEntries",
+            "result_typed": {
+              "array": [
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "5"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "file"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "string": "report.txt"
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "failed"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "string": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "string": "bzz://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "string": "freedom://agent"
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "null": true
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "6"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "data"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "string": "Text"
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "failed"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "string": "freedom://agent"
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "string": "no usable stamp"
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "7"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "data"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "uploading"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "null": true
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "8"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "data"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "uploading"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "null": true
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "9"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "data"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "uploading"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "number": "0"
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "number": "0"
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "null": true
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "10"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "chunk"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "completed"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "string": "https://app.example"
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "null": true
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "11"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "data"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "uploading"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "null": true
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "4"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "directory"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "string": "site (private draft link)"
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "completed"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "string": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "string": "bzz://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "number": "7"
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "string": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "string": "freedom://agent"
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "number": "4096"
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:03.123Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "null": true
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "3"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "file"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "string": "notes.txt"
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "completed"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "string": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "number": "Infinity"
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "string": "freedom://publish"
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "number": "1.5"
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:02.623Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "string": "Could not read \"notes.txt\" (EACCES)"
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "1"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "data"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "string": "Text"
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "completed"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "string": "abababababababababababababababababababababababababababababababab"
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "string": "bzz://abababababababababababababababababababababababababababababababab"
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "number": "100"
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "string": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "string": "freedom://publish"
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "number": "4"
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:00.123Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "string": "2026-01-01T00:00:00.123Z"
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "null": true
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "2"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "data"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "string": "Text"
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "completed"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "string": "abababababababababababababababababababababababababababababababab"
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "string": "bzz://abababababababababababababababababababababababababababababababab"
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "number": "101"
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "string": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "string": "freedom://publish"
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "number": "5"
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:00.123Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "string": "2026-01-01T00:00:02.623Z"
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "string": "later"
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          },
+          "handler": {
+            "channel": "swarm:get-publish-history",
+            "answer_typed": {
+              "object": [
+                [
+                  "success",
+                  {
+                    "boolean": true
+                  }
+                ],
+                [
+                  "entries",
+                  {
+                    "array": [
+                      {
+                        "object": [
+                          [
+                            "id",
+                            {
+                              "number": "5"
+                            }
+                          ],
+                          [
+                            "type",
+                            {
+                              "string": "file"
+                            }
+                          ],
+                          [
+                            "name",
+                            {
+                              "string": "report.txt"
+                            }
+                          ],
+                          [
+                            "status",
+                            {
+                              "string": "failed"
+                            }
+                          ],
+                          [
+                            "reference",
+                            {
+                              "string": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                            }
+                          ],
+                          [
+                            "bzzUrl",
+                            {
+                              "string": "bzz://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                            }
+                          ],
+                          [
+                            "tagUid",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "batchIdUsed",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "origin",
+                            {
+                              "string": "freedom://agent"
+                            }
+                          ],
+                          [
+                            "bytesSize",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "timestamp",
+                            {
+                              "string": "2026-01-01T00:00:09.123Z"
+                            }
+                          ],
+                          [
+                            "completedAt",
+                            {
+                              "string": "2026-01-01T00:00:09.123Z"
+                            }
+                          ],
+                          [
+                            "errorMessage",
+                            {
+                              "null": true
+                            }
+                          ]
+                        ]
+                      },
+                      {
+                        "object": [
+                          [
+                            "id",
+                            {
+                              "number": "6"
+                            }
+                          ],
+                          [
+                            "type",
+                            {
+                              "string": "data"
+                            }
+                          ],
+                          [
+                            "name",
+                            {
+                              "string": "Text"
+                            }
+                          ],
+                          [
+                            "status",
+                            {
+                              "string": "failed"
+                            }
+                          ],
+                          [
+                            "reference",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "bzzUrl",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "tagUid",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "batchIdUsed",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "origin",
+                            {
+                              "string": "freedom://agent"
+                            }
+                          ],
+                          [
+                            "bytesSize",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "timestamp",
+                            {
+                              "string": "2026-01-01T00:00:09.123Z"
+                            }
+                          ],
+                          [
+                            "completedAt",
+                            {
+                              "string": "2026-01-01T00:00:09.123Z"
+                            }
+                          ],
+                          [
+                            "errorMessage",
+                            {
+                              "string": "no usable stamp"
+                            }
+                          ]
+                        ]
+                      },
+                      {
+                        "object": [
+                          [
+                            "id",
+                            {
+                              "number": "7"
+                            }
+                          ],
+                          [
+                            "type",
+                            {
+                              "string": "data"
+                            }
+                          ],
+                          [
+                            "name",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "status",
+                            {
+                              "string": "uploading"
+                            }
+                          ],
+                          [
+                            "reference",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "bzzUrl",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "tagUid",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "batchIdUsed",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "origin",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "bytesSize",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "timestamp",
+                            {
+                              "string": "2026-01-01T00:00:09.123Z"
+                            }
+                          ],
+                          [
+                            "completedAt",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "errorMessage",
+                            {
+                              "null": true
+                            }
+                          ]
+                        ]
+                      },
+                      {
+                        "object": [
+                          [
+                            "id",
+                            {
+                              "number": "8"
+                            }
+                          ],
+                          [
+                            "type",
+                            {
+                              "string": "data"
+                            }
+                          ],
+                          [
+                            "name",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "status",
+                            {
+                              "string": "uploading"
+                            }
+                          ],
+                          [
+                            "reference",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "bzzUrl",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "tagUid",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "batchIdUsed",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "origin",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "bytesSize",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "timestamp",
+                            {
+                              "string": "2026-01-01T00:00:09.123Z"
+                            }
+                          ],
+                          [
+                            "completedAt",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "errorMessage",
+                            {
+                              "null": true
+                            }
+                          ]
+                        ]
+                      },
+                      {
+                        "object": [
+                          [
+                            "id",
+                            {
+                              "number": "9"
+                            }
+                          ],
+                          [
+                            "type",
+                            {
+                              "string": "data"
+                            }
+                          ],
+                          [
+                            "name",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "status",
+                            {
+                              "string": "uploading"
+                            }
+                          ],
+                          [
+                            "reference",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "bzzUrl",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "tagUid",
+                            {
+                              "number": "0"
+                            }
+                          ],
+                          [
+                            "batchIdUsed",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "origin",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "bytesSize",
+                            {
+                              "number": "0"
+                            }
+                          ],
+                          [
+                            "timestamp",
+                            {
+                              "string": "2026-01-01T00:00:09.123Z"
+                            }
+                          ],
+                          [
+                            "completedAt",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "errorMessage",
+                            {
+                              "null": true
+                            }
+                          ]
+                        ]
+                      },
+                      {
+                        "object": [
+                          [
+                            "id",
+                            {
+                              "number": "10"
+                            }
+                          ],
+                          [
+                            "type",
+                            {
+                              "string": "chunk"
+                            }
+                          ],
+                          [
+                            "name",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "status",
+                            {
+                              "string": "completed"
+                            }
+                          ],
+                          [
+                            "reference",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "bzzUrl",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "tagUid",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "batchIdUsed",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "origin",
+                            {
+                              "string": "https://app.example"
+                            }
+                          ],
+                          [
+                            "bytesSize",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "timestamp",
+                            {
+                              "string": "2026-01-01T00:00:09.123Z"
+                            }
+                          ],
+                          [
+                            "completedAt",
+                            {
+                              "string": "2026-01-01T00:00:09.123Z"
+                            }
+                          ],
+                          [
+                            "errorMessage",
+                            {
+                              "null": true
+                            }
+                          ]
+                        ]
+                      },
+                      {
+                        "object": [
+                          [
+                            "id",
+                            {
+                              "number": "11"
+                            }
+                          ],
+                          [
+                            "type",
+                            {
+                              "string": "data"
+                            }
+                          ],
+                          [
+                            "name",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "status",
+                            {
+                              "string": "uploading"
+                            }
+                          ],
+                          [
+                            "reference",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "bzzUrl",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "tagUid",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "batchIdUsed",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "origin",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "bytesSize",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "timestamp",
+                            {
+                              "string": "2026-01-01T00:00:09.123Z"
+                            }
+                          ],
+                          [
+                            "completedAt",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "errorMessage",
+                            {
+                              "null": true
+                            }
+                          ]
+                        ]
+                      },
+                      {
+                        "object": [
+                          [
+                            "id",
+                            {
+                              "number": "4"
+                            }
+                          ],
+                          [
+                            "type",
+                            {
+                              "string": "directory"
+                            }
+                          ],
+                          [
+                            "name",
+                            {
+                              "string": "site (private draft link)"
+                            }
+                          ],
+                          [
+                            "status",
+                            {
+                              "string": "completed"
+                            }
+                          ],
+                          [
+                            "reference",
+                            {
+                              "string": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                            }
+                          ],
+                          [
+                            "bzzUrl",
+                            {
+                              "string": "bzz://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                            }
+                          ],
+                          [
+                            "tagUid",
+                            {
+                              "number": "7"
+                            }
+                          ],
+                          [
+                            "batchIdUsed",
+                            {
+                              "string": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+                            }
+                          ],
+                          [
+                            "origin",
+                            {
+                              "string": "freedom://agent"
+                            }
+                          ],
+                          [
+                            "bytesSize",
+                            {
+                              "number": "4096"
+                            }
+                          ],
+                          [
+                            "timestamp",
+                            {
+                              "string": "2026-01-01T00:00:03.123Z"
+                            }
+                          ],
+                          [
+                            "completedAt",
+                            {
+                              "string": "2026-01-01T00:00:09.123Z"
+                            }
+                          ],
+                          [
+                            "errorMessage",
+                            {
+                              "null": true
+                            }
+                          ]
+                        ]
+                      },
+                      {
+                        "object": [
+                          [
+                            "id",
+                            {
+                              "number": "3"
+                            }
+                          ],
+                          [
+                            "type",
+                            {
+                              "string": "file"
+                            }
+                          ],
+                          [
+                            "name",
+                            {
+                              "string": "notes.txt"
+                            }
+                          ],
+                          [
+                            "status",
+                            {
+                              "string": "completed"
+                            }
+                          ],
+                          [
+                            "reference",
+                            {
+                              "string": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                            }
+                          ],
+                          [
+                            "bzzUrl",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "tagUid",
+                            {
+                              "number": "Infinity"
+                            }
+                          ],
+                          [
+                            "batchIdUsed",
+                            {
+                              "null": true
+                            }
+                          ],
+                          [
+                            "origin",
+                            {
+                              "string": "freedom://publish"
+                            }
+                          ],
+                          [
+                            "bytesSize",
+                            {
+                              "number": "1.5"
+                            }
+                          ],
+                          [
+                            "timestamp",
+                            {
+                              "string": "2026-01-01T00:00:02.623Z"
+                            }
+                          ],
+                          [
+                            "completedAt",
+                            {
+                              "string": "2026-01-01T00:00:09.123Z"
+                            }
+                          ],
+                          [
+                            "errorMessage",
+                            {
+                              "string": "Could not read \"notes.txt\" (EACCES)"
+                            }
+                          ]
+                        ]
+                      },
+                      {
+                        "object": [
+                          [
+                            "id",
+                            {
+                              "number": "1"
+                            }
+                          ],
+                          [
+                            "type",
+                            {
+                              "string": "data"
+                            }
+                          ],
+                          [
+                            "name",
+                            {
+                              "string": "Text"
+                            }
+                          ],
+                          [
+                            "status",
+                            {
+                              "string": "completed"
+                            }
+                          ],
+                          [
+                            "reference",
+                            {
+                              "string": "abababababababababababababababababababababababababababababababab"
+                            }
+                          ],
+                          [
+                            "bzzUrl",
+                            {
+                              "string": "bzz://abababababababababababababababababababababababababababababababab"
+                            }
+                          ],
+                          [
+                            "tagUid",
+                            {
+                              "number": "100"
+                            }
+                          ],
+                          [
+                            "batchIdUsed",
+                            {
+                              "string": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+                            }
+                          ],
+                          [
+                            "origin",
+                            {
+                              "string": "freedom://publish"
+                            }
+                          ],
+                          [
+                            "bytesSize",
+                            {
+                              "number": "4"
+                            }
+                          ],
+                          [
+                            "timestamp",
+                            {
+                              "string": "2026-01-01T00:00:00.123Z"
+                            }
+                          ],
+                          [
+                            "completedAt",
+                            {
+                              "string": "2026-01-01T00:00:00.123Z"
+                            }
+                          ],
+                          [
+                            "errorMessage",
+                            {
+                              "null": true
+                            }
+                          ]
+                        ]
+                      },
+                      {
+                        "object": [
+                          [
+                            "id",
+                            {
+                              "number": "2"
+                            }
+                          ],
+                          [
+                            "type",
+                            {
+                              "string": "data"
+                            }
+                          ],
+                          [
+                            "name",
+                            {
+                              "string": "Text"
+                            }
+                          ],
+                          [
+                            "status",
+                            {
+                              "string": "completed"
+                            }
+                          ],
+                          [
+                            "reference",
+                            {
+                              "string": "abababababababababababababababababababababababababababababababab"
+                            }
+                          ],
+                          [
+                            "bzzUrl",
+                            {
+                              "string": "bzz://abababababababababababababababababababababababababababababababab"
+                            }
+                          ],
+                          [
+                            "tagUid",
+                            {
+                              "number": "101"
+                            }
+                          ],
+                          [
+                            "batchIdUsed",
+                            {
+                              "string": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+                            }
+                          ],
+                          [
+                            "origin",
+                            {
+                              "string": "freedom://publish"
+                            }
+                          ],
+                          [
+                            "bytesSize",
+                            {
+                              "number": "5"
+                            }
+                          ],
+                          [
+                            "timestamp",
+                            {
+                              "string": "2026-01-01T00:00:00.123Z"
+                            }
+                          ],
+                          [
+                            "completedAt",
+                            {
+                              "string": "2026-01-01T00:00:02.623Z"
+                            }
+                          ],
+                          [
+                            "errorMessage",
+                            {
+                              "string": "later"
+                            }
+                          ]
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              ]
+            }
+          },
+          "answer": {
+            "result_typed": {
+              "array": [
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "5"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "file"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "string": "report.txt"
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "failed"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "string": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "string": "bzz://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "string": "freedom://agent"
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "null": true
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "6"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "data"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "string": "Text"
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "failed"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "string": "freedom://agent"
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "string": "no usable stamp"
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "7"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "data"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "uploading"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "null": true
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "8"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "data"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "uploading"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "null": true
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "9"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "data"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "uploading"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "number": "0"
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "number": "0"
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "null": true
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "10"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "chunk"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "completed"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "string": "https://app.example"
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "null": true
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "11"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "data"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "uploading"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "null": true
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "4"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "directory"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "string": "site (private draft link)"
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "completed"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "string": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "string": "bzz://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "number": "7"
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "string": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "string": "freedom://agent"
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "number": "4096"
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:03.123Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "null": true
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "3"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "file"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "string": "notes.txt"
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "completed"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "string": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "number": "Infinity"
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "null": true
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "string": "freedom://publish"
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "number": "1.5"
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:02.623Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "string": "2026-01-01T00:00:09.123Z"
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "string": "Could not read \"notes.txt\" (EACCES)"
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "1"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "data"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "string": "Text"
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "completed"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "string": "abababababababababababababababababababababababababababababababab"
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "string": "bzz://abababababababababababababababababababababababababababababababab"
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "number": "100"
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "string": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "string": "freedom://publish"
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "number": "4"
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:00.123Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "string": "2026-01-01T00:00:00.123Z"
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "null": true
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "object": [
+                    [
+                      "id",
+                      {
+                        "number": "2"
+                      }
+                    ],
+                    [
+                      "type",
+                      {
+                        "string": "data"
+                      }
+                    ],
+                    [
+                      "name",
+                      {
+                        "string": "Text"
+                      }
+                    ],
+                    [
+                      "status",
+                      {
+                        "string": "completed"
+                      }
+                    ],
+                    [
+                      "reference",
+                      {
+                        "string": "abababababababababababababababababababababababababababababababab"
+                      }
+                    ],
+                    [
+                      "bzzUrl",
+                      {
+                        "string": "bzz://abababababababababababababababababababababababababababababababab"
+                      }
+                    ],
+                    [
+                      "tagUid",
+                      {
+                        "number": "101"
+                      }
+                    ],
+                    [
+                      "batchIdUsed",
+                      {
+                        "string": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+                      }
+                    ],
+                    [
+                      "origin",
+                      {
+                        "string": "freedom://publish"
+                      }
+                    ],
+                    [
+                      "bytesSize",
+                      {
+                        "number": "5"
+                      }
+                    ],
+                    [
+                      "timestamp",
+                      {
+                        "string": "2026-01-01T00:00:00.123Z"
+                      }
+                    ],
+                    [
+                      "completedAt",
+                      {
+                        "string": "2026-01-01T00:00:02.623Z"
+                      }
+                    ],
+                    [
+                      "errorMessage",
+                      {
+                        "string": "later"
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "after": {
+        "feeds": null,
+        "manifests": null,
+        "grants": {},
+        "history": [
+          {
+            "id": 1,
+            "type": "data",
+            "name": "Text",
+            "status": "completed",
+            "reference": "abababababababababababababababababababababababababababababababab",
+            "bzz_url": "bzz://abababababababababababababababababababababababababababababababab",
+            "tag_uid": 100,
+            "batch_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "origin": "freedom://publish",
+            "bytes_size": 4,
+            "started_at": 1767225600123,
+            "completed_at": 1767225600123,
+            "error_message": null
+          },
+          {
+            "id": 2,
+            "type": "data",
+            "name": "Text",
+            "status": "completed",
+            "reference": "abababababababababababababababababababababababababababababababab",
+            "bzz_url": "bzz://abababababababababababababababababababababababababababababababab",
+            "tag_uid": 101,
+            "batch_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "origin": "freedom://publish",
+            "bytes_size": 5,
+            "started_at": 1767225600123,
+            "completed_at": 1767225602623,
+            "error_message": "later"
+          },
+          {
+            "id": 3,
+            "type": "file",
+            "name": "notes.txt",
+            "status": "completed",
+            "reference": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "bzz_url": null,
+            "tag_uid": null,
+            "batch_id": null,
+            "origin": "freedom://publish",
+            "bytes_size": 1.5,
+            "started_at": 1767225602623,
+            "completed_at": 1767225609123,
+            "error_message": "Could not read \"notes.txt\" (EACCES)"
+          },
+          {
+            "id": 4,
+            "type": "directory",
+            "name": "site (private draft link)",
+            "status": "completed",
+            "reference": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "bzz_url": "bzz://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "tag_uid": 7,
+            "batch_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "origin": "freedom://agent",
+            "bytes_size": 4096,
+            "started_at": 1767225603123,
+            "completed_at": 1767225609123,
+            "error_message": null
+          },
+          {
+            "id": 5,
+            "type": "file",
+            "name": "report.txt",
+            "status": "failed",
+            "reference": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "bzz_url": "bzz://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "tag_uid": null,
+            "batch_id": null,
+            "origin": "freedom://agent",
+            "bytes_size": null,
+            "started_at": 1767225609123,
+            "completed_at": 1767225609123,
+            "error_message": null
+          },
+          {
+            "id": 6,
+            "type": "data",
+            "name": "Text",
+            "status": "failed",
+            "reference": null,
+            "bzz_url": null,
+            "tag_uid": null,
+            "batch_id": null,
+            "origin": "freedom://agent",
+            "bytes_size": null,
+            "started_at": 1767225609123,
+            "completed_at": 1767225609123,
+            "error_message": "no usable stamp"
+          },
+          {
+            "id": 7,
+            "type": "data",
+            "name": null,
+            "status": "uploading",
+            "reference": null,
+            "bzz_url": null,
+            "tag_uid": null,
+            "batch_id": null,
+            "origin": null,
+            "bytes_size": null,
+            "started_at": 1767225609123,
+            "completed_at": null,
+            "error_message": null
+          },
+          {
+            "id": 8,
+            "type": "data",
+            "name": null,
+            "status": "uploading",
+            "reference": null,
+            "bzz_url": null,
+            "tag_uid": null,
+            "batch_id": null,
+            "origin": null,
+            "bytes_size": null,
+            "started_at": 1767225609123,
+            "completed_at": null,
+            "error_message": null
+          },
+          {
+            "id": 9,
+            "type": "data",
+            "name": null,
+            "status": "uploading",
+            "reference": null,
+            "bzz_url": null,
+            "tag_uid": 0,
+            "batch_id": null,
+            "origin": null,
+            "bytes_size": 0,
+            "started_at": 1767225609123,
+            "completed_at": null,
+            "error_message": null
+          },
+          {
+            "id": 10,
+            "type": "chunk",
+            "name": null,
+            "status": "completed",
+            "reference": null,
+            "bzz_url": null,
+            "tag_uid": null,
+            "batch_id": null,
+            "origin": "https://app.example",
+            "bytes_size": null,
+            "started_at": 1767225609123,
+            "completed_at": 1767225609123,
+            "error_message": null
+          },
+          {
+            "id": 11,
+            "type": "data",
+            "name": null,
+            "status": "uploading",
+            "reference": null,
+            "bzz_url": null,
+            "tag_uid": null,
+            "batch_id": null,
+            "origin": null,
+            "bytes_size": null,
+            "started_at": 1767225609123,
+            "completed_at": null,
+            "error_message": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "history-update-blob",
+      "method": "swarm.history",
+      "deviation": "history-blobs",
+      "world": {
+        "feeds": null,
+        "manifests": null,
+        "grants": {},
+        "vault": "unlocked",
+        "clock": 1767225600123,
+        "history": [
+          {
+            "id": 1,
+            "type": "data",
+            "name": "a",
+            "status": "uploading",
+            "reference": null,
+            "bzz_url": null,
+            "tag_uid": null,
+            "batch_id": null,
+            "origin": "freedom://agent",
+            "bytes_size": null,
+            "started_at": {
+              "blob": "61"
+            },
+            "completed_at": null,
+            "error_message": null
+          }
+        ]
+      },
+      "steps": [
+        {
+          "caller": "shell",
+          "params": {
+            "op": "update",
+            "id": {
+              "number": "1"
+            },
+            "updates": {
+              "object": [
+                [
+                  "status",
+                  {
+                    "string": "completed"
+                  }
+                ],
+                [
+                  "reference",
+                  {
+                    "string": "abababababababababababababababababababababababababababababababab"
+                  }
+                ]
+              ]
+            }
+          },
+          "reference": {
+            "call": "updateEntry",
+            "error": {
+              "name": "RangeError",
+              "message": "Invalid time value"
+            }
+          },
+          "answer": {
+            "error_typed": {
+              "object": [
+                [
+                  "name",
+                  {
+                    "string": "RangeError"
+                  }
+                ],
+                [
+                  "message",
+                  {
+                    "string": "Invalid time value"
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      ],
+      "core": {
+        "answers": [
+          {
+            "error_typed": {
+              "object": [
+                [
+                  "name",
+                  {
+                    "string": "Error"
+                  }
+                ],
+                [
+                  "message",
+                  {
+                    "string": "publish-history.sqlite holds a BLOB in column started_at"
+                  }
+                ],
+                [
+                  "code",
+                  {
+                    "string": "history_blob"
+                  }
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      "after": {
+        "feeds": null,
+        "manifests": null,
+        "grants": {},
+        "history": [
+          {
+            "id": 1,
+            "type": "data",
+            "name": "a",
+            "status": "completed",
+            "reference": "abababababababababababababababababababababababababababababababab",
+            "bzz_url": null,
+            "tag_uid": null,
+            "batch_id": null,
+            "origin": "freedom://agent",
             "bytes_size": null,
             "started_at": {
               "blob": "61"

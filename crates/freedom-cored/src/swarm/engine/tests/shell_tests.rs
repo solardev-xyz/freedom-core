@@ -454,6 +454,20 @@ fn the_ops_door() {
         )
         .unwrap();
     assert_eq!(error_of(io.answer_of(3)).code, ErrorCode::Forbidden);
+    // `swarm.history`'s `add` is main's alone too: nothing written.
+    let statements = io.statements.len();
+    engine
+        .op(
+            &mut io,
+            0,
+            40,
+            ops::HISTORY,
+            Some(r#"{"op":"add","entry":{"object":[]}}"#),
+            ops::Caller::Chrome,
+        )
+        .unwrap();
+    assert_eq!(error_of(io.answer_of(40)).code, ErrorCode::Forbidden);
+    assert_eq!(io.statements.len(), statements);
     engine
         .op(
             &mut io,

@@ -13,7 +13,8 @@
 //! another typed shape, or a site key that isn't a string is
 //! [`Refused::Invalid`] (`invalid_argument`); a typed value no store holds
 //! (a BigInt, bytes, an array with a hole) is too. An op only main makes,
-//! called by the chrome, is [`Refused::Forbidden`].
+//! called by the chrome, is [`Refused::Forbidden`] on its name alone: `op`
+//! is read first, and no other member is decoded.
 //!
 //! **Running an op.** The swarm thread makes an [`Op`] for each call and
 //! moves it with its [`Stores`] in hand: [`Op::start`], then each answer
@@ -64,7 +65,9 @@ pub const MANIFEST: &str = "swarm.manifest";
 pub const STORE_FULL: &str = "store_full";
 
 /// Who calls (design 0015's rows, D5): `swarm.identities` and
-/// `swarm.history` are the chrome's and main's, `swarm.manifest` main's.
+/// `swarm.history` are the chrome's and main's, `swarm.manifest` main's;
+/// some ops of the first two are main's alone (D7; `swarm.history`'s `add`
+/// and `update`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Caller {
     Chrome,
@@ -92,11 +95,20 @@ pub enum Call {
 }
 
 impl Call {
-    /// Reads `params` of `method` for `caller`.
+    /// Reads `params` of `method` for `caller`: `op` first, then, unless
+    /// it names an op only main makes and the chrome calls it (refused on
+    /// the name alone, before any other member is decoded), the op's
+    /// members.
     pub fn parse(method: &str, params: &JsValue, caller: Caller) -> Result<Call, Refused> {
-        let (op, members) = Members::read(params)?;
+        let (op, props) = Members::op(params)?;
+        if caller == Caller::Chrome
+            && let Some(name) = main_op(method, &op)
+        {
+            return Err(Refused::Forbidden(name));
+        }
+        let members = Members::read(props)?;
         match method {
-            IDENTITIES => identities::Op::parse(op, members, caller).map(Call::Identities),
+            IDENTITIES => identities::Op::parse(op, members).map(Call::Identities),
             HISTORY => history::Op::parse(op, members).map(Call::History),
             MANIFEST => manifest::Op::parse(op, members).map(Call::Manifest),
             _ => Err(Refused::Invalid(format!("no store op for {method}"))),
@@ -160,6 +172,8 @@ pub trait Io {
     fn query(&mut self, statement: &Statement) -> Result<Vec<Row>, JsString>;
     /// A statement run: the rows it changed.
     fn run(&mut self, statement: &Statement) -> Result<usize, JsString>;
+    /// One `INSERT` run: the new row's rowid (`swarm.history`'s `add`).
+    fn insert(&mut self, statement: &Statement) -> Result<i64, JsString>;
 }
 
 /// What an op runs against: the swarm thread's stores, at `now_ms`
@@ -311,7 +325,7 @@ impl Op {
         };
         let step = match &mut self.run {
             Run::Identities(run) => run.start(&mut cx, stores),
-            Run::History(op) => Step::Done(op.run(stores.io)),
+            Run::History(op) => Step::Done(op.run(stores.now_ms, stores.io)),
             Run::Manifest(run) => run.start(&mut cx, stores),
         };
         self.settle(step)
@@ -439,6 +453,21 @@ pub(crate) fn change_thrown(error: ChangeError) -> Thrown {
 
 // --- the wire form ---------------------------------------------------------------
 
+/// `op` of `method` if only main makes it (D7: `swarm.identities`' prompt
+/// ops and `getEthereumWalletIdentityReferences`, `swarm.history`'s `add`
+/// and `update`), as [`Refused::Forbidden`] names it.
+fn main_op(method: &str, op: &str) -> Option<&'static str> {
+    let ops: &[&'static str] = match method {
+        IDENTITIES => &identities::MAIN_OPS,
+        HISTORY => &history::MAIN_OPS,
+        _ => &[],
+    };
+    ops.iter().copied().find(|name| *name == op)
+}
+
+/// `params`' properties, as JSON gives them.
+type Props = [(JsString, JsValue)];
+
 /// An op's members, each read from the typed form.
 #[derive(Debug)]
 pub(crate) struct Members {
@@ -446,27 +475,36 @@ pub(crate) struct Members {
 }
 
 impl Members {
-    /// `params`: an object with `op` a string, and typed members.
-    fn read(params: &JsValue) -> Result<(String, Members), Refused> {
+    /// `params`' `op`, which must be an object's string member, and its
+    /// properties, none of the others decoded yet.
+    fn op(params: &JsValue) -> Result<(String, &Props), Refused> {
         let JsValue::Object(props) = params else {
             return Err(invalid("params must be an object"));
         };
         let mut op = None;
-        let mut members = Vec::with_capacity(props.len());
         for (name, value) in props {
             if name == "op" {
                 match value {
                     JsValue::String(s) if s.is_well_formed() => op = Some(s.as_str().to_owned()),
                     _ => return Err(invalid("op must be a string")),
                 }
-            } else {
+            }
+        }
+        let op = op.ok_or_else(|| invalid("op is missing"))?;
+        Ok((op, props))
+    }
+
+    /// Every property but `op`, each read from the typed form.
+    fn read(props: &Props) -> Result<Members, Refused> {
+        let mut members = Vec::with_capacity(props.len());
+        for (name, value) in props {
+            if name != "op" {
                 let typed = Value::from_typed(value)
                     .map_err(|e| invalid(format!("{}: {e}", name.as_str())))?;
                 members.push((name.clone(), typed));
             }
         }
-        let op = op.ok_or_else(|| invalid("op is missing"))?;
-        Ok((op, Members { members }))
+        Ok(Members { members })
     }
 
     /// Refuses any member `allowed` doesn't name.
@@ -603,6 +641,36 @@ mod tests {
             )
             .is_ok()
         );
+        // ...refused on its name alone: no other member is decoded first,
+        // so a malformed one, before `op` or after it, is still
+        // `forbidden` from the chrome and `invalid_argument` from main.
+        for (method, text, name) in [
+            (HISTORY, r#"{"op":"add","entry":{}}"#, "add"),
+            (HISTORY, r#"{"entry":"raw","op":"add"}"#, "add"),
+            (HISTORY, r#"{"op":"add","entry":{"bigint":"x"}}"#, "add"),
+            (HISTORY, r#"{"op":"update","id":1,"updates":{}}"#, "update"),
+            (HISTORY, r#"{"updates":[],"op":"update"}"#, "update"),
+            (
+                IDENTITIES,
+                r#"{"key":"a","op":"grantFeedAccess"}"#,
+                "grantFeedAccess",
+            ),
+        ] {
+            assert_eq!(
+                refused(method, text, Caller::Chrome),
+                Refused::Forbidden(name),
+                "{text}"
+            );
+            assert!(
+                matches!(refused(method, text, Caller::Shell), Refused::Invalid(_)),
+                "{text}"
+            );
+        }
+        // The chrome's own ops still have their members read.
+        assert!(matches!(
+            refused(HISTORY, r#"{"op":"remove","id":5}"#, Caller::Chrome),
+            Refused::Invalid(_)
+        ));
         // History's remove needs its id; list takes none.
         assert!(matches!(
             refused(

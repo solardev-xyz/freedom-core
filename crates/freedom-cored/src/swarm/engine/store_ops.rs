@@ -18,7 +18,8 @@
 //! - **The stores** are the thread's own, synchronous: the feed store
 //!   through SW-1's keeper, the manifest store with its files
 //!   ([`Io::save_manifests`]), the history's statements
-//!   ([`Io::history_rows`], [`Io::history_run`]), and the Swarm grants
+//!   ([`Io::history_rows`], [`Io::history_run`], and for `add`'s insert
+//!   [`Io::history_insert`]), and the Swarm grants
 //!   through the shared handle and its writer ([`GrantsWriter`], D2). A
 //!   projection that widened or narrowed a site's grant sends
 //!   `approval.changed` after the op's answer ([`Io::changed`]).
@@ -993,6 +994,10 @@ impl<I: Io> ops::Io for OpIo<'_, I> {
 
     fn run(&mut self, statement: &Statement) -> Result<usize, JsString> {
         self.io.history_run(statement)
+    }
+
+    fn insert(&mut self, statement: &Statement) -> Result<i64, JsString> {
+        self.io.history_insert(statement)
     }
 }
 
