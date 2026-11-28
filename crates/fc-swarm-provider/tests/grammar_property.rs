@@ -2472,7 +2472,12 @@ const SHELL_NODE: &str = r#"{"node":{
 
 /// Main's params for one shell run, drawn from the seed: the row, the
 /// method, the params' JSON and the parts' bytes.
-fn shell_params(rng: &mut Rng) -> (&'static str, ShellMethod, String, BTreeMap<u32, Vec<u8>>) {
+/// `bee` is the vault's Bee wallet in `<o>`'s form, which `swarm.feed`
+/// names as the owner main showed (K2), now and then another one.
+fn shell_params(
+    rng: &mut Rng,
+    bee: &str,
+) -> (&'static str, ShellMethod, String, BTreeMap<u32, Vec<u8>>) {
     let opt = |rng: &mut Rng, percent: u64, text: String| {
         if rng.chance(percent) {
             text
@@ -2604,8 +2609,15 @@ fn shell_params(rng: &mut Rng) -> (&'static str, ShellMethod, String, BTreeMap<u
             if rng.chance(20) {
                 topic_hex = topic_hex.to_ascii_uppercase();
             }
+            // The owner main showed: the vault's, else another (refused
+            // before any call).
+            let owner = if rng.chance(10) {
+                "11".repeat(20)
+            } else {
+                bee.to_owned()
+            };
             let base = format!(
-                r#""key":{{"kind":"bee_wallet"}},"topic":"{topic_hex}"{}"#,
+                r#""key":{{"kind":"bee_wallet"}},"owner":"{owner}","topic":"{topic_hex}"{}"#,
                 batch(rng)
             );
             if rng.chance(30) {
@@ -2620,7 +2632,7 @@ fn shell_params(rng: &mut Rng) -> (&'static str, ShellMethod, String, BTreeMap<u
                     "swarm.feed:read",
                     ShellMethod::Feed,
                     format!(
-                        r#"{{"op":"read","key":{{"kind":"bee_wallet"}},"topic":"{topic_hex}"}}"#
+                        r#"{{"op":"read","key":{{"kind":"bee_wallet"}},"owner":"{owner}","topic":"{topic_hex}"}}"#
                     ),
                 )
             } else {
@@ -2672,6 +2684,7 @@ fn every_shell_call_matches_its_row() {
     let grammar = grammar_index.root();
     let keys_index = Index::new(&keys_text).unwrap();
     let keys = keys(&keys_index);
+    let bee = hex(&fc_evm::address_of(&keys.bee));
     let forms = forms(grammar);
     let node_index = Index::new(SHELL_NODE).unwrap();
     let mut contents = Contents::default();
@@ -2687,7 +2700,7 @@ fn every_shell_call_matches_its_row() {
             continue;
         }
         let mut rng = Rng::new(seed.wrapping_mul(0x5851_f42d_4c95_7f2d));
-        let (row, method, params, parts) = shell_params(&mut rng);
+        let (row, method, params, parts) = shell_params(&mut rng, &bee);
         let json = fc_json::parse(&params).unwrap();
         let call = ShellCall::parse(method, &json)
             .unwrap_or_else(|why| panic!("seed {seed}: {params}: {why}"));

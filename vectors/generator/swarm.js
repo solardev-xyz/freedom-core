@@ -118,6 +118,10 @@ function shippedAddons(root) {
 async function environment(checkout, keysJson) {
   const { beeJs, core, packages } = loadPackages(checkout);
   const keys = testKeys(keysJson);
+  // Another vault's Bee wallet (keys.json's abandon-24), the owner main
+  // showed before the vault was replaced: feed-owner's cases (core PR K2).
+  const otherBee = keysJson.vectors.find((v) => v.id === 'abandon-24')?.beeWallet;
+  assert.ok(otherBee, 'keys.json lacks abandon-24');
   const keyOf = (name) => {
     if (name === 'bee') return keys.bee;
     const [, index] = name.split(':');
@@ -133,7 +137,7 @@ async function environment(checkout, keysJson) {
   };
   const roots = new Map();
   const env = {
-    checkout, beeJs, core, packages, keys, keyOf, seeds, seeded, trees: new Map(), loadedElsewhere: [],
+    checkout, beeJs, core, packages, keys, keyOf, otherBee, seeds, seeded, trees: new Map(), loadedElsewhere: [],
     T0: cases.T0,
     ORIGIN: cases.ORIGIN,
     connected: (origin) => cases.connected(origin),
@@ -332,7 +336,7 @@ const DEVIATION_IDS = ['feed-entry-bound', 'tar-paths', 'feed-wrap-root', 'refer
   'index-probe', 'index-allocation', 'stamps-one-read', 'deadlines', 'busy', 'reply-bounds', 'reply-syntax', 'batch-depth', 'error-body-bound', 'session-transport',
   'transport-error-text', 'subscribe-proxy', 'history-bound', 'history-blobs', 'store-shapes', 'store-refusal', 'store-error-text', 'own-keys',
   'history-retry', 'legacy-dates', 'identity-references-bound', 'collation', 'owner-read-order', 'detach-timing', 'grant-check-order',
-  'picked-read-text', 'vault-soc-recheck', 'tag-owners-bound', 'store-writes'];
+  'picked-read-text', 'vault-soc-recheck', 'tag-owners-bound', 'store-writes', 'feed-owner'];
 
 function deviationsOf(swarm) {
   const where = Object.fromEntries(DEVIATION_IDS.map((id) => [id, []]));
@@ -445,8 +449,8 @@ const SWARM_FORMATS = {
     + 'concurrent, steps, core, after }. world: node (as `node` above), clock, vault, and for a store op feeds and manifests (the files\' text or '
     + 'null), grants, accounts (accounts.list\'s wallets), history (publish-history.sqlite\'s rows, each cell as stored, a BLOB as { blob: hex }). '
     + 'A step: caller (shell or chrome); params in the wire form, a node method\'s as main\'s JSON (swarm.publish { kind, parts: [{ path?, bytes, '
-    + 'base64 | part }], name?, content_type?, index_document?, encrypt?, batch?, pin, deferred, history? }, swarm.feed { op, key, topic, reference?, '
-    + 'min_index?, batch? }, swarm.stamps { id? }, swarm.upload_status { tag_uid }), a store op\'s as `op` (a string) and each member typed '
+    + 'base64 | part }], name?, content_type?, index_document?, encrypt?, batch?, pin, deferred, history? }, swarm.feed { op, key, owner (40 lowercase hex, '
+    + 'the Bee wallet\'s owner main showed: core PR K2), topic, reference?, min_index?, batch? }, swarm.stamps { id? }, swarm.upload_status { tag_uid }), a store op\'s as `op` (a string) and each member typed '
     + '(`typed` above); parts, part k\'s bytes main streams for a { part: k }; part_abort { part, error_code }, main ending a part its read failed on '
     + '(the errno\'s name); clock and vault, the world\'s change before the step; reference { call, args (typed; a path or signer the run makes is named '
     + 'in <…>), result | result_typed | error }, the reference\'s own call and its outcome (a batch as `stamps.mapped` writes it); handler { channel, '
@@ -462,7 +466,9 @@ const SWARM_FORMATS = {
     + 'the rows). A case marked deviation records the reference\'s outcome; `core` holds the core\'s: answers (each step\'s answer, in order), '
     + 'files (each step\'s files as it answers), history (the rows as the core leaves them, beside answers, for picked-read-text, whose '
     + 'core makes its upload call and main ends its body with the part\'s abort), or for index-probe the methods\' text (the lookup\'s '
-    + 'request is marked, and the core asks feed_head with the reply\'s swarm-feed-index headers).',
+    + 'request is marked, and the core asks feed_head with the reply\'s swarm-feed-index headers). feed-owner\'s cases name another vault\'s '
+    + 'Bee wallet (keys.json\'s abandon-24) as the owner main showed, the vault\'s being abandon-12\'s: the reference runs with its caller\'s '
+    + 'signer frozen at that owner (createSwarmSigner), and the core answers its refusal with no node request.',
 };
 
 module.exports = { buildSwarm, environment, loadPackages, BEE_JS, CORE_SDK };

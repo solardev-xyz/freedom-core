@@ -37,7 +37,8 @@ use fc_json::JsString;
 use fc_json::index::{Index, KeyOrder, Kind, Value as V};
 use fc_swarm_provider::machine::node::{BodyAbort, BodyOut, CHARGE_FLOOR, MAX_FRAME, WINDOW};
 use fc_swarm_provider::machine::shell::{
-    AskBound, Deadline, Shell, ShellCall, ShellError, ShellMethod, ShellOutcome, ask_bound,
+    AskBound, Deadline, HISTORY_INSERT, HISTORY_UPDATE, OWNER_CHANGED, OWNER_CHANGED_MESSAGE,
+    Shell, ShellCall, ShellError, ShellMethod, ShellOutcome, ask_bound,
 };
 use fc_swarm_provider::machine::{
     Abort, Ask, AskId, Body, Effect, ErrorCode, Event, Failed, Form, Need, NodeCall, Outcome,
@@ -126,6 +127,8 @@ struct Main<'a> {
     next_row: i64,
     /// Store writes from this one on (counting from 0) fail with the text.
     fail_writes: Option<(usize, &'static str)>,
+    /// These store writes (counting from 0) fail, each with its text.
+    fail_at: BTreeMap<usize, &'static str>,
     /// The history's statements, run through SQLite.
     db: Option<HistoryDb>,
     /// Stop (and return) once this many node calls were asked.
@@ -145,6 +148,7 @@ impl<'a> Main<'a> {
             unlocked: true,
             next_row: 1,
             fail_writes: None,
+            fail_at: BTreeMap::new(),
             db: None,
             stop_after: None,
             abort_part: None,
@@ -275,7 +279,10 @@ impl<'a> Main<'a> {
     fn write(&mut self, played: &mut Played, write: StoreWrite) -> Event {
         let n = played.writes.len();
         played.writes.push(write.clone());
-        let failing = self.fail_writes.filter(|(from, _)| n >= *from);
+        let failing = self
+            .fail_writes
+            .filter(|(from, _)| n >= *from)
+            .or_else(|| self.fail_at.get(&n).map(|text| (n, *text)));
         match write {
             StoreWrite::HistoryInsert(statement) => match failing {
                 Some((_, text)) => Event::Inserted(Err(JsString::from(text))),
@@ -1329,7 +1336,8 @@ fn batch_choice_as_select_best_batch() {
                 parse(
                     ShellMethod::Feed,
                     &format!(
-                        r#"{{"op":"create","key":{{"kind":"bee_wallet"}},"topic":"{}"}}"#,
+                        r#"{{"op":"create","key":{{"kind":"bee_wallet"}},"owner":"{}","topic":"{}"}}"#,
+                        hex(&fc_evm::address_of(&keys.bee)),
                         "77".repeat(32)
                     ),
                 )
@@ -1853,25 +1861,26 @@ fn the_history_row_as_the_ipc_handlers_keep_it() {
         );
     }
 
-    // `addEntry` throws: the handler throws, nothing reaches the node.
+    // `addEntry` throws: the handler throws, nothing reaches the node
+    // (`history_insert`).
     let mut main = Main::new(&keys, honest_node(a1_stamps()));
     main.fail_writes = Some((0, "SQLITE_FULL"));
     let (outcome, played, _) = main.play(parse(
         ShellMethod::Publish,
         &with_history("data", r#"{"type":"data","name":"Text"}"#, ""),
     ));
-    assert_eq!(outcome, error("SQLITE_FULL"));
+    assert_eq!(outcome, history_error("SQLITE_FULL", HISTORY_INSERT));
     assert!(played.calls.is_empty());
 
     // The completed update throws: the failed update with its message
-    // (once), and the write's error is the answer.
+    // (once), and the write's error is the answer (`history_update`).
     let mut main = Main::new(&keys, honest_node(a1_stamps()));
     main.fail_writes = Some((2, "EIO"));
     let (outcome, played, _) = main.play(parse(
         ShellMethod::Publish,
         &with_history("data", r#"{"type":"data","name":"Text"}"#, ""),
     ));
-    assert_eq!(outcome, error("EIO"));
+    assert_eq!(outcome, history_error("EIO", HISTORY_UPDATE));
     assert_eq!(played.writes.len(), 4, "insert, trim, completed, failed");
 
     // Cancelled mid-upload: the body ends `cancelled`, the row `failed`
@@ -1920,6 +1929,133 @@ fn the_history_row_as_the_ipc_handlers_keep_it() {
     );
 }
 
+/// A history write's failure, as `swarm.publish` answers it (core PR K2):
+/// the store's text, with its code.
+fn history_error(message: &str, code: &'static str) -> ShellOutcome {
+    ShellOutcome::Error(ShellError {
+        code: Some(code),
+        ..ShellError::new(message)
+    })
+}
+
+/// `swarm.publish`'s history failures carry a code (core PR K2), each
+/// write's own text kept: `history_insert` for the insert and the bound's
+/// trim right after it, before any node call, whatever the row's `failed`
+/// update after the trim does; `history_update` for a later update of the
+/// row, after its one retry (`history-retry`): the `completed` update
+/// (answered with its text when the retry holds, the retry's when it
+/// fails), or a failure's own `failed` update (answered with its text
+/// either way).
+#[test]
+fn history_failures_carry_their_code() {
+    let v = Vectors::load();
+    let keys = keys_of(&v);
+    assert_eq!(
+        (HISTORY_INSERT, HISTORY_UPDATE),
+        ("history_insert", "history_update")
+    );
+    let data = r#"{"kind":"data","parts":[{"bytes":5,"base64":"aGVsbG8="}],"batch":"a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1","pin":true,"deferred":false,"history":{"type":"data","name":"Text"}}"#;
+    let failing_node: fn() -> NodeFn<'static> = || {
+        node_with(
+            Form::BzzFile,
+            json_reply(500, Vec::new(), r#"{"code":500,"message":"boom"}"#),
+        )
+    };
+    // (the node, the writes that fail with their texts, the answer, the
+    // writes asked, the node calls made)
+    type Row = (
+        fn() -> NodeFn<'static>,
+        Vec<(usize, &'static str)>,
+        ShellOutcome,
+        usize,
+        usize,
+    );
+    let honest: fn() -> NodeFn<'static> = || honest_node(a1_stamps());
+    let rows: Vec<Row> = vec![
+        // The insert.
+        (
+            honest,
+            vec![(0, "w0")],
+            history_error("w0", HISTORY_INSERT),
+            1,
+            0,
+        ),
+        // The trim; the failed update holds.
+        (
+            honest,
+            vec![(1, "w1")],
+            history_error("w1", HISTORY_INSERT),
+            3,
+            0,
+        ),
+        // The trim and the failed update; the retry holds.
+        (
+            honest,
+            vec![(1, "w1"), (2, "w2")],
+            history_error("w2", HISTORY_INSERT),
+            4,
+            0,
+        ),
+        // The trim, the failed update and its retry.
+        (
+            honest,
+            vec![(1, "w1"), (2, "w2"), (3, "w3")],
+            history_error("w2", HISTORY_INSERT),
+            4,
+            0,
+        ),
+        // The completed update; the retry holds.
+        (
+            honest,
+            vec![(2, "w2")],
+            history_error("w2", HISTORY_UPDATE),
+            4,
+            1,
+        ),
+        // The completed update and its retry.
+        (
+            honest,
+            vec![(2, "w2"), (3, "w3")],
+            history_error("w3", HISTORY_UPDATE),
+            4,
+            1,
+        ),
+        // The upload fails, then its failed update; the retry holds.
+        (
+            failing_node,
+            vec![(2, "w2")],
+            history_error("w2", HISTORY_UPDATE),
+            4,
+            1,
+        ),
+        // The upload fails, then its failed update and the retry.
+        (
+            failing_node,
+            vec![(2, "w2"), (3, "w3")],
+            history_error("w2", HISTORY_UPDATE),
+            4,
+            1,
+        ),
+    ];
+    for (k, (node, fail_at, want, writes, calls)) in rows.into_iter().enumerate() {
+        let mut main = Main::new(&keys, node());
+        main.fail_at = fail_at.into_iter().collect();
+        let (outcome, played, _) = main.play(parse(ShellMethod::Publish, data));
+        assert_eq!(outcome, want, "row {k}");
+        assert_eq!(played.writes.len(), writes, "row {k}: {:?}", played.writes);
+        assert_eq!(played.calls.len(), calls, "row {k}");
+    }
+    // An upload that fails with the row's writes holding keeps its own
+    // answer: bee-js's, with no history code.
+    let mut main = Main::new(&keys, failing_node());
+    let (outcome, _, _) = main.play(parse(ShellMethod::Publish, data));
+    let ShellOutcome::Error(err) = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(err.code, None);
+    assert_eq!(err.status, Some(500));
+}
+
 fn string_of(v: &Value) -> String {
     v.as_js_string().unwrap().as_str().to_owned()
 }
@@ -1927,9 +2063,17 @@ fn string_of(v: &Value) -> String {
 // ---------------------------------------------------------------------------
 // swarm.feed.
 
-fn feed_params(op: &str, extra: &str) -> String {
+/// `swarm.feed`'s params with the owner main showed: the vault's Bee
+/// wallet's (K2).
+fn feed_params(keys: &Keys, op: &str, extra: &str) -> String {
+    feed_params_for(&fc_evm::address_of(&keys.bee), op, extra)
+}
+
+/// `swarm.feed`'s params naming `owner`.
+fn feed_params_for(owner: &[u8; 20], op: &str, extra: &str) -> String {
     format!(
-        r#"{{"op":"{op}","key":{{"kind":"bee_wallet"}},"topic":"{}"{extra}}}"#,
+        r#"{{"op":"{op}","key":{{"kind":"bee_wallet"}},"owner":"{}","topic":"{}"{extra}}}"#,
+        hex(owner),
         "77".repeat(32)
     )
 }
@@ -1988,6 +2132,7 @@ fn a_feed_update_writes_at_the_next_index() {
         let (outcome, played, _) = main.play(parse(
             ShellMethod::Feed,
             &feed_params(
+                &keys,
                 "update",
                 &format!(r#","reference":"{reference}","min_index":{min_index}"#),
             ),
@@ -2125,7 +2270,8 @@ fn a_feed_read_answers_the_latest_index() {
             }) as NodeFn<'_>
         };
         let mut main = Main::new(&keys, node);
-        let (outcome, played, _) = main.play(parse(ShellMethod::Feed, &feed_params("read", "")));
+        let (outcome, played, _) =
+            main.play(parse(ShellMethod::Feed, &feed_params(&keys, "read", "")));
         assert_eq!(outcome, want, "{head} {exist}");
         assert!(played.signed.is_empty());
         assert!(
@@ -2143,7 +2289,7 @@ fn a_feed_read_answers_the_latest_index() {
     // A locked vault: resolveSwarmSigner's text, nothing asked of the node.
     let mut main = Main::new(&keys, honest_node(a1_stamps()));
     main.unlocked = false;
-    let (outcome, played, _) = main.play(parse(ShellMethod::Feed, &feed_params("read", "")));
+    let (outcome, played, _) = main.play(parse(ShellMethod::Feed, &feed_params(&keys, "read", "")));
     assert_eq!(outcome, error("Vault is locked"));
     assert!(played.calls.is_empty());
     // A read writes nothing, so it takes no batch, reference or index.
@@ -2161,7 +2307,7 @@ fn a_feed_read_answers_the_latest_index() {
             "params.min_index: only an update has one",
         ),
     ] {
-        let params = fc_json::parse(&feed_params("read", &extra)).unwrap();
+        let params = fc_json::parse(&feed_params(&keys, "read", &extra)).unwrap();
         assert_eq!(
             ShellCall::parse(ShellMethod::Feed, &params).unwrap_err().0,
             why
@@ -2176,7 +2322,8 @@ fn feed_answers_and_errors_as_the_reference_gives_them() {
     // A locked vault: resolveSwarmSigner's text, nothing asked of the node.
     let mut main = Main::new(&keys, honest_node(a1_stamps()));
     main.unlocked = false;
-    let (outcome, played, _) = main.play(parse(ShellMethod::Feed, &feed_params("create", "")));
+    let (outcome, played, _) =
+        main.play(parse(ShellMethod::Feed, &feed_params(&keys, "create", "")));
     assert_eq!(outcome, error("Vault is locked"));
     assert!(played.calls.is_empty());
     // An encrypted reference: an 80-byte body.
@@ -2184,6 +2331,7 @@ fn feed_answers_and_errors_as_the_reference_gives_them() {
     let (outcome, played, _) = main.play(parse(
         ShellMethod::Feed,
         &feed_params(
+            &keys,
             "update",
             &format!(
                 r#","reference":"{}","batch":"{}""#,
@@ -2255,7 +2403,11 @@ fn feed_answers_and_errors_as_the_reference_gives_them() {
         let mut main = Main::new(&keys, node_with(form, event));
         let (outcome, _, _) = main.play(parse(
             ShellMethod::Feed,
-            &feed_params("update", &format!(r#","reference":"{}""#, "ab".repeat(32))),
+            &feed_params(
+                &keys,
+                "update",
+                &format!(r#","reference":"{}""#, "ab".repeat(32)),
+            ),
         ));
         assert_eq!(outcome, want, "{form:?}");
     }
@@ -2264,81 +2416,167 @@ fn feed_answers_and_errors_as_the_reference_gives_them() {
         &keys,
         node_with(Form::FeedManifest, json_reply(201, Vec::new(), "{}")),
     );
-    let (outcome, _, _) = main.play(parse(ShellMethod::Feed, &feed_params("create", "")));
+    let (outcome, _, _) = main.play(parse(ShellMethod::Feed, &feed_params(&keys, "create", "")));
     assert_eq!(outcome, error(&zod("string", "undefined", &["reference"])));
 }
 
-/// The vault's signature is checked as `createSwarmSigner` checks it.
+/// The vault's signature is checked as `createSwarmSigner` checks it,
+/// against the owner fixed at the operation's start (the one main named,
+/// K2), before its upload: one from another key that claims the owner, and
+/// a genuine one from another key, as a vault replaced or imported between
+/// the owner's answer and the signature gives, are refused; nothing is
+/// uploaded.
 #[test]
 fn a_signature_that_does_not_match_is_refused() {
     let v = Vectors::load();
     let keys = keys_of(&v);
-    let mut world = TestWorld::new(CLOCK);
-    let call = parse(
-        ShellMethod::Feed,
-        &feed_params(
-            "update",
-            &format!(
-                r#","reference":"{}","batch":"{}""#,
-                "ab".repeat(32),
-                "a1".repeat(32)
-            ),
-        ),
-    );
-    let mut shell = Shell::start(call, &mut world);
     let owner = fc_evm::address_of(&keys.bee);
-    let step = |shell: &mut Shell| -> Ask {
-        let effects = shell.take_effects();
-        let [Effect::Ask(ask)] = &effects[..] else {
-            panic!("{effects:?}")
+    let other = &keys.publishers[&0];
+    // (whether the signature claims the fixed owner)
+    for claims_owner in [true, false] {
+        let mut world = TestWorld::new(CLOCK);
+        let call = parse(
+            ShellMethod::Feed,
+            &feed_params(
+                &keys,
+                "update",
+                &format!(
+                    r#","reference":"{}","batch":"{}""#,
+                    "ab".repeat(32),
+                    "a1".repeat(32)
+                ),
+            ),
+        );
+        let mut shell = Shell::start(call, &mut world);
+        let step = |shell: &mut Shell| -> Ask {
+            let effects = shell.take_effects();
+            let [Effect::Ask(ask)] = &effects[..] else {
+                panic!("{effects:?}")
+            };
+            ask.clone()
         };
-        ask.clone()
-    };
-    let ask = step(&mut shell);
-    assert_eq!(ask.need, Need::Owner(SignKey::BeeWallet));
-    shell.answer(&mut world, ask.id, Event::Owner(Ok(Some(owner))));
-    let ask = step(&mut shell);
-    assert_eq!(ask.need, Need::Lock([0x77; 32]));
-    shell.answer(&mut world, ask.id, Event::Locked);
-    let ask = step(&mut shell);
-    shell.answer(
-        &mut world,
-        ask.id,
-        json_reply(
-            200,
-            vec![
-                ("swarm-feed-index", "0000000000000000".to_owned()),
-                ("swarm-feed-index-next", "0000000000000001".to_owned()),
-            ],
-            "",
-        ),
-    );
-    let ask = step(&mut shell);
-    let Need::Sign(soc) = &ask.need else {
-        panic!("{ask:?}")
-    };
-    let mut signed = fc_swarm::sign_soc(
-        &keys.publishers[&0],
-        &soc.identifier,
-        Some(soc.span),
-        &soc.payload,
-    )
-    .unwrap();
-    signed.owner = owner;
-    shell.answer(
-        &mut world,
-        ask.id,
-        Event::Signed(Ok(Signed {
-            signature: signed.signature,
-            owner: signed.owner,
-        })),
-    );
+        let ask = step(&mut shell);
+        assert_eq!(ask.need, Need::Owner(SignKey::BeeWallet));
+        shell.answer(&mut world, ask.id, Event::Owner(Ok(Some(owner))));
+        let ask = step(&mut shell);
+        assert_eq!(ask.need, Need::Lock([0x77; 32]));
+        shell.answer(&mut world, ask.id, Event::Locked);
+        let ask = step(&mut shell);
+        shell.answer(
+            &mut world,
+            ask.id,
+            json_reply(
+                200,
+                vec![
+                    ("swarm-feed-index", "0000000000000000".to_owned()),
+                    ("swarm-feed-index-next", "0000000000000001".to_owned()),
+                ],
+                "",
+            ),
+        );
+        let ask = step(&mut shell);
+        let Need::Sign(soc) = &ask.need else {
+            panic!("{ask:?}")
+        };
+        assert_eq!(soc.key, SignKey::BeeWallet);
+        let mut signed =
+            fc_swarm::sign_soc(other, &soc.identifier, Some(soc.span), &soc.payload).unwrap();
+        if claims_owner {
+            signed.owner = owner;
+        } else {
+            assert_eq!(signed.owner, fc_evm::address_of(other));
+        }
+        shell.answer(
+            &mut world,
+            ask.id,
+            Event::Signed(Ok(Signed {
+                signature: signed.signature,
+                owner: signed.owner,
+            })),
+        );
+        assert_eq!(
+            shell.outcome(),
+            Some(&error(
+                "The identity core returned a chunk signature that does not match"
+            )),
+            "{claims_owner}"
+        );
+        // Nothing goes to the node after it.
+        assert!(
+            shell.take_effects().iter().all(|e| !matches!(
+                e,
+                Effect::Ask(Ask {
+                    need: Need::Node(_),
+                    ..
+                })
+            )),
+            "{claims_owner}"
+        );
+    }
+}
+
+/// K2: main names the Bee wallet's owner it showed; when the vault's is
+/// another one (a vault replaced or imported since), every op ends at the
+/// owner's answer with `owner_changed`, before any node call: no
+/// `/stamps`, no manifest, no turn on the topic, no lookup, nothing signed.
+/// A locked vault is still `Vault is locked`.
+#[test]
+fn an_owner_the_vault_does_not_hold_is_refused_before_any_call() {
+    let v = Vectors::load();
+    let keys = keys_of(&v);
+    let shown = fc_evm::address_of(&keys.publishers[&0]);
+    assert_ne!(shown, fc_evm::address_of(&keys.bee));
+    let refused = ShellOutcome::Error(ShellError {
+        code: Some("owner_changed"),
+        ..ShellError::new("The Bee wallet this feed request names is no longer the vault's")
+    });
     assert_eq!(
-        shell.outcome(),
-        Some(&error(
-            "The identity core returned a chunk signature that does not match"
-        ))
+        (OWNER_CHANGED, OWNER_CHANGED_MESSAGE),
+        (
+            "owner_changed",
+            "The Bee wallet this feed request names is no longer the vault's"
+        )
     );
+    let batch = format!(r#","batch":"{}""#, "a1".repeat(32));
+    let reference = format!(r#","reference":"{}""#, "ab".repeat(32));
+    for (op, extra) in [
+        ("create", String::new()),
+        ("create", batch.clone()),
+        ("update", reference.clone()),
+        ("update", format!(r#"{reference}{batch},"min_index":3"#)),
+        ("read", String::new()),
+    ] {
+        let params = feed_params_for(&shown, op, &extra);
+        let mut main = Main::new(&keys, honest_node(a1_stamps()));
+        let (outcome, played, _) = main.play(parse(ShellMethod::Feed, &params));
+        assert_eq!(outcome, refused, "{params}");
+        assert!(played.calls.is_empty(), "{params}: {:?}", played.calls);
+        assert!(played.signed.is_empty(), "{params}");
+        assert_eq!(
+            played
+                .asks
+                .iter()
+                .map(|a| a.need.clone())
+                .collect::<Vec<_>>(),
+            [Need::Owner(SignKey::BeeWallet)],
+            "{params}"
+        );
+        // The same request naming the vault's owner goes on.
+        let mut main = Main::new(&keys, honest_node(a1_stamps()));
+        let (outcome, played, _) =
+            main.play(parse(ShellMethod::Feed, &feed_params(&keys, op, &extra)));
+        assert!(
+            matches!(outcome, ShellOutcome::Result(_)),
+            "{op}{extra}: {outcome:?}"
+        );
+        assert!(!played.calls.is_empty(), "{op}{extra}");
+        // A locked vault: its text first, as before.
+        let mut main = Main::new(&keys, honest_node(a1_stamps()));
+        main.unlocked = false;
+        let (outcome, played, _) = main.play(parse(ShellMethod::Feed, &params));
+        assert_eq!(outcome, error("Vault is locked"), "{params}");
+        assert!(played.calls.is_empty(), "{params}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2442,7 +2680,11 @@ fn each_ask_charges_and_is_bound_as_the_design_gives_it() {
     let mut main = Main::new(&keys, honest_node(a1_stamps()));
     let (_, played, _) = main.play(parse(
         ShellMethod::Feed,
-        &feed_params("update", &format!(r#","reference":"{}""#, "ab".repeat(32))),
+        &feed_params(
+            &keys,
+            "update",
+            &format!(r#","reference":"{}""#, "ab".repeat(32)),
+        ),
     ));
     for ask in &played.asks {
         let charge = match &ask.need {
@@ -2982,11 +3224,15 @@ fn every_shell_case_through_the_machines() {
         // before any request reaches the node; the core makes its upload
         // call, main ends the part with the errno's name, and the core
         // answers describePickedPathError's form, in the row too.
+        // The owner main names isn't the vault's Bee wallet (`feed-owner`,
+        // K2): the reference's caller goes on under its frozen signer; the
+        // core refuses before any node call, signing nothing.
         let deviation = case.get("deviation").map(string);
         let picked_read = deviation.as_deref() == Some("picked-read-text");
+        let feed_owner = deviation.as_deref() == Some("feed-owner");
         match deviation.as_deref() {
             None => assert!(case.get("core").is_none(), "{id}"),
-            Some("picked-read-text") => {}
+            Some("picked-read-text" | "feed-owner") => {}
             Some("index-probe") => assert_eq!(
                 string(get(case, "core")),
                 "feed_head with swarm-only-root-chunk instead of the whole latest payload; the same index",
@@ -2998,7 +3244,11 @@ fn every_shell_case_through_the_machines() {
         assert_eq!(steps.len(), 1, "{id}");
         let step = steps[0];
         let params = get(step, "params").stringify(KeyOrder::Property);
-        let wants = want_calls(step);
+        let wants = if feed_owner {
+            Vec::new()
+        } else {
+            want_calls(step)
+        };
         let mut main = Main::new(&keys, replay_node(&wants));
         main.world.now = number(get(get(case, "world"), "clock")) as u64;
         if let Some(parts) = step.get("parts") {
@@ -3046,7 +3296,17 @@ fn every_shell_case_through_the_machines() {
                 ran.terminals
             );
         }
-        let core = case.get("core").filter(|_| picked_read);
+        if feed_owner {
+            assert!(ran.signed.is_empty(), "{id}");
+            assert!(
+                ran.asks
+                    .iter()
+                    .all(|ask| ask.need == Need::Owner(SignKey::BeeWallet)),
+                "{id}: {:?}",
+                ran.asks
+            );
+        }
+        let core = case.get("core").filter(|_| picked_read || feed_owner);
         let answer = match core {
             Some(core) => get(core, "answers").children().next().unwrap(),
             None => get(step, "answer"),
@@ -3064,7 +3324,7 @@ fn every_shell_case_through_the_machines() {
             }
             (other, ..) => panic!("{id}: {other:?}, the reference's {}", answer.raw()),
         }
-        let rows = match core {
+        let rows = match core.filter(|_| picked_read) {
             Some(core) => get(core, "history"),
             None => get(get(case, "after"), "history"),
         };
@@ -3085,5 +3345,5 @@ fn every_shell_case_through_the_machines() {
         .collect();
     named.sort();
     assert_eq!(left_out, named, "every left-out case is in the vectors");
-    assert_eq!(played, 45, "cases played");
+    assert_eq!(played, 48, "cases played");
 }

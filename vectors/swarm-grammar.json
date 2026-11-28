@@ -37710,6 +37710,7 @@
         "key": {
           "kind": "bee_wallet"
         },
+        "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
         "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
         "batch": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
       },
@@ -37747,6 +37748,7 @@
         "key": {
           "kind": "bee_wallet"
         },
+        "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
         "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f",
         "reference": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
         "min_index": 9
@@ -37843,6 +37845,7 @@
         "key": {
           "kind": "bee_wallet"
         },
+        "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
         "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
       },
       "calls": [
@@ -37883,6 +37886,7 @@
         "key": {
           "kind": "bee_wallet"
         },
+        "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
         "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
       },
       "calls": [
@@ -37941,6 +37945,7 @@
         "key": {
           "kind": "bee_wallet"
         },
+        "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
         "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
       },
       "calls": [
@@ -38131,6 +38136,7 @@
         "key": {
           "kind": "bee_wallet"
         },
+        "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
         "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
       },
       "calls": [
@@ -44797,6 +44803,7 @@
         "key": {
           "kind": "bee_wallet"
         },
+        "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
         "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
       },
       "rule": "form",
@@ -44828,6 +44835,7 @@
         "key": {
           "kind": "bee_wallet"
         },
+        "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
         "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
       },
       "rule": "order",
@@ -44889,6 +44897,7 @@
         "key": {
           "kind": "bee_wallet"
         },
+        "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
         "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
       },
       "rule": "order",
@@ -44946,6 +44955,7 @@
         "key": {
           "kind": "bee_wallet"
         },
+        "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
         "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
       },
       "rule": "value",
@@ -45047,6 +45057,7 @@
         "key": {
           "kind": "bee_wallet"
         },
+        "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
         "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
       },
       "rule": "count",
@@ -45108,6 +45119,7 @@
         "key": {
           "kind": "bee_wallet"
         },
+        "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
         "topic": "535f5e55cf50c240bce75d6b2d03c817fc460a43489eb32bdf53710d06fcc18f"
       },
       "rule": "form",

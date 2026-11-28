@@ -586,15 +586,18 @@ async function mainRows(env) {
   oneParts.bytes);
   const signer = async (ref) => ref.load('./swarm-signer.js').resolveSwarmSigner({ mode: 'bee-wallet' });
   const agentTopic = 'freedom-agent/publications';
-  await record('swarm.feed-create-batch', 'swarm.feed:create', { op: 'create', key: { kind: 'bee_wallet' }, topic: env.beeJs.Topic.fromString(agentTopic).toHex(), batch: C.BATCH_B },
+  // swarm.feed's params name the Bee wallet's owner main showed (core PR
+  // K2), in `<o>`'s form.
+  const owner = env.keyOf('bee').address.slice(2).toLowerCase();
+  await record('swarm.feed-create-batch', 'swarm.feed:create', { op: 'create', key: { kind: 'bee_wallet' }, owner, topic: env.beeJs.Topic.fromString(agentTopic).toHex(), batch: C.BATCH_B },
     stamps, async (ref) => ref.feedService.createFeed(await signer(ref), agentTopic, C.BATCH_B));
-  await record('swarm.feed-update-min-index', 'swarm.feed:update', { op: 'update', key: { kind: 'bee_wallet' }, topic: env.beeJs.Topic.fromString(agentTopic).toHex(),
+  await record('swarm.feed-update-min-index', 'swarm.feed:update', { op: 'update', key: { kind: 'bee_wallet' }, owner, topic: env.beeJs.Topic.fromString(agentTopic).toHex(),
     reference: C.REF, min_index: 9 }, { ...stamps, latest: [{ key: 'bee', topic: agentTopic, reply: { status: 200,
     headers: { 'swarm-feed-index': '0000000000000002', 'swarm-feed-index-next': '0000000000000003' }, body_utf8: 'x' } }] },
   async (ref) => ref.feedService.updateFeed(await signer(ref), agentTopic, C.REF, undefined, { minIndex: 9 }));
   // readFeedState (swarm.feed's read): the lookup, then the head probe
   // after its 404.
-  const readParams = { op: 'read', key: { kind: 'bee_wallet' }, topic: env.beeJs.Topic.fromString(agentTopic).toHex() };
+  const readParams = { op: 'read', key: { kind: 'bee_wallet' }, owner, topic: env.beeJs.Topic.fromString(agentTopic).toHex() };
   const beeOwner = env.keyOf('bee').address;
   const latest = (reply) => [{ key: 'bee', topic: agentTopic, reply }];
   const missing = { status: 404, json: { code: 404, message: 'Not Found' } };

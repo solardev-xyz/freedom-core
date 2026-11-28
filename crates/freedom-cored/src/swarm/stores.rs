@@ -39,7 +39,8 @@
 //!   parameters bound as better-sqlite3 binds them ([`Bind`]) and rows read
 //!   back as SQLite answers them ([`Cell`]). A failed open is tried again at
 //!   the next statement; the test hooks' `swarm_history:write` fails a
-//!   statement before it runs.
+//!   statement before it runs, and `swarm_history:batch` a machine's batch
+//!   of statements only (the bound's trim, a row's update), not an insert.
 //!
 //! Every write is synchronous on the swarm thread, so each finishes before
 //! the thread takes the next store change ("SWM-4 must apply feed-store
@@ -184,6 +185,9 @@ impl Files {
     /// The history's statements, in order: the first that fails stops the
     /// rest.
     pub fn history(&mut self, statements: &[Statement], now_ms: u64) -> Result<(), JsString> {
+        if crate::testhooks::grant_write_fails(HISTORY_HOOKS, "batch") {
+            return Err(JsString::from(HISTORY_FAILED));
+        }
         let conn = self.history.writable(now_ms)?;
         for statement in statements {
             execute(conn, statement).map_err(history_failed)?;

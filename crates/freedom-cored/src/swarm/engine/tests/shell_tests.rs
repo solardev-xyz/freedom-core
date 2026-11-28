@@ -60,7 +60,7 @@ fn result_of(answer: Answer) -> String {
     }
 }
 
-const FEED_READ: &str = r#"{"op":"read","key":{"kind":"bee_wallet"},"topic":"7777777777777777777777777777777777777777777777777777777777777777"}"#;
+const FEED_READ: &str = r#"{"op":"read","key":{"kind":"bee_wallet"},"owner":"1111111111111111111111111111111111111111","topic":"7777777777777777777777777777777777777777777777777777777777777777"}"#;
 
 #[test]
 fn a_shell_parent_runs_and_answers_typed() {
@@ -355,7 +355,8 @@ fn a_feed_reads_its_owner_from_the_vault() {
             2,
             ShellMethod::Feed,
             Some(&format!(
-                r#"{{"op":"update","key":{{"kind":"bee_wallet"}},"topic":"{}","reference":"{}","batch":"{}"}}"#,
+                r#"{{"op":"update","key":{{"kind":"bee_wallet"}},"owner":"{}","topic":"{}","reference":"{}","batch":"{}"}}"#,
+                "11".repeat(20),
                 "77".repeat(32),
                 "ab".repeat(32),
                 "cd".repeat(32)
@@ -396,6 +397,40 @@ fn a_feed_reads_its_owner_from_the_vault() {
     let soc = &ask.soc;
     assert_eq!(soc.key, SignKey::BeeWallet);
     assert_eq!(soc.hold, None);
+    // K2: the vault's Bee wallet isn't the owner main named, so the update
+    // ends at the owner's answer: no call to main, nothing to sign.
+    let sent = io.sent.len();
+    engine
+        .shell(
+            &mut io,
+            0,
+            3,
+            ShellMethod::Feed,
+            Some(&format!(
+                r#"{{"op":"update","key":{{"kind":"bee_wallet"}},"owner":"{}","topic":"{}","reference":"{}","batch":"{}"}}"#,
+                "11".repeat(20),
+                "77".repeat(32),
+                "ab".repeat(32),
+                "cd".repeat(32)
+            )),
+        )
+        .unwrap();
+    let (tag, ask) = io.vaults.pop().unwrap();
+    assert_eq!(ask, VaultAsk::Owner(SignKey::BeeWallet));
+    engine
+        .vaulted(
+            &mut io,
+            0,
+            tag,
+            VaultAnswer::Event(Event::Owner(Ok(Some([0x22; 20])))),
+        )
+        .unwrap();
+    assert_eq!(
+        result_of(io.answer_of(3)),
+        r#"{"error_typed":{"object":[["message",{"string":"The Bee wallet this feed request names is no longer the vault's"}],["code",{"string":"owner_changed"}]]}}"#
+    );
+    assert_eq!(io.sent.len(), sent);
+    assert!(io.vaults.is_empty(), "{:?}", io.vaults);
 }
 
 /// The store ops' door: the stores moved, `swarm.manifest` the grants too;
