@@ -34,14 +34,12 @@
 //!   the operation ends with discovery's accounts ([`Outcome::Done`],
 //!   fc-ledger's [`Operation::lapsed`]). At any other APDU, discovery's own
 //!   among them, it ends with the [`LaneEnd`].
-//! - **A wait in the queue and the 5 minutes** (D7's open part, 0016's
-//!   question 5, the user's to decide) are [`QUEUE_WAIT`], one place. As
-//!   0016 is written ([`QueueWait::Counts`]), the wait counts against the
-//!   operation's 5 minutes: the core's timer on the APDU the user confirms
-//!   is shorter by the time the operation waited for its first APDU. The
-//!   proposal ([`QueueWait::Apart`]) caps the wait on its own and gives
-//!   the confirmation its full 5 minutes. Either way no request waits past
-//!   [`MAX_QUEUE_WAIT`], and `deadline_ms` is the same.
+//! - **A wait in the queue doesn't count against the 5 minutes** (0016's
+//!   question 5, decided by the user on 2026-11-28: "separate limits"):
+//!   the wait is capped on its own, at [`MAX_QUEUE_WAIT`], and the core's
+//!   timer on the APDU the user confirms is its full `deadline_ms` and the
+//!   [`MARGIN`] however long the operation waited for its first APDU, so a
+//!   request may take up to 10 minutes in all.
 //! - **Cancel** ([`Lane::cancel`], the parent's, 0001): a waiting operation
 //!   leaves the queue with nothing sent, and one that runs ends there: its
 //!   APDU out at main, if one is, is cancelled (`{ "type": "cancel" }`)
@@ -94,52 +92,16 @@ pub const METHOD: &str = "shell.ledger_apdu";
 /// "The device lane"). One more is refused `LEDGER_BUSY`.
 pub const MAX_WAITING: usize = 8;
 
-/// The longest an operation waits for its first APDU to go: 5 minutes,
-/// under either answer to question 5 ([`QueueWait`]). As 0016 is written
-/// this is the operation's 5 minutes, all spent; under the proposal, the
-/// wait's own cap. Main's watchdog gives a device request no
-/// `shell.ledger_apdu` has named this and 0001's 15 s margin.
+/// The longest an operation waits for its first APDU to go: 5 minutes, a
+/// cap of its own (0016's question 5: the wait doesn't count against the
+/// 5 minutes the user has to confirm). Main's watchdog gives a device
+/// request no `shell.ledger_apdu` has named this and 0001's 15 s margin.
 pub const MAX_QUEUE_WAIT: Duration = Duration::from_millis(DEVICE_CONFIRM_MS);
 
 /// How much longer the core's own timer on an APDU is than the
 /// `deadline_ms` main enforces (design 0016, "Deadlines, cancel and
 /// unplugging"), so that main's `{ failed }` comes first.
 pub const MARGIN: Duration = Duration::from_secs(1);
-
-/// Design 0016's question 5 (D7's open part, the user's to decide):
-/// whether a wait in the device queue counts against the 5 minutes the
-/// user has to confirm. Either way no operation waits past
-/// [`MAX_QUEUE_WAIT`] for its first APDU, and each APDU's `deadline_ms`
-/// is the same: the answer decides only the core's own timer on the APDU
-/// the user confirms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueueWait {
-    /// 0016 as written ("The device lane"): the wait counts against the
-    /// operation's 5 minutes. The APDU the user confirms has its 5 minutes
-    /// and the [`MARGIN`] less the time the operation waited for its first
-    /// APDU, so a signature that waited 4 minutes has 1 left.
-    Counts,
-    /// Question 5's proposal: the wait is capped on its own at 5 minutes,
-    /// and every confirmation has its full 5, so a request may take 10 in
-    /// all. Only the lane's tests run it until the user answers.
-    #[cfg_attr(not(test), allow(dead_code))]
-    Apart,
-}
-
-/// The lane's answer to question 5: 0016's current text. The user's other
-/// answer is this one line.
-pub const QUEUE_WAIT: QueueWait = QueueWait::Counts;
-
-impl QueueWait {
-    /// What the APDU the user confirms loses of its time when its
-    /// operation waited `waited` for its first APDU.
-    fn spent(self, waited: Duration) -> Duration {
-        match self {
-            QueueWait::Counts => waited,
-            QueueWait::Apart => Duration::ZERO,
-        }
-    }
-}
 
 /// How an operation takes its turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,8 +220,8 @@ struct Running<T> {
     operation: Operation,
     then: T,
     came: Instant,
-    /// How long it waited for its first APDU to go, once it went.
-    waited: Option<Duration>,
+    /// Its first APDU has gone: the queue's limit no longer applies.
+    started: bool,
     /// Its first `E0 1A` has gone: only a `6D00` to that one may carry
     /// `hash_only` (Q23).
     defined: bool,
@@ -285,7 +247,7 @@ impl<T> Running<T> {
     /// When the lane ends it unless something comes first, and how.
     fn deadline(&self) -> (Instant, LaneEnd) {
         match &self.at {
-            At::Unsent { .. } if self.waited.is_none() => {
+            At::Unsent { .. } if !self.started => {
                 (after(self.came, MAX_QUEUE_WAIT), LaneEnd::QueueLimit)
             }
             At::Unsent { since, .. } => (after(*since, apdu_time(false)), LaneEnd::Unsent),
@@ -299,7 +261,6 @@ pub struct Lane<T> {
     requests: Arc<Requests>,
     out: Sender<transport::Out>,
     allowance: Arc<Allowance>,
-    policy: QueueWait,
     running: Option<Running<T>>,
     waiting: VecDeque<Waiting<T>>,
     /// The lane's APDUs it no longer waits for that main hasn't answered,
@@ -324,19 +285,11 @@ impl<T> Lane<T> {
             requests,
             out,
             allowance,
-            policy: QUEUE_WAIT,
             running: None,
             waiting: VecDeque::new(),
             late: BTreeMap::new(),
             cancels: VecDeque::new(),
         }
-    }
-
-    /// The lane under the other answer to question 5 too.
-    #[cfg(test)]
-    fn with_policy(mut self, policy: QueueWait) -> Self {
-        self.policy = policy;
-        self
     }
 
     /// Parent request `parent`'s operation, built from what it authorized
@@ -526,7 +479,7 @@ impl<T> Lane<T> {
                         operation,
                         then,
                         came,
-                        waited: None,
+                        started: false,
                         defined: false,
                         at: At::Unsent {
                             exchange,
@@ -577,20 +530,15 @@ impl<T> Lane<T> {
         );
         match dispatch {
             Dispatch::Sent(core) => {
-                let waited = *running
-                    .waited
-                    .get_or_insert_with(|| now.saturating_duration_since(running.came));
-                let spent = if confirm {
-                    self.policy.spent(waited)
-                } else {
-                    Duration::ZERO
-                };
+                // Its whole time, whatever the operation waited in the
+                // queue (question 5).
+                running.started = true;
                 running.defined |= definition;
                 running.at = At::Out {
                     core,
                     asked,
                     confirm,
-                    due: after(now, apdu_time(confirm).saturating_sub(spent)),
+                    due: after(now, apdu_time(confirm)),
                 };
             }
             // Main's gate, or the lane's share of the writer, wakes it.
