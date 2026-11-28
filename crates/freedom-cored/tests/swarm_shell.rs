@@ -1444,7 +1444,8 @@ fn callers_are_enforced() {
 
 /// `swarm.history`'s `add` and `update` (the 2026-11-28 amendment's K1),
 /// through the binary: main's alone (the chrome's call `forbidden` by the
-/// op, a page's by the method table, nothing written); params read
+/// op's name alone, a malformed member too, a page's by the method table,
+/// nothing written); params read
 /// strictly (an unknown member, an untyped one, bytes or a BigInt:
 /// `invalid_argument`); main's rows written and read back; `add`'s bound
 /// (deviation `history-bound`) trimming the oldest finished row and keeping
@@ -1494,6 +1495,26 @@ fn main_s_history_ops_through_the_pipe() {
             .send_raw(&common::raw_frame(0x01, frame.as_bytes()));
         let reply = main.core.response(id);
         assert_eq!(reply["error"]["code"], "forbidden", "{op} page: {reply}");
+    }
+    // Refused on the op's name alone: a malformed member, which main's call
+    // gets `invalid_argument` for (below), is still `forbidden` from the
+    // chrome.
+    for params in [
+        json!({ "op": "add", "entry": {} }),
+        json!({ "entry": "raw", "op": "add" }),
+        json!({ "op": "add", "entry": { "bigint": "x" } }),
+        json!({ "op": "update", "id": 1, "updates": {} }),
+        json!({ "updates": { "string": 5 }, "op": "update" }),
+    ] {
+        let id = main.own_request("swarm.history", &params, "chrome");
+        let reply = main.core.response(id);
+        assert_eq!(reply["error"]["code"], "forbidden", "{params}: {reply}");
+        let id = main.own_request("swarm.history", &params, "shell");
+        let reply = main.core.response(id);
+        assert_eq!(
+            reply["error"]["code"], "invalid_argument",
+            "{params}: {reply}"
+        );
     }
     for params in [
         json!({ "op": "add", "entry": { "object": [] }, "extra": { "null": true } }),

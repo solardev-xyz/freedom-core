@@ -19,7 +19,8 @@
 //! `freedom://publish` handlers keep around an upload, and the agent's
 //! publication controller's (`freedom://agent`), which it writes before
 //! the upload, while it waits for postage. The chrome calling either is
-//! [`Refused::Forbidden`], before its members are read. Each member is a
+//! [`Refused::Forbidden`] on the op's name alone, before any member is
+//! decoded ([`super::Call::parse`]). Each member is a
 //! value in the typed form, read as the reference reads it: an absent
 //! `entry` or `updates` is `undefined` (the parameter's default `{}`), an
 //! absent `id` binds as NULL. What they throw is the reference's own:
@@ -38,7 +39,7 @@
 
 use fc_json::{JsString, JsValue};
 
-use super::{Caller, Io, Members, Outcome, Refused, invalid};
+use super::{Io, Members, Outcome, Refused, invalid};
 use crate::stores::Thrown;
 use crate::stores::history::{self, RowError, Statement};
 use crate::value::Value;
@@ -66,16 +67,12 @@ pub enum Op {
     },
 }
 
-/// The ops only main makes, forbidden to the chrome.
-const MAIN_OPS: [&str; 2] = ["add", "update"];
+/// The ops only main makes, forbidden to the chrome on their name alone
+/// ([`super::Call::parse`]).
+pub(crate) const MAIN_OPS: [&str; 2] = ["add", "update"];
 
 impl Op {
-    pub(crate) fn parse(op: String, members: Members, caller: Caller) -> Result<Op, Refused> {
-        if let Some(name) = MAIN_OPS.iter().find(|name| **name == op)
-            && caller == Caller::Chrome
-        {
-            return Err(Refused::Forbidden(name));
-        }
+    pub(crate) fn parse(op: String, members: Members) -> Result<Op, Refused> {
         match op.as_str() {
             "list" => {
                 members.only("list", &[])?;

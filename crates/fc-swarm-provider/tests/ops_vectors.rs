@@ -2862,6 +2862,47 @@ fn main_s_history_ops_refuse_and_fail() {
             "{op} from the chrome, before its members are read"
         );
     }
+    // Members the typed form doesn't read at all (untyped, an unknown
+    // tag, a typed shape gone wrong), before `op` or after it: invalid from
+    // main, and from the chrome forbidden on the op's name alone.
+    for (op, members) in [
+        ("add", r#"{"entry":{}}"#),
+        ("add", r#"{"entry":"raw"}"#),
+        ("add", r#"{"entry":{"bigint":"x"}}"#),
+        ("add", r#"{"entry":{"object":[["a"]]}}"#),
+        ("update", r#"{"id":1}"#),
+        ("update", r#"{"id":{"number":"1"},"updates":{}}"#),
+        ("update", r#"{"updates":{"string":5}}"#),
+    ] {
+        for op_first in [true, false] {
+            let mut p = JsValue::Object(Vec::new());
+            if op_first {
+                p.set("op", s(op));
+            }
+            let rest = js(members);
+            let JsValue::Object(rest) = &rest else {
+                panic!("{members}");
+            };
+            for (name, value) in rest {
+                p.set(name.clone(), value.clone());
+            }
+            if !op_first {
+                p.set("op", s(op));
+            }
+            assert!(
+                matches!(
+                    Call::parse(ops::HISTORY, &p, Caller::Shell),
+                    Err(Refused::Invalid(_))
+                ),
+                "{op} {members}"
+            );
+            assert_eq!(
+                Call::parse(ops::HISTORY, &p, Caller::Chrome),
+                Err(Refused::Forbidden(op_name(op))),
+                "{op} {members} from the chrome"
+            );
+        }
+    }
     // A write that fails: its text, thrown.
     struct Failing;
     impl Io for Failing {

@@ -136,8 +136,9 @@ pub enum Op {
     },
 }
 
-/// Main's own ops' names.
-const MAIN_OPS: [&str; 9] = [
+/// Main's own ops' names, forbidden to the chrome on their name alone
+/// ([`super::Call::parse`]).
+pub(crate) const MAIN_OPS: [&str; 9] = [
     "getOriginIdentityStateWithOwners",
     "previewAppScopedIdentity",
     "createAppScopedIdentityAt",
@@ -150,12 +151,7 @@ const MAIN_OPS: [&str; 9] = [
 ];
 
 impl Op {
-    pub(crate) fn parse(op: String, m: Members, caller: super::Caller) -> Result<Op, Refused> {
-        if let Some(name) = MAIN_OPS.iter().find(|name| **name == op)
-            && caller == super::Caller::Chrome
-        {
-            return Err(Refused::Forbidden(name));
-        }
+    pub(crate) fn parse(op: String, m: Members) -> Result<Op, Refused> {
         let only = |allowed: &[&str]| m.only(&op, allowed);
         Ok(match op.as_str() {
             "get-all-origins" => {
