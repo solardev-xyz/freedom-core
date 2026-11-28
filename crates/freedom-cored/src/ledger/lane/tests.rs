@@ -2,8 +2,9 @@
 //! fixed clock (design 0016, LDG-2's L2): two operations in turn; a ninth
 //! waiting refused `LEDGER_BUSY`; discovery `LEDGER_BUSY` while a signature
 //! runs or waits; 15 s gives `LEDGER_UNRESPONSIVE`; the user's answer at
-//! 4:59.999 signs and 5:00 is `LEDGER_TIMEOUT`; a wait in the queue under
-//! both answers to question 5; no request queued past the lane's limit;
+//! 4:59.999 signs and 5:00 is `LEDGER_TIMEOUT`; a request that waited in
+//! the queue still has its full 5 minutes to confirm (question 5); no
+//! request queued past the lane's limit;
 //! cancel before the first APDU, between two and during the user's wait; a
 //! late answer dropped; an unplug at each APDU; a stale signature refused;
 //! the lane's own end of discovery's check, which ends only the check (D1);
@@ -37,8 +38,6 @@ const MSG_OTHER: &str = "msg-live-1";
 const TYPED: &str = "typed-steps";
 const HASH_ONLY: &str = "typed-hash-only-mail";
 const CASES: [&str; 7] = [DISCOVERY, ADD, TX, MSG, MSG_OTHER, TYPED, HASH_ONLY];
-
-const POLICIES: [QueueWait; 2] = [QueueWait::Counts, QueueWait::Apart];
 
 /// The APDU deadlines, in milliseconds.
 const APDU: u64 = 15_000;
@@ -224,12 +223,12 @@ struct Main {
 }
 
 impl Main {
-    fn new(policy: QueueWait) -> Main {
-        Main::with_room(policy, MAX_OUTSTANDING)
+    fn new() -> Main {
+        Main::with_room(MAX_OUTSTANDING)
     }
 
     /// Main takes at most `room` of the core's requests.
-    fn with_room(policy: QueueWait, room: usize) -> Main {
+    fn with_room(room: usize) -> Main {
         let requests = Requests::new(room, Arc::new(Pending::default()));
         let (out, rx) = mpsc::channel();
         let woken = Arc::new(AtomicBool::new(false));
@@ -237,7 +236,7 @@ impl Main {
             let woken = Arc::clone(&woken);
             move || woken.store(true, Ordering::SeqCst)
         };
-        let lane = Lane::new(Arc::clone(&requests), out, wake).with_policy(policy);
+        let lane = Lane::new(Arc::clone(&requests), out, wake);
         Main {
             lane,
             requests,
@@ -464,36 +463,34 @@ fn filler(main: &Main) -> (u64, Receiver<transport::Out>) {
 
 #[test]
 fn every_apdu_carries_its_deadline_and_every_case_ends_as_recorded() {
-    for policy in POLICIES {
-        for (n, id) in CASES.into_iter().enumerate() {
-            let mut main = Main::new(policy);
-            let parent = 40 + n as u64;
-            assert!(main.submit(parent, id, 0).is_empty());
-            let (sent, ends) = run_device(&mut main, id, parent, 0);
-            let [end] = ends.as_slice() else {
-                panic!("{id}: {ends:?}");
-            };
-            assert_eq!((end.parent, end.then), (parent, id));
-            let Outcome::Done(Ok(signed)) = &end.outcome else {
-                panic!("{id}: {:?}", end.outcome);
-            };
-            assert!(as_recorded(id, signed), "{id}: {signed:?}");
-            // The APDU the user confirms is each row's last, and discovery
-            // has none: 5 minutes there, 15 s on every other.
-            for (index, apdu) in sent.iter().enumerate() {
-                let confirm = !is_discovery(id) && index + 1 == sent.len();
-                let deadline = if confirm { CONFIRM } else { APDU };
-                assert_eq!(apdu.deadline_ms, deadline, "{id} #{index}");
-            }
-            // The core's request IDs, one per APDU, increase.
-            assert!(sent.windows(2).all(|pair| pair[0].core < pair[1].core));
-            assert!(main.wrote().is_empty());
-            assert_eq!(main.wakeup(), None);
+    for (n, id) in CASES.into_iter().enumerate() {
+        let mut main = Main::new();
+        let parent = 40 + n as u64;
+        assert!(main.submit(parent, id, 0).is_empty());
+        let (sent, ends) = run_device(&mut main, id, parent, 0);
+        let [end] = ends.as_slice() else {
+            panic!("{id}: {ends:?}");
+        };
+        assert_eq!((end.parent, end.then), (parent, id));
+        let Outcome::Done(Ok(signed)) = &end.outcome else {
+            panic!("{id}: {:?}", end.outcome);
+        };
+        assert!(as_recorded(id, signed), "{id}: {signed:?}");
+        // The APDU the user confirms is each row's last, and discovery has
+        // none: 5 minutes there, 15 s on every other.
+        for (index, apdu) in sent.iter().enumerate() {
+            let confirm = !is_discovery(id) && index + 1 == sent.len();
+            let deadline = if confirm { CONFIRM } else { APDU };
+            assert_eq!(apdu.deadline_ms, deadline, "{id} #{index}");
         }
+        // The core's request IDs, one per APDU, increase.
+        assert!(sent.windows(2).all(|pair| pair[0].core < pair[1].core));
+        assert!(main.wrote().is_empty());
+        assert_eq!(main.wakeup(), None);
     }
     // The hash-only form went only after main's hash_only: its one APDU is
     // E0 0C 00 00, after the first E0 1A.
-    let mut main = Main::new(QUEUE_WAIT);
+    let mut main = Main::new();
     main.submit(1, HASH_ONLY, 0);
     let (sent, _) = run_device(&mut main, HASH_ONLY, 1, 0);
     let headers: Vec<&[u8]> = sent.iter().map(|apdu| &apdu.apdu[..4]).collect();
@@ -510,7 +507,7 @@ fn every_apdu_carries_its_deadline_and_every_case_ends_as_recorded() {
 
 #[test]
 fn two_operations_in_turn() {
-    let mut main = Main::new(QUEUE_WAIT);
+    let mut main = Main::new();
     assert!(main.submit(1, MSG, 0).is_empty());
     assert!(main.submit(2, MSG_OTHER, 0).is_empty());
     assert_eq!(main.lane.waiting(), 1);
@@ -529,7 +526,7 @@ fn two_operations_in_turn() {
 
 #[test]
 fn a_ninth_waiting_is_refused_busy_and_the_rest_keep_their_order() {
-    let mut main = Main::new(QUEUE_WAIT);
+    let mut main = Main::new();
     assert!(main.submit(100, ADD, 0).is_empty());
     let running = main.out();
     main.wrote();
@@ -561,7 +558,7 @@ fn a_ninth_waiting_is_refused_busy_and_the_rest_keep_their_order() {
 
 #[test]
 fn discovery_is_busy_at_once_while_another_runs_or_waits() {
-    let mut main = Main::new(QUEUE_WAIT);
+    let mut main = Main::new();
     // The lane idle: it runs.
     assert!(main.submit(1, DISCOVERY, 0).is_empty());
     // A signature waits behind it; another discovery doesn't.
@@ -593,7 +590,7 @@ fn fifteen_seconds_without_an_answer_give_unresponsive() {
     // MSG's APDUs before the one the user confirms.
     for silent in 0..3 {
         // Main's own deadline: its failed "unresponsive" at 15 s.
-        let mut main = Main::new(QUEUE_WAIT);
+        let mut main = Main::new();
         main.submit(1, MSG, 0);
         main.submit(2, MSG_OTHER, 0);
         let (sent, ends) = run(&mut main, MSG, 1, 0, |index, _| {
@@ -616,7 +613,7 @@ fn fifteen_seconds_without_an_answer_give_unresponsive() {
         assert_eq!(main.out().parent, 2);
 
         // Main silent: the core's own timer, 1 s longer.
-        let mut main = Main::new(QUEUE_WAIT);
+        let mut main = Main::new();
         main.submit(1, MSG, 0);
         main.submit(2, MSG_OTHER, 0);
         let (sent, _) = run(&mut main, MSG, 1, 0, |index, _| {
@@ -647,7 +644,7 @@ fn fifteen_seconds_without_an_answer_give_unresponsive() {
         assert_eq!(main.overdue(), None);
     }
     // An answer within the core's second is taken.
-    let mut main = Main::new(QUEUE_WAIT);
+    let mut main = Main::new();
     main.submit(1, MSG, 0);
     let first = main.out();
     main.wrote();
@@ -701,7 +698,7 @@ fn check_lapsed(end: &Ended<&'static str>, code: LedgerCode, lapse: Lapse) {
 fn the_lanes_own_end_of_a_check_leaves_discovery_answered() {
     // Main silent at each APDU: discovery's two, then the check's four.
     for silent in 0..6 {
-        let mut main = Main::new(QUEUE_WAIT);
+        let mut main = Main::new();
         assert!(submit_checking(&mut main, 1, 0).is_empty());
         let (sent, ends) = run(&mut main, RECORDS, 1, 0, |index, _| {
             if index == silent {
@@ -739,7 +736,7 @@ fn the_lanes_own_end_of_a_check_leaves_discovery_answered() {
     // discovery's second fails the operation, a check's only the check.
     // Nothing was out, so nothing is cancelled.
     for blocked in [1, 2, 5] {
-        let mut main = Main::with_room(QUEUE_WAIT, 1);
+        let mut main = Main::with_room(1);
         assert!(submit_checking(&mut main, 1, 0).is_empty());
         let (sent, _) = run(&mut main, RECORDS, 1, 0, |index, _| {
             if index + 1 == blocked {
@@ -777,7 +774,7 @@ fn the_lanes_own_end_of_a_check_leaves_discovery_answered() {
     }
 
     // The core exiting as a check's APDU would go: only the check fails.
-    let mut main = Main::new(QUEUE_WAIT);
+    let mut main = Main::new();
     assert!(submit_checking(&mut main, 1, 0).is_empty());
     let (sent, _) = run(&mut main, RECORDS, 1, 0, |index, _| {
         if index == 1 { Act::Silent } else { Act::Device }
@@ -790,7 +787,7 @@ fn the_lanes_own_end_of_a_check_leaves_discovery_answered() {
     check_lapsed(end, LedgerCode::Unknown, Lapse::Unsent);
 
     // The parent's cancel during the check: cancelled, its APDU cancelled.
-    let mut main = Main::new(QUEUE_WAIT);
+    let mut main = Main::new();
     assert!(submit_checking(&mut main, 1, 0).is_empty());
     let (sent, _) = run(&mut main, RECORDS, 1, 0, |index, _| {
         if index == 3 { Act::Silent } else { Act::Device }
@@ -817,123 +814,152 @@ fn to_confirm(main: &mut Main, id: &str, parent: u64, ms: u64) -> Sent {
 
 #[test]
 fn the_users_answer_at_4_59_999_signs_and_at_5_00_is_timeout() {
-    for policy in POLICIES {
-        for id in [MSG, ADD] {
-            // The answer at 4:59.999 signs.
-            let mut main = Main::new(policy);
-            main.submit(1, id, 0);
-            let out = to_confirm(&mut main, id, 1, 0);
-            assert_eq!(out.deadline_ms, CONFIRM);
-            assert!(main.tick(CONFIRM - 1).is_empty());
-            let ends = main.answer(out.core, &device(id, &out.apdu), CONFIRM - 1);
-            assert_eq!(summary(&ends), [(1, "signed")]);
-            let Outcome::Done(Ok(signed)) = &ends[0].outcome else {
-                panic!();
-            };
-            assert!(as_recorded(id, signed));
+    for id in [MSG, ADD] {
+        // The answer at 4:59.999 signs.
+        let mut main = Main::new();
+        main.submit(1, id, 0);
+        let out = to_confirm(&mut main, id, 1, 0);
+        assert_eq!(out.deadline_ms, CONFIRM);
+        assert!(main.tick(CONFIRM - 1).is_empty());
+        let ends = main.answer(out.core, &device(id, &out.apdu), CONFIRM - 1);
+        assert_eq!(summary(&ends), [(1, "signed")]);
+        let Outcome::Done(Ok(signed)) = &ends[0].outcome else {
+            panic!();
+        };
+        assert!(as_recorded(id, signed));
 
-            // At 5:00, main's own deadline: its failed "timeout".
-            let mut main = Main::new(policy);
-            main.submit(1, id, 0);
-            let out = to_confirm(&mut main, id, 1, 0);
-            assert!(main.tick(CONFIRM).is_empty());
-            let ends = main.failed(out.core, "timeout", CONFIRM);
-            assert_eq!(summary(&ends), [(1, "LEDGER_TIMEOUT")]);
+        // At 5:00, main's own deadline: its failed "timeout".
+        let mut main = Main::new();
+        main.submit(1, id, 0);
+        let out = to_confirm(&mut main, id, 1, 0);
+        assert!(main.tick(CONFIRM).is_empty());
+        let ends = main.failed(out.core, "timeout", CONFIRM);
+        assert_eq!(summary(&ends), [(1, "LEDGER_TIMEOUT")]);
 
-            // Main silent: the core's own timer, 1 s longer.
-            let mut main = Main::new(policy);
-            main.submit(1, id, 0);
-            let out = to_confirm(&mut main, id, 1, 0);
-            assert_eq!(main.wakeup(), Some(CORE_CONFIRM));
-            assert!(main.tick(CORE_CONFIRM - 1).is_empty());
-            let ends = main.tick(CORE_CONFIRM);
-            assert_eq!(summary(&ends), [(1, "LEDGER_TIMEOUT")]);
-            assert_eq!(
-                ends[0].outcome,
-                Outcome::Lane(LaneEnd::NoAnswer { confirm: true })
-            );
-            assert_eq!(main.wrote(), [Wrote::Cancel(out.core)]);
-            // The user's answer after it is dropped: nothing returned.
-            let late = device(id, &out.apdu);
-            assert!(main.answer(out.core, &late, CORE_CONFIRM + 1).is_empty());
-            assert!(main.wrote().is_empty());
-        }
+        // Main silent: the core's own timer, 1 s longer.
+        let mut main = Main::new();
+        main.submit(1, id, 0);
+        let out = to_confirm(&mut main, id, 1, 0);
+        assert_eq!(main.wakeup(), Some(CORE_CONFIRM));
+        assert!(main.tick(CORE_CONFIRM - 1).is_empty());
+        let ends = main.tick(CORE_CONFIRM);
+        assert_eq!(summary(&ends), [(1, "LEDGER_TIMEOUT")]);
+        assert_eq!(
+            ends[0].outcome,
+            Outcome::Lane(LaneEnd::NoAnswer { confirm: true })
+        );
+        assert_eq!(main.wrote(), [Wrote::Cancel(out.core)]);
+        // The user's answer after it is dropped: nothing returned.
+        let late = device(id, &out.apdu);
+        assert!(main.answer(out.core, &late, CORE_CONFIRM + 1).is_empty());
+        assert!(main.wrote().is_empty());
     }
 }
 
-#[test]
-fn a_wait_in_the_queue_counts_against_the_confirmation_as_0016_is_written() {
-    for policy in POLICIES {
-        for waited in [0, 60_000, 240_000, LIMIT - 1] {
-            let mut main = Main::new(policy);
-            main.submit(1, ADD, 0);
-            let running = main.out();
-            main.wrote();
-            main.submit(2, MSG, 0);
-            // The first ends; the second's first APDU goes.
-            let ends = main.answer(running.core, &device(ADD, &running.apdu), waited);
-            assert_eq!(summary(&ends), [(1, "signed")]);
-            let out = to_confirm(&mut main, MSG, 2, waited);
-            // The same deadline_ms either way.
-            assert_eq!(out.deadline_ms, CONFIRM);
-            // As written, the wait spends the 5 minutes: 4 minutes in line
-            // leave 1 (and the margin). Under the proposal, the full 5.
-            let end = match policy {
-                QueueWait::Counts => CORE_CONFIRM,
-                QueueWait::Apart => waited + CORE_CONFIRM,
-            };
-            assert_eq!(main.wakeup(), Some(end), "{policy:?} {waited}");
-            assert!(main.tick(end - 1).is_empty());
-            let ends = main.tick(end);
-            assert_eq!(
-                summary(&ends),
-                [(2, "LEDGER_TIMEOUT")],
-                "{policy:?} {waited}"
-            );
-            assert_eq!(main.wrote(), [Wrote::Cancel(out.core)]);
-        }
-    }
-    // As written, the answer just before that end still signs.
-    let mut main = Main::new(QueueWait::Counts);
-    main.submit(1, ADD, 0);
+/// [`ADD`] runs from 0 and is answered at `waited`, while [`MSG`], which
+/// came at 0, waits behind it: its first APDU goes at `waited`.
+fn queued_for(main: &mut Main, waited: u64) {
+    assert!(main.submit(1, ADD, 0).is_empty());
     let running = main.out();
     main.wrote();
-    main.submit(2, MSG, 0);
-    main.answer(running.core, &device(ADD, &running.apdu), 240_000);
-    let out = to_confirm(&mut main, MSG, 2, 240_000);
-    let ends = main.answer(out.core, &device(MSG, &out.apdu), CORE_CONFIRM - 1);
-    assert_eq!(summary(&ends), [(2, "signed")]);
+    assert!(main.submit(2, MSG, 0).is_empty());
+    let ends = main.answer(running.core, &device(ADD, &running.apdu), waited);
+    assert_eq!(summary(&ends), [(1, "signed")]);
+}
+
+/// Question 5, decided 2026-11-28 ("separate limits"): a wait in the queue
+/// doesn't count against the 5 minutes to confirm. However long a request
+/// waited for its first APDU, short of the lane's limit, the APDU the user
+/// confirms has its full 5 minutes on main's exchange and the core's
+/// second, and every other APDU its 15 s and the second.
+#[test]
+fn a_wait_in_the_queue_leaves_the_confirmation_its_full_five_minutes() {
+    for waited in [0, 60_000, 180_000, 240_000, LIMIT - 1] {
+        // The core's own timer: 3 minutes in line still leave all 5 (and
+        // the margin) from the moment the APDU goes.
+        let mut main = Main::new();
+        queued_for(&mut main, waited);
+        // Its first APDU, which the user doesn't confirm: 15 s and the
+        // margin, from when it went.
+        let first = main.out();
+        assert_eq!((first.parent, first.deadline_ms), (2, APDU), "{waited}");
+        assert_eq!(main.wakeup(), Some(waited + CORE_APDU), "{waited}");
+        let out = to_confirm(&mut main, MSG, 2, waited);
+        assert_eq!(out.deadline_ms, CONFIRM, "{waited}");
+        let end = waited + CORE_CONFIRM;
+        assert_eq!(main.wakeup(), Some(end), "{waited}");
+        assert!(main.tick(end - 1).is_empty(), "{waited}");
+        let ends = main.tick(end);
+        assert_eq!(summary(&ends), [(2, "LEDGER_TIMEOUT")], "{waited}");
+        assert_eq!(
+            ends[0].outcome,
+            Outcome::Lane(LaneEnd::NoAnswer { confirm: true })
+        );
+        assert_eq!(main.wrote(), [Wrote::Cancel(out.core)], "{waited}");
+
+        // The user's answer in the core's last millisecond signs.
+        let mut main = Main::new();
+        queued_for(&mut main, waited);
+        let out = to_confirm(&mut main, MSG, 2, waited);
+        assert!(main.tick(end - 1).is_empty(), "{waited}");
+        let ends = main.answer(out.core, &device(MSG, &out.apdu), end - 1);
+        assert_eq!(summary(&ends), [(2, "signed")], "{waited}");
+        let Outcome::Done(Ok(signed)) = &ends[0].outcome else {
+            panic!("{waited}: {:?}", ends[0].outcome);
+        };
+        assert!(as_recorded(MSG, signed), "{waited}");
+
+        // Main's own deadline, 5 minutes after the APDU went: its failed
+        // "timeout".
+        let mut main = Main::new();
+        queued_for(&mut main, waited);
+        let out = to_confirm(&mut main, MSG, 2, waited);
+        assert!(main.tick(waited + CONFIRM).is_empty(), "{waited}");
+        let ends = main.failed(out.core, "timeout", waited + CONFIRM);
+        assert_eq!(summary(&ends), [(2, "LEDGER_TIMEOUT")], "{waited}");
+    }
+
+    // At the lane's limit the wait ends on its own, `LEDGER_BUSY`, with
+    // nothing sent for it: the running one's answer at 5:00 is too late.
+    let mut main = Main::new();
+    assert!(main.submit(1, ADD, 0).is_empty());
+    let running = main.out();
+    main.wrote();
+    assert!(main.submit(2, MSG, 0).is_empty());
+    let ends = main.answer(running.core, &device(ADD, &running.apdu), LIMIT);
+    assert_eq!(summary(&ends), [(2, "LEDGER_BUSY"), (1, "signed")]);
+    assert_eq!(ends[0].outcome, Outcome::Lane(LaneEnd::QueueLimit));
+    assert!(main.wrote().is_empty(), "nothing went for it");
+    assert_eq!(main.wakeup(), None);
 }
 
 #[test]
 fn a_queued_request_never_waits_past_the_lanes_limit() {
-    for policy in POLICIES {
-        let mut main = Main::new(policy);
-        main.submit(1, ADD, 0);
-        let running = main.out();
-        main.wrote();
-        main.submit(2, MSG, 500);
-        main.submit(3, MSG_OTHER, 1_000);
-        assert_eq!(main.wakeup(), Some(500 + LIMIT));
-        assert!(main.tick(500 + LIMIT - 1).is_empty());
-        let ends = main.tick(500 + LIMIT);
-        assert_eq!(summary(&ends), [(2, "LEDGER_BUSY")]);
-        assert_eq!(ends[0].outcome, Outcome::Lane(LaneEnd::QueueLimit));
-        assert!(main.wrote().is_empty(), "nothing went for it");
-        // The third's limit, and the first's own timer, fall together.
-        assert_eq!(main.wakeup(), Some(CORE_CONFIRM));
-        let ends = main.tick(CORE_CONFIRM);
-        assert_eq!(summary(&ends), [(3, "LEDGER_BUSY"), (1, "LEDGER_TIMEOUT")]);
-        assert_eq!(main.wrote(), [Wrote::Cancel(running.core)]);
-        assert_eq!(main.wakeup(), None);
-        // Main's late answer to the first is dropped.
-        assert!(
-            main.failed(running.core, "timeout", CORE_CONFIRM)
-                .is_empty()
-        );
-    }
+    let mut main = Main::new();
+    main.submit(1, ADD, 0);
+    let running = main.out();
+    main.wrote();
+    main.submit(2, MSG, 500);
+    main.submit(3, MSG_OTHER, 1_000);
+    assert_eq!(main.wakeup(), Some(500 + LIMIT));
+    assert!(main.tick(500 + LIMIT - 1).is_empty());
+    let ends = main.tick(500 + LIMIT);
+    assert_eq!(summary(&ends), [(2, "LEDGER_BUSY")]);
+    assert_eq!(ends[0].outcome, Outcome::Lane(LaneEnd::QueueLimit));
+    assert!(main.wrote().is_empty(), "nothing went for it");
+    // The third's limit, and the first's own timer, fall together.
+    assert_eq!(main.wakeup(), Some(CORE_CONFIRM));
+    let ends = main.tick(CORE_CONFIRM);
+    assert_eq!(summary(&ends), [(3, "LEDGER_BUSY"), (1, "LEDGER_TIMEOUT")]);
+    assert_eq!(main.wrote(), [Wrote::Cancel(running.core)]);
+    assert_eq!(main.wakeup(), None);
+    // Main's late answer to the first is dropped.
+    assert!(
+        main.failed(running.core, "timeout", CORE_CONFIRM)
+            .is_empty()
+    );
     // Every one of a full queue, each at its own limit, in order.
-    let mut main = Main::new(QUEUE_WAIT);
+    let mut main = Main::new();
     main.submit(100, ADD, 0);
     main.wrote();
     for parent in 1..=8 {
@@ -950,7 +976,7 @@ fn a_queued_request_never_waits_past_the_lanes_limit() {
 
     // A first APDU main's gate has no room for counts as a wait in line:
     // it ends at the limit, never sent.
-    let mut main = Main::with_room(QUEUE_WAIT, 1);
+    let mut main = Main::with_room(1);
     let (_slot, _rx) = filler(&main);
     assert!(main.submit(1, MSG, 0).is_empty());
     assert!(main.wrote().is_empty());
@@ -962,7 +988,7 @@ fn a_queued_request_never_waits_past_the_lanes_limit() {
     assert!(main.wrote().is_empty());
 
     // Room before the limit: the gate wakes the lane, and it goes.
-    let mut main = Main::with_room(QUEUE_WAIT, 1);
+    let mut main = Main::with_room(1);
     let (slot, _rx) = filler(&main);
     main.submit(1, MSG, 0);
     assert!(main.wrote().is_empty());
@@ -977,7 +1003,7 @@ fn a_queued_request_never_waits_past_the_lanes_limit() {
 #[test]
 fn a_cancel_before_the_first_apdu_sends_nothing() {
     // Waiting in line.
-    let mut main = Main::new(QUEUE_WAIT);
+    let mut main = Main::new();
     main.submit(1, ADD, 0);
     let running = main.out();
     main.wrote();
@@ -992,7 +1018,7 @@ fn a_cancel_before_the_first_apdu_sends_nothing() {
     assert_eq!(main.wakeup(), None);
 
     // Its first APDU waiting for room at main's gate.
-    let mut main = Main::with_room(QUEUE_WAIT, 1);
+    let mut main = Main::with_room(1);
     let (slot, _rx) = filler(&main);
     main.submit(1, MSG, 0);
     assert_eq!(summary(&main.cancel(1, 10)), [(1, "cancelled")]);
@@ -1008,7 +1034,7 @@ fn a_cancel_before_the_first_apdu_sends_nothing() {
 
 #[test]
 fn a_cancel_between_two_apdus_cancels_the_one_out() {
-    let mut main = Main::new(QUEUE_WAIT);
+    let mut main = Main::new();
     main.submit(1, MSG, 0);
     main.submit(2, MSG_OTHER, 0);
     // The address check answered, B0 01 out.
@@ -1036,7 +1062,7 @@ fn a_cancel_between_two_apdus_cancels_the_one_out() {
 
     // Between two with the next waiting for room at main's gate: nothing is
     // out, so nothing is cancelled.
-    let mut main = Main::with_room(QUEUE_WAIT, 1);
+    let mut main = Main::with_room(1);
     main.submit(1, MSG, 0);
     let first = main.out();
     main.wrote();
@@ -1061,7 +1087,7 @@ fn a_cancel_between_two_apdus_cancels_the_one_out() {
 #[test]
 fn a_cancel_during_the_users_wait_returns_nothing() {
     for late in ["signature", "cancelled"] {
-        let mut main = Main::new(QUEUE_WAIT);
+        let mut main = Main::new();
         main.submit(1, MSG, 0);
         main.submit(2, ADD, 0);
         let out = to_confirm(&mut main, MSG, 1, 0);
@@ -1083,13 +1109,11 @@ fn a_cancel_during_the_users_wait_returns_nothing() {
         };
         assert!(ends.is_empty());
         assert!(main.wrote().is_empty());
-        // The next one waited 100 s for its first APDU, which as 0016 is
-        // written it spends of its 5 minutes.
-        let end = match QUEUE_WAIT {
-            QueueWait::Counts => CORE_CONFIRM,
-            QueueWait::Apart => 100_000 + CORE_CONFIRM,
-        };
-        assert_eq!(main.wakeup(), Some(end));
+        // The next one waited 100 s for its first APDU, which the user
+        // confirms: it still has its full 5 minutes and the margin
+        // (question 5).
+        assert_eq!(next.deadline_ms, CONFIRM);
+        assert_eq!(main.wakeup(), Some(100_000 + CORE_CONFIRM));
         let ends = main.answer(next.core, &device(ADD, &next.apdu), 100_002);
         assert_eq!(summary(&ends), [(2, "signed")]);
     }
@@ -1098,11 +1122,11 @@ fn a_cancel_during_the_users_wait_returns_nothing() {
 #[test]
 fn an_unplug_at_each_apdu_gives_disconnected() {
     for id in CASES {
-        let mut main = Main::new(QUEUE_WAIT);
+        let mut main = Main::new();
         main.submit(1, id, 0);
         let (all, _) = run_device(&mut main, id, 1, 0);
         for at in 0..all.len() {
-            let mut main = Main::new(QUEUE_WAIT);
+            let mut main = Main::new();
             main.submit(1, id, 0);
             main.submit(2, MSG_OTHER, 0);
             let (sent, ends) = run(&mut main, id, 1, 0, |index, _| {
@@ -1131,7 +1155,7 @@ fn an_unplug_at_each_apdu_gives_disconnected() {
 
 #[test]
 fn a_stale_answer_is_refused_bad_signature() {
-    let mut main = Main::new(QUEUE_WAIT);
+    let mut main = Main::new();
     main.submit(1, MSG, 0);
     main.submit(2, MSG_OTHER, 0);
     let (sent, ends) = run_device(&mut main, MSG, 1, 0);
@@ -1155,7 +1179,7 @@ fn a_stale_answer_is_refused_bad_signature() {
 
 #[test]
 fn mains_refusal_of_an_apdu_ends_unknown() {
-    let mut main = Main::new(QUEUE_WAIT);
+    let mut main = Main::new();
     main.submit(1, MSG, 0);
     main.submit(2, MSG_OTHER, 0);
     let refusal = json!({
@@ -1178,7 +1202,7 @@ fn mains_refusal_of_an_apdu_ends_unknown() {
 #[test]
 fn a_6d00_without_hash_only_ends_unknown_with_nothing_more_sent() {
     // Q23: the hash-only APDU goes only after main's hash_only: "shown".
-    let mut main = Main::new(QUEUE_WAIT);
+    let mut main = Main::new();
     main.submit(1, HASH_ONLY, 0);
     main.submit(2, MSG_OTHER, 0);
     let (sent, ends) = run(&mut main, HASH_ONLY, 1, 0, |_, apdu| {
@@ -1208,14 +1232,14 @@ fn a_reply_that_breaks_the_rules_is_a_protocol_error() {
         out
     };
     // An unknown member.
-    let mut main = Main::new(QUEUE_WAIT);
+    let mut main = Main::new();
     let out = start(&mut main);
     let reply = Ok(json!({ "answer": "9000", "extra": 1 }));
     let fault = main.reply(out.core, reply, 1).unwrap_err();
     assert_eq!(fault, Protocol::Reply(Fault::Form));
     assert_eq!(fault.category(), "ledger_reply_form");
     // hash_only on an answer that isn't to the first E0 1A.
-    let mut main = Main::new(QUEUE_WAIT);
+    let mut main = Main::new();
     let out = start(&mut main);
     let reply = Ok(json!({ "answer": "6d00", "hash_only": "shown" }));
     assert_eq!(
@@ -1223,14 +1247,14 @@ fn a_reply_that_breaks_the_rules_is_a_protocol_error() {
         Protocol::Reply(Fault::HashOnly)
     );
     // Main's cancelled for an APDU the lane didn't cancel.
-    let mut main = Main::new(QUEUE_WAIT);
+    let mut main = Main::new();
     let out = start(&mut main);
     let reply = Err(json!({ "code": "cancelled", "message": "Cancelled" }));
     let fault = main.reply(out.core, reply, 1).unwrap_err();
     assert_eq!(fault, Protocol::Uncancelled);
     assert_eq!(fault.category(), "ledger_uncancelled");
     // A late answer is read as strictly.
-    let mut main = Main::new(QUEUE_WAIT);
+    let mut main = Main::new();
     let out = start(&mut main);
     main.cancel(1, 1);
     let reply = Ok(json!({ "answer": "zz" }));
@@ -1239,7 +1263,7 @@ fn a_reply_that_breaks_the_rules_is_a_protocol_error() {
         Protocol::Reply(Fault::Type)
     );
     // An answer to no APDU of the lane's.
-    let mut main = Main::new(QUEUE_WAIT);
+    let mut main = Main::new();
     start(&mut main);
     let at = main.at(1);
     let fault = main
@@ -1250,18 +1274,9 @@ fn a_reply_that_breaks_the_rules_is_a_protocol_error() {
 }
 
 #[test]
-fn question_5_is_one_constant() {
-    // 0016 as written, until the user decides: the wait counts.
-    assert_eq!(QUEUE_WAIT, QueueWait::Counts);
-    assert_eq!(
-        QueueWait::Counts.spent(Duration::from_secs(60)),
-        Duration::from_secs(60)
-    );
-    assert_eq!(
-        QueueWait::Apart.spent(Duration::from_secs(60)),
-        Duration::ZERO
-    );
-    // Either way: 8 in line, 5 minutes at most, the core's second.
+fn the_lanes_bounds() {
+    // 8 in line, 5 minutes at most there, and apart from it (question 5)
+    // each APDU's deadline_ms and the core's second.
     assert_eq!(MAX_WAITING, 8);
     assert_eq!(MAX_QUEUE_WAIT, Duration::from_secs(300));
     assert_eq!(MARGIN, Duration::from_secs(1));
