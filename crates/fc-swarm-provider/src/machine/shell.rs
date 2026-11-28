@@ -65,6 +65,16 @@ pub const OWNER_CHANGED: &str = "owner_changed";
 pub const OWNER_CHANGED_MESSAGE: &str =
     "The Bee wallet this feed request names is no longer the vault's";
 
+/// `swarm.publish`'s code when its history row's insert, or the
+/// `history-bound` trim right after it, failed, before any node call: where
+/// the reference's `addEntry` throws before the IPC handler's `try`, so the
+/// invoke rejects. The text stays the history store's.
+pub const HISTORY_INSERT: &str = "history_insert";
+/// `swarm.publish`'s code when a later write of its history row failed (the
+/// `completed` update, or a failure's own `failed` update), after the
+/// core's one retry (`history-retry`). The text stays the write's.
+pub const HISTORY_UPDATE: &str = "history_update";
+
 /// The largest safe integer.
 const MAX_SAFE: f64 = 9_007_199_254_740_991.0;
 
@@ -258,6 +268,15 @@ impl ShellError {
     /// What bee-js threw reading a reply (zod's, `mapPostageBatch`'s).
     pub(crate) fn js(err: &JsError) -> ShellError {
         ShellError::new(err.message.clone())
+    }
+
+    /// A history write's failure, `message` the store's text, with its
+    /// code ([`HISTORY_INSERT`] or [`HISTORY_UPDATE`]).
+    pub(crate) fn history(message: impl Into<JsString>, code: &'static str) -> ShellError {
+        ShellError {
+            code: Some(code),
+            ..ShellError::new(message)
+        }
     }
 
     /// `swarm.feed`'s refusal when the vault's Bee wallet isn't the owner

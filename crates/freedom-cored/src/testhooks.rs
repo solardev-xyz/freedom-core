@@ -102,7 +102,8 @@
 //!   before the original is dropped (design 0017, C5), `publish_history`
 //!   for its `publish-history.json` the same way (design 0015, D10);
 //!   `swarm_history:write` fails each `publish-history.sqlite` statement
-//!   before it runs; `write`, `fsync`, `rename`,
+//!   before it runs, and `swarm_history:batch` each batch a machine writes
+//!   (the bound's trim, a row's update) but not an insert; `write`, `fsync`, `rename`,
 //!   `flush`), each write of that store's permission
 //!   file fails at that step as if the OS had failed it (design 0012, "The
 //!   files": a failed write). Read at each write, so a test turns it on

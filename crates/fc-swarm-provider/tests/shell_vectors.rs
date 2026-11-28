@@ -37,8 +37,8 @@ use fc_json::JsString;
 use fc_json::index::{Index, KeyOrder, Kind, Value as V};
 use fc_swarm_provider::machine::node::{BodyAbort, BodyOut, CHARGE_FLOOR, MAX_FRAME, WINDOW};
 use fc_swarm_provider::machine::shell::{
-    AskBound, Deadline, OWNER_CHANGED, OWNER_CHANGED_MESSAGE, Shell, ShellCall, ShellError,
-    ShellMethod, ShellOutcome, ask_bound,
+    AskBound, Deadline, HISTORY_INSERT, HISTORY_UPDATE, OWNER_CHANGED, OWNER_CHANGED_MESSAGE,
+    Shell, ShellCall, ShellError, ShellMethod, ShellOutcome, ask_bound,
 };
 use fc_swarm_provider::machine::{
     Abort, Ask, AskId, Body, Effect, ErrorCode, Event, Failed, Form, Need, NodeCall, Outcome,
@@ -127,6 +127,8 @@ struct Main<'a> {
     next_row: i64,
     /// Store writes from this one on (counting from 0) fail with the text.
     fail_writes: Option<(usize, &'static str)>,
+    /// These store writes (counting from 0) fail, each with its text.
+    fail_at: BTreeMap<usize, &'static str>,
     /// The history's statements, run through SQLite.
     db: Option<HistoryDb>,
     /// Stop (and return) once this many node calls were asked.
@@ -146,6 +148,7 @@ impl<'a> Main<'a> {
             unlocked: true,
             next_row: 1,
             fail_writes: None,
+            fail_at: BTreeMap::new(),
             db: None,
             stop_after: None,
             abort_part: None,
@@ -276,7 +279,10 @@ impl<'a> Main<'a> {
     fn write(&mut self, played: &mut Played, write: StoreWrite) -> Event {
         let n = played.writes.len();
         played.writes.push(write.clone());
-        let failing = self.fail_writes.filter(|(from, _)| n >= *from);
+        let failing = self
+            .fail_writes
+            .filter(|(from, _)| n >= *from)
+            .or_else(|| self.fail_at.get(&n).map(|text| (n, *text)));
         match write {
             StoreWrite::HistoryInsert(statement) => match failing {
                 Some((_, text)) => Event::Inserted(Err(JsString::from(text))),
@@ -1855,25 +1861,26 @@ fn the_history_row_as_the_ipc_handlers_keep_it() {
         );
     }
 
-    // `addEntry` throws: the handler throws, nothing reaches the node.
+    // `addEntry` throws: the handler throws, nothing reaches the node
+    // (`history_insert`).
     let mut main = Main::new(&keys, honest_node(a1_stamps()));
     main.fail_writes = Some((0, "SQLITE_FULL"));
     let (outcome, played, _) = main.play(parse(
         ShellMethod::Publish,
         &with_history("data", r#"{"type":"data","name":"Text"}"#, ""),
     ));
-    assert_eq!(outcome, error("SQLITE_FULL"));
+    assert_eq!(outcome, history_error("SQLITE_FULL", HISTORY_INSERT));
     assert!(played.calls.is_empty());
 
     // The completed update throws: the failed update with its message
-    // (once), and the write's error is the answer.
+    // (once), and the write's error is the answer (`history_update`).
     let mut main = Main::new(&keys, honest_node(a1_stamps()));
     main.fail_writes = Some((2, "EIO"));
     let (outcome, played, _) = main.play(parse(
         ShellMethod::Publish,
         &with_history("data", r#"{"type":"data","name":"Text"}"#, ""),
     ));
-    assert_eq!(outcome, error("EIO"));
+    assert_eq!(outcome, history_error("EIO", HISTORY_UPDATE));
     assert_eq!(played.writes.len(), 4, "insert, trim, completed, failed");
 
     // Cancelled mid-upload: the body ends `cancelled`, the row `failed`
@@ -1920,6 +1927,133 @@ fn the_history_row_as_the_ipc_handlers_keep_it() {
         entry_field(&entries[0], "errorMessage"),
         fc_json::JsValue::string("cancelled")
     );
+}
+
+/// A history write's failure, as `swarm.publish` answers it (core PR K2):
+/// the store's text, with its code.
+fn history_error(message: &str, code: &'static str) -> ShellOutcome {
+    ShellOutcome::Error(ShellError {
+        code: Some(code),
+        ..ShellError::new(message)
+    })
+}
+
+/// `swarm.publish`'s history failures carry a code (core PR K2), each
+/// write's own text kept: `history_insert` for the insert and the bound's
+/// trim right after it, before any node call, whatever the row's `failed`
+/// update after the trim does; `history_update` for a later update of the
+/// row, after its one retry (`history-retry`): the `completed` update
+/// (answered with its text when the retry holds, the retry's when it
+/// fails), or a failure's own `failed` update (answered with its text
+/// either way).
+#[test]
+fn history_failures_carry_their_code() {
+    let v = Vectors::load();
+    let keys = keys_of(&v);
+    assert_eq!(
+        (HISTORY_INSERT, HISTORY_UPDATE),
+        ("history_insert", "history_update")
+    );
+    let data = r#"{"kind":"data","parts":[{"bytes":5,"base64":"aGVsbG8="}],"batch":"a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1","pin":true,"deferred":false,"history":{"type":"data","name":"Text"}}"#;
+    let failing_node: fn() -> NodeFn<'static> = || {
+        node_with(
+            Form::BzzFile,
+            json_reply(500, Vec::new(), r#"{"code":500,"message":"boom"}"#),
+        )
+    };
+    // (the node, the writes that fail with their texts, the answer, the
+    // writes asked, the node calls made)
+    type Row = (
+        fn() -> NodeFn<'static>,
+        Vec<(usize, &'static str)>,
+        ShellOutcome,
+        usize,
+        usize,
+    );
+    let honest: fn() -> NodeFn<'static> = || honest_node(a1_stamps());
+    let rows: Vec<Row> = vec![
+        // The insert.
+        (
+            honest,
+            vec![(0, "w0")],
+            history_error("w0", HISTORY_INSERT),
+            1,
+            0,
+        ),
+        // The trim; the failed update holds.
+        (
+            honest,
+            vec![(1, "w1")],
+            history_error("w1", HISTORY_INSERT),
+            3,
+            0,
+        ),
+        // The trim and the failed update; the retry holds.
+        (
+            honest,
+            vec![(1, "w1"), (2, "w2")],
+            history_error("w2", HISTORY_INSERT),
+            4,
+            0,
+        ),
+        // The trim, the failed update and its retry.
+        (
+            honest,
+            vec![(1, "w1"), (2, "w2"), (3, "w3")],
+            history_error("w2", HISTORY_INSERT),
+            4,
+            0,
+        ),
+        // The completed update; the retry holds.
+        (
+            honest,
+            vec![(2, "w2")],
+            history_error("w2", HISTORY_UPDATE),
+            4,
+            1,
+        ),
+        // The completed update and its retry.
+        (
+            honest,
+            vec![(2, "w2"), (3, "w3")],
+            history_error("w3", HISTORY_UPDATE),
+            4,
+            1,
+        ),
+        // The upload fails, then its failed update; the retry holds.
+        (
+            failing_node,
+            vec![(2, "w2")],
+            history_error("w2", HISTORY_UPDATE),
+            4,
+            1,
+        ),
+        // The upload fails, then its failed update and the retry.
+        (
+            failing_node,
+            vec![(2, "w2"), (3, "w3")],
+            history_error("w2", HISTORY_UPDATE),
+            4,
+            1,
+        ),
+    ];
+    for (k, (node, fail_at, want, writes, calls)) in rows.into_iter().enumerate() {
+        let mut main = Main::new(&keys, node());
+        main.fail_at = fail_at.into_iter().collect();
+        let (outcome, played, _) = main.play(parse(ShellMethod::Publish, data));
+        assert_eq!(outcome, want, "row {k}");
+        assert_eq!(played.writes.len(), writes, "row {k}: {:?}", played.writes);
+        assert_eq!(played.calls.len(), calls, "row {k}");
+    }
+    // An upload that fails with the row's writes holding keeps its own
+    // answer: bee-js's, with no history code.
+    let mut main = Main::new(&keys, failing_node());
+    let (outcome, _, _) = main.play(parse(ShellMethod::Publish, data));
+    let ShellOutcome::Error(err) = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(err.code, None);
+    assert_eq!(err.status, Some(500));
 }
 
 fn string_of(v: &Value) -> String {

@@ -24,6 +24,13 @@
 //! 6. the row's update (`{ status: 'completed', ...result }`, or `failed`
 //!    with the handler's text), then the answer.
 //!
+//! A history write that fails answers the store's text with a code (core
+//! PR K2), so main can answer as the IPC handler does: `history_insert`
+//! for the insert or the bound's trim after it, before any node call
+//! (`addEntry` throws before the handler's `try`, and the invoke rejects);
+//! `history_update` for a later update of the row, after its one retry
+//! (`history-retry`).
+//!
 //! No readiness check, no grant, no guard: the row has none, and main's own
 //! upload has no page. A request that ends without its machine (a cancel,
 //! D13's bounds, `busy`, a protocol error) leaves the row's update to
@@ -39,7 +46,8 @@ use crate::chunks::hex;
 use crate::errors::{self, ServiceError, Site};
 use crate::machine::node::{Body, BodyAbort, INLINE_BODY};
 use crate::machine::shell::{
-    self, HistoryEntry, HistoryKind, PublishCall, PublishKind, ShellError, ShellOutcome, ShellStep,
+    self, HISTORY_INSERT, HISTORY_UPDATE, HistoryEntry, HistoryKind, PublishCall, PublishKind,
+    ShellError, ShellOutcome, ShellStep,
 };
 use crate::machine::{
     AfterInsert, AskId, Closing, Cx, Effect, Event, Form, InFlight, NodeCall, Protocol, Reply,
@@ -92,8 +100,17 @@ enum Last {
     /// In its `catch`: if it throws, the handler throws the write's error;
     /// the core still asks once to end the row `failed` with it.
     Catch,
-    /// The one retry after the last update failed with `first`.
-    Retry { first: JsString, in_try: bool },
+    /// The row's `failed` update after the bound's trim failed (part of the
+    /// insert, before the handler's `try`): as `Catch`, its failure retried
+    /// once, but the answer's code stays `history_insert`.
+    Bound,
+    /// The one retry after the last update failed with `first`; `code` is
+    /// the answer's.
+    Retry {
+        first: JsString,
+        in_try: bool,
+        code: &'static str,
+    },
 }
 
 pub(crate) struct ShellPublish {
@@ -234,12 +251,17 @@ impl ShellPublish {
                     ShellStep::Wait
                 }
                 // `addEntry` throws before the handler's `try`.
-                Event::Inserted(Err(text)) => ShellStep::Done(shell::error(text)),
+                Event::Inserted(Err(text)) => ShellStep::Done(history_error(text, HISTORY_INSERT)),
                 _ => ShellStep::Done(shell::internal()),
             },
             Stage::Trim(ask) if ask == id => match event {
                 Event::Written(Ok(())) => self.batch_step(cx),
-                Event::Written(Err(text)) => self.close_failed(cx, shell::error(text)),
+                // The bound is the insert's: still before the `try`.
+                Event::Written(Err(text)) => {
+                    let outcome = history_error(text, HISTORY_INSERT);
+                    let updates = failed_update(&self.row_text(&outcome_text(&outcome)));
+                    self.close(cx, updates, outcome, Last::Bound)
+                }
                 _ => self.close_failed(cx, shell::internal()),
             },
             Stage::Stamps(ask) if ask == id => match self.batch_of(event) {
@@ -336,7 +358,7 @@ impl ShellPublish {
                 self.stage = Stage::Insert(cx.write(StoreWrite::HistoryInsert(insert)));
                 ShellStep::Wait
             }
-            Err(thrown) => ShellStep::Done(shell::error(thrown.message.as_str())),
+            Err(thrown) => ShellStep::Done(history_error(thrown.message.as_str(), HISTORY_INSERT)),
         }
     }
 
@@ -590,13 +612,7 @@ impl ShellPublish {
     /// The row `failed` with the failure's text (the handler's `catch`),
     /// then the answer.
     fn close_failed<W: World>(&mut self, cx: &mut Cx<'_, W>, outcome: ShellOutcome) -> ShellStep {
-        let message = match &outcome {
-            ShellOutcome::Error(err) => err.message.clone(),
-            ShellOutcome::Busy => JsString::from("busy"),
-            ShellOutcome::Cancelled => JsString::from("cancelled"),
-            ShellOutcome::Result(_) | ShellOutcome::Protocol(_) => JsString::from("Internal error"),
-        };
-        let updates = failed_update(&self.row_text(&message));
+        let updates = failed_update(&self.row_text(&outcome_text(&outcome)));
         self.close(cx, updates, outcome, Last::Catch)
     }
 
@@ -636,19 +652,31 @@ impl ShellPublish {
         match (event, last) {
             (Event::Written(Ok(())), _) => ShellStep::Done(outcome),
             // `updateEntry` threw.
-            (Event::Written(Err(text)), Last::Try) => self.retry(cx, text, true),
-            (Event::Written(Err(text)), Last::Catch) => self.retry(cx, text, false),
-            (Event::Written(Err(text)), Last::Retry { first, in_try }) => {
-                ShellStep::Done(shell::error(if in_try { text } else { first }))
-            }
+            (Event::Written(Err(text)), Last::Try) => self.retry(cx, text, true, HISTORY_UPDATE),
+            (Event::Written(Err(text)), Last::Catch) => self.retry(cx, text, false, HISTORY_UPDATE),
+            (Event::Written(Err(text)), Last::Bound) => self.retry(cx, text, false, HISTORY_INSERT),
+            (
+                Event::Written(Err(text)),
+                Last::Retry {
+                    first,
+                    in_try,
+                    code,
+                },
+            ) => ShellStep::Done(history_error(if in_try { text } else { first }, code)),
             _ => ShellStep::Done(shell::internal()),
         }
     }
 
     /// The row's last update failed with `first`: the `failed` update with
-    /// its message, once, then the write's error as the answer.
-    fn retry<W: World>(&mut self, cx: &mut Cx<'_, W>, first: JsString, in_try: bool) -> ShellStep {
-        let outcome = shell::error(first.clone());
+    /// its message, once, then the write's error as the answer, with `code`.
+    fn retry<W: World>(
+        &mut self,
+        cx: &mut Cx<'_, W>,
+        first: JsString,
+        in_try: bool,
+        code: &'static str,
+    ) -> ShellStep {
+        let outcome = history_error(first.clone(), code);
         let Some(row) = self.row else {
             return ShellStep::Done(outcome);
         };
@@ -658,7 +686,11 @@ impl ShellPublish {
                 self.stage = Stage::Closing {
                     id,
                     outcome,
-                    last: Last::Retry { first, in_try },
+                    last: Last::Retry {
+                        first,
+                        in_try,
+                        code,
+                    },
                 };
                 ShellStep::Wait
             }
@@ -682,6 +714,21 @@ fn update(row: i64, updates: &JsValue, now: u64) -> Option<history::Statement> {
     )]
     let id = JsValue::Number(row as f64);
     history::update_entry(&id, updates, now).ok()
+}
+
+/// A history write's failure: the store's `text`, with `code`.
+fn history_error(text: impl Into<JsString>, code: &'static str) -> ShellOutcome {
+    ShellOutcome::Error(ShellError::history(text, code))
+}
+
+/// The text the row's `failed` update keeps for `outcome`.
+fn outcome_text(outcome: &ShellOutcome) -> JsString {
+    match outcome {
+        ShellOutcome::Error(err) => err.message.clone(),
+        ShellOutcome::Busy => JsString::from("busy"),
+        ShellOutcome::Cancelled => JsString::from("cancelled"),
+        ShellOutcome::Result(_) | ShellOutcome::Protocol(_) => JsString::from("Internal error"),
+    }
 }
 
 /// `{ status: 'failed', errorMessage }`.

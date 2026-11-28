@@ -1573,6 +1573,110 @@ fn swarm_feed_takes_the_owner_main_showed() {
     );
 }
 
+/// `swarm.publish`'s history failures carry a code (core PR K2), through
+/// the binary, each with the history's fixed text:
+/// - the insert failing (`swarm_history:write`): `history_insert`, no node
+///   call, no row;
+/// - the bound's trim failing after the insert (`swarm_history:batch`):
+///   `history_insert`, no node call (the row's `failed` update and its
+///   retry fail too, so the row stays `uploading` for the next open's
+///   sweep);
+/// - the `completed` update failing (`swarm_history:write` turned on while
+///   the upload is out): `history_update`, the upload made;
+/// - an upload that fails, then its `failed` update: `history_update`.
+///
+/// The hooks off, the same publish answers its result, the row
+/// `completed`.
+#[test]
+fn swarm_publish_s_history_failures_carry_their_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let hooks = dir.path().join("fail");
+    let mut main = swarm_world::main_with(
+        &["swarm"],
+        &[(
+            "FREEDOM_CORED_TEST_GRANT_WRITE_FAIL",
+            hooks.to_str().unwrap(),
+        )],
+    );
+    main.world(json!({ "reset": true, "clock": T0 }));
+    let publish = json!({
+        "kind": "data", "parts": [{ "bytes": 5, "base64": "aGVsbG8=" }], "batch": "a1".repeat(32),
+        "pin": true, "deferred": false, "history": { "type": "data", "name": "Text" },
+    });
+    let failed = |code: &str| {
+        Got::Thrown(
+            fc_json::parse(&format!(
+                r#"{{"message":"The publish history could not be read or written","code":"{code}"}}"#
+            ))
+            .unwrap(),
+        )
+    };
+    let statuses = |main: &mut Main| -> Vec<String> {
+        let mut statuses: Vec<String> = history_rows(main)
+            .iter()
+            .map(|row| text_at(row, "status"))
+            .collect();
+        statuses.sort();
+        statuses
+    };
+    let no_call = || OwnMain::new(|call: &NodeCall, _: &[u8]| panic!("a node call {call:?}"));
+
+    // The insert.
+    std::fs::write(&hooks, "swarm_history:write\n").unwrap();
+    let answer = main.play_own(&mut no_call(), "swarm.publish", &publish, "shell");
+    assert_eq!(got(&answer), failed("history_insert"));
+    std::fs::remove_file(&hooks).unwrap();
+    assert!(statuses(&mut main).is_empty(), "no row");
+
+    // The bound's trim after it.
+    std::fs::write(&hooks, "swarm_history:batch\n").unwrap();
+    let answer = main.play_own(&mut no_call(), "swarm.publish", &publish, "shell");
+    assert_eq!(got(&answer), failed("history_insert"));
+    std::fs::remove_file(&hooks).unwrap();
+    assert_eq!(statuses(&mut main), ["uploading"]);
+
+    // A later update: the completed one, then a failure's own.
+    let reference = "e1".repeat(32);
+    for (status, body) in [
+        (201, format!(r#"{{"reference":"{reference}"}}"#)),
+        (500, r#"{"code":500,"message":"boom"}"#.to_owned()),
+    ] {
+        let request = main.own_request("swarm.publish", &publish, "shell");
+        let call = main.recv();
+        assert_eq!(call["method"], "shell.swarm_api", "{call}");
+        assert_eq!(call["params"]["form"], "bzz_file", "{call}");
+        std::fs::write(&hooks, "swarm_history:write\n").unwrap();
+        main.answer(
+            call["id"].as_u64().unwrap(),
+            json!({
+                "status": status,
+                "status_text": if status == 201 { "Created" } else { "Internal Server Error" },
+                "headers": [["content-type", "application/json"], ["swarm-tag", "101"]],
+                "body_base64": fc_swarm_provider::value::encode_base64(body.as_bytes()),
+            }),
+        );
+        let answer = main.core.response(request);
+        assert_eq!(got(&answer), failed("history_update"), "{status}");
+        std::fs::remove_file(&hooks).unwrap();
+        main.settled();
+    }
+    assert_eq!(statuses(&mut main), ["uploading", "uploading", "uploading"]);
+
+    // The hooks off: the result, the row completed.
+    let mut own = OwnMain::new(honest(usable_stamps(), None));
+    let result = value_of(got(&main.play_own(
+        &mut own,
+        "swarm.publish",
+        &publish,
+        "shell",
+    )));
+    assert_eq!(field(&result, "tag_uid"), &JsValue::Number(101.0));
+    assert_eq!(
+        statuses(&mut main),
+        ["completed", "uploading", "uploading", "uploading"]
+    );
+}
+
 // --- callers, admission and bounds --------------------------------------------------
 
 /// The method table's callers (D5): a method a caller may not call is
