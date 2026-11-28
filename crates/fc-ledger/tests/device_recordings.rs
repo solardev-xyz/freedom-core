@@ -846,6 +846,14 @@ fn case(at: &str, value: &Value, device: &Value, session: &[SessionStep], held_m
     if stream == Stream::Reference && exchanges.iter().any(|e| e.hash_only) {
         return Err(format!("{at}: hash_only in a reference stream"));
     }
+    // The recorder lets go of an APDU only in the cancel case's old
+    // request; anywhere else, a reference stream among them, the device
+    // ended the case.
+    if id != "cancel-old" && exchanges.iter().any(|e| e.end == End::Cancelled) {
+        return Err(format!(
+            "{at}: cancelled outside the cancel case's old request"
+        ));
+    }
     let (outcome, as_asked) = outcome(
         &format!("{at}: outcome"),
         &c["outcome"],
@@ -1505,8 +1513,10 @@ fn reference(case: &Case, at: &str, core_signs: bool) -> R<String> {
     }
     let answer = match &case.exchanges.last().unwrap().end {
         End::Answer(answer) if answer.ends_with(&[0x90, 0x00]) => answer,
+        // The recorder never lets go of a reference APDU.
+        End::Cancelled => return Err(format!("{at}: a reference stream cancelled")),
         // The device ended it: no signature.
-        _ => {
+        End::Answer(_) | End::Failed(_) => {
             if case.answered.is_some() {
                 return Err(format!("{at}: a signer without a signature"));
             }
@@ -2215,10 +2225,71 @@ fn a_reference_stream_ends_whole_or_where_the_device_ended_it() {
         cut(whole, End::Answer(vec![0x69, 0x85])).unwrap(),
         "reference"
     );
+    // Cut at its first APDU and cancelled: the recorder never cancels one.
+    let e = cut(1, End::Cancelled).unwrap_err();
+    assert!(e.contains("a reference stream cancelled"), "{e}");
     // A signer where the device ended it.
     let mut damaged = case.clone();
     damaged.exchanges.truncate(3);
     damaged.exchanges[2].end = End::Answer(vec![0x6a, 0x80]);
     let e = replay(&damaged).unwrap_err();
     assert!(e.contains("a signer without a signature"), "{e}");
+}
+
+/// The last exchange of a case cancelled, as the recorder writes the cancel
+/// case's old request.
+fn cancel_last(case: &mut Value) {
+    let exchanges = case["exchanges"].as_array_mut().unwrap();
+    let last = exchanges.last_mut().unwrap().as_object_mut().unwrap();
+    for key in ["answer", "failed", "held", "hash_only"] {
+        last.remove(key);
+    }
+    last.insert("cancelled".into(), json!(true));
+    case["outcome"] = json!({ "cancelled": true, "as_asked": true });
+    let end = if case.get("signer").is_some() {
+        "signer"
+    } else {
+        "address"
+    };
+    case[end] = Value::Null;
+}
+
+/// Only the cancel case's old request is cancelled.
+#[test]
+fn cancelled_only_in_the_cancel_cases_old_request() {
+    let (name, value) = device_form("nanoSP");
+    // A reference case cut at its first APDU and cancelled.
+    let mut damaged = value.clone();
+    let reference = case_mut(&mut damaged, "name-field-e-acute-252");
+    reference["exchanges"].as_array_mut().unwrap().truncate(1);
+    cancel_last(reference);
+    fails(
+        verdict(&name, &damaged, Kind::Device),
+        "cancelled outside the cancel case's old request",
+    );
+    // Any other case's last APDU cancelled, in both models.
+    for model in ["nanoSP", "nanoS"] {
+        let (name, value) = device_form(model);
+        let ids: Vec<String> = value["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap().to_owned())
+            .filter(|id| id != "cancel-old")
+            .collect();
+        assert!(ids.len() >= 2, "{model}");
+        for id in ids {
+            let mut damaged = value.clone();
+            cancel_last(case_mut(&mut damaged, &id));
+            match verdict(&name, &damaged, Kind::Device) {
+                Ok(_) => panic!("{model} {id}: replayed"),
+                Err(e) => assert!(
+                    e.contains("cancelled outside the cancel case's old request"),
+                    "{model} {id}: {e}"
+                ),
+            }
+        }
+    }
+    // The cancel case's old request itself is read and replayed.
+    verdict(&name, &value, Kind::Device).unwrap_or_else(|e| panic!("{e}"));
 }

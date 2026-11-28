@@ -551,7 +551,7 @@ Once decided:
 - **Facts:** F-1 and F-3 are fixed on `integration/rust-core`; F-1 records what #1063 still takes (a type 0's high `s`, a longer answer's first 65 bytes, a type 0's `v` of 27). F-2's third fault is any definition over 255 bytes, not a 256-character name only, and its fourth reaches the wire only for a name that fits. F-7 is new: a chain ID of 2^53 or more can't be signed on a Ledger.
 - **The threat table's** *Today* column for F-1, F-3 and x402.
 - **Bounds:** a definition over 255 bytes is refused `LEDGER_TOO_LARGE`, as typed data a Ledger can't carry; LDG-1's name test follows (a 255-character field name can't be sent at all).
-- **Vectors:** the generator's modules and packages, the swarm reference's checkout, the cases at the definition APDU's edge and the non-ASCII names that fit, the answers, the app, the missing device; `ledger-grammar.json` writes its one-byte families as rules; `ledger-devices.json`'s non-ASCII names are 252 and 253 bytes.
+- **Vectors:** the generator's modules and packages, the swarm reference's checkout, the cases at the definition APDU's edge and the non-ASCII names that fit, the answers, the app, the missing device; `ledger-grammar.json` writes its one-byte families as rules; the device recordings' (`vectors/ledger-devices/`) non-ASCII names are 252 and 253 bytes.
 - **Deviations:** `signature-check`, `blind-typed-data` and `address-from-device` describe today as it is; `device-bounds` adds the definition bound; `chain-id-width` is new (F-7).
 - **API:** `LEDGER_BAD_SIGNATURE` is today's code, so four codes are new.
 
