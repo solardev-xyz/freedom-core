@@ -25,13 +25,15 @@
 //!   manifest), `decide` (with main's `live: true`), `get`,
 //!   `use-individual` and `disconnect`; the grants and files after.
 //! - **history:** `getEntries`, `clearEntries` and `removeEntry` through
-//!   `list`, `clear` and `remove`; the publish machines' `addEntry` and
-//!   `updateEntry` as their statements.
+//!   `list`, `clear` and `remove`, `addEntry` and `updateEntry` through main's
+//!   `add` and `update` (the 10,001 inserts too, which the bound trims); the
+//!   rows a case seeds before the history's reopen as their statements.
 //!
 //! The deviation cases are held to their `core` answers. Then the ops'
 //! own tests: SW-1's hold on the identity changes it covers, a manifest
 //! transaction that waits for it whole, the owners, D8's order through the
-//! op, and wrong-shape calls refused.
+//! op, wrong-shape calls refused, and `add`'s bound, which keeps the row
+//! it inserted.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
@@ -508,6 +510,12 @@ impl Io for Disk {
 
     fn run(&mut self, statement: &Statement) -> Result<usize, JsString> {
         Ok(execute(self.db.as_ref().unwrap(), statement))
+    }
+
+    fn insert(&mut self, statement: &Statement) -> Result<i64, JsString> {
+        let conn = self.db.as_ref().unwrap();
+        execute(conn, statement);
+        Ok(conn.last_insert_rowid())
     }
 }
 
@@ -1165,6 +1173,16 @@ fn update_entry(
     Ok(history::entry(&query(conn, &history::by_id(id)?)[0]).unwrap())
 }
 
+/// Main's own history op (`add`, `update`) through `swarm.history`, at
+/// `now`.
+fn history_main_op(world: &mut World, now: u64, op: &str, members: &[(&str, JsValue)]) -> Outcome {
+    let mut call = world.op(ops::HISTORY, &params(op, members), Caller::Shell);
+    match call.start(&mut world.stores(now)) {
+        Step::Done(outcome) => outcome,
+        other => panic!("{op}: {other:?}"),
+    }
+}
+
 /// A history op through `swarm.history`.
 fn history_op(world: &mut World, op: &str, members: &[(&str, JsValue)]) -> Outcome {
     let vault_keys = VaultKeys {
@@ -1193,11 +1211,34 @@ fn play_history(case: &JsValue) {
         assert_eq!(field(op, "times"), &JsValue::Number(10001.0));
         let template = field(op, "args").as_array().unwrap()[0].clone();
         world.disk.db = Some(open_history(&dir.0, T0));
+        world
+            .disk
+            .db
+            .as_ref()
+            .unwrap()
+            .execute_batch("BEGIN")
+            .unwrap();
         for i in 0..10001u32 {
             let mut entry = template.clone();
             entry.set("bytesSize", JsValue::Number(f64::from(i)));
-            add_entry(world.disk.db.as_ref().unwrap(), &entry, T0).unwrap();
+            let added = history_main_op(&mut world, T0, "add", &[("entry", entry)]);
+            let Outcome::Result(Value::Object(row)) = added else {
+                panic!("{id}: add {i}: {added:?}");
+            };
+            // The row just inserted, never the one the bound trims.
+            assert_eq!(
+                row.iter().find(|(k, _)| k == "id").map(|(_, v)| v),
+                Some(&Value::Number(f64::from(i + 1))),
+                "{id}: add {i}"
+            );
         }
+        world
+            .disk
+            .db
+            .as_ref()
+            .unwrap()
+            .execute_batch("COMMIT")
+            .unwrap();
         // The core keeps the latest 10,000, which `list` answers.
         let Outcome::Result(Value::Array(entries)) = history_op(&mut world, "list", &[]) else {
             panic!("{id}: list");
@@ -1255,20 +1296,18 @@ fn play_history(case: &JsValue) {
         let args = field(op, "args").as_array().unwrap().to_vec();
         let arg = |i: usize| args.get(i).cloned().unwrap_or(JsValue::Undefined);
         let want = core_ops.map_or(op, |answers| &answers[n]);
-        let result = |value: JsValue| Outcome::Result(Value::from_js(&value));
         let got = match str_of(field(op, "op")) {
-            "addEntry" => add_entry(world.disk.db.as_ref().unwrap(), &arg(0), now).map(result),
-            "updateEntry" => {
-                update_entry(world.disk.db.as_ref().unwrap(), &arg(0), &arg(1), now).map(result)
-            }
-            "getEntries" => Ok(history_op(&mut world, "list", &[])),
-            "clearEntries" => Ok(history_op(&mut world, "clear", &[])),
-            "removeEntry" => Ok(history_op(&mut world, "remove", &[("id", arg(0))])),
+            "addEntry" => history_main_op(&mut world, now, "add", &[("entry", arg(0))]),
+            "updateEntry" => history_main_op(
+                &mut world,
+                now,
+                "update",
+                &[("id", arg(0)), ("updates", arg(1))],
+            ),
+            "getEntries" => history_op(&mut world, "list", &[]),
+            "clearEntries" => history_op(&mut world, "clear", &[]),
+            "removeEntry" => history_op(&mut world, "remove", &[("id", arg(0))]),
             other => panic!("{id}: history operation {other}"),
-        };
-        let got = match got {
-            Ok(outcome) => outcome,
-            Err(thrown) => Outcome::Thrown(thrown),
         };
         if let Some(refused) = want.get("refused") {
             assert_eq!(str_of(field(refused, "reason")), "blob", "{id} step {n}");
@@ -2020,7 +2059,7 @@ fn references_in_icus_order() {
 #[test]
 fn wrong_shape_calls_are_refused() {
     let typed_string = || to_typed(&s("k"));
-    let cases: [(&str, &str, &[&str], &[&str]); 27] = [
+    let cases: [(&str, &str, &[&str], &[&str]); 29] = [
         (ops::IDENTITIES, "get-all-origins", &[], &[]),
         (ops::IDENTITIES, "has-feed-identity", &["origin"], &[]),
         (ops::IDENTITIES, "get-identity-mode", &["origin"], &[]),
@@ -2087,6 +2126,8 @@ fn wrong_shape_calls_are_refused() {
         (ops::HISTORY, "list", &[], &[]),
         (ops::HISTORY, "clear", &[], &[]),
         (ops::HISTORY, "remove", &[], &["id"]),
+        (ops::HISTORY, "add", &[], &["entry"]),
+        (ops::HISTORY, "update", &[], &["id", "updates"]),
         (ops::MANIFEST, "check", &["key", "url"], &["eager"]),
         (
             ops::MANIFEST,
@@ -2170,7 +2211,10 @@ fn wrong_shape_calls_are_refused() {
             );
         }
         let chrome = Call::parse(method, &build(&all), Caller::Chrome);
-        if op.chars().next().is_some_and(char::is_lowercase) && op.chars().any(char::is_uppercase) {
+        let main_only = (op.chars().next().is_some_and(char::is_lowercase)
+            && op.chars().any(char::is_uppercase))
+            || (method == ops::HISTORY && ["add", "update"].contains(&op));
+        if main_only {
             assert_eq!(
                 chrome,
                 Err(Refused::Forbidden(op_name(op))),
@@ -2194,6 +2238,8 @@ fn op_name(op: &str) -> &'static str {
         "hasFeedGrant",
         "assertFeedGrantable",
         "getEthereumWalletIdentityReferences",
+        "add",
+        "update",
     ]
     .into_iter()
     .find(|name| *name == op)
@@ -2698,6 +2744,184 @@ fn references_past_the_bound_are_refused_through_the_op() {
     assert_eq!(got, Outcome::Result(Value::Array(Vec::new())));
 }
 
+/// `add`'s bound (deviation `history-bound`), as after the publish
+/// machines' inserts: a table at its 10,000 rows trims one after the
+/// insert, the oldest finished row first, else the oldest other, and never
+/// the row just inserted, even with the clock set back so that it is the
+/// oldest. `update` inserts nothing and trims nothing.
+#[test]
+fn add_keeps_the_bound_and_its_row() {
+    let ids = |world: &World| -> Vec<i64> {
+        let conn = world.disk.db.as_ref().unwrap();
+        let mut statement = conn
+            .prepare("SELECT id FROM publishes ORDER BY id")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let row_id = |outcome: &Outcome| -> f64 {
+        let Outcome::Result(Value::Object(row)) = outcome else {
+            panic!("{outcome:?}");
+        };
+        match row.iter().find(|(k, _)| k == "id") {
+            Some((_, Value::Number(n))) => *n,
+            other => panic!("{other:?}"),
+        }
+    };
+    let entry =
+        || js(r#"{"type":"data","name":"Text","status":"uploading","origin":"freedom://agent"}"#);
+    for finished in [true, false] {
+        let dir = TempDir::new(if finished {
+            "bound-finished"
+        } else {
+            "bound-unfinished"
+        });
+        let mut world = World::new(FeedStore::empty(), JsValue::Null, Dir::new());
+        world.disk.db = Some(open_history(&dir.0, T0));
+        {
+            let conn = world.disk.db.as_ref().unwrap();
+            conn.execute_batch("BEGIN").unwrap();
+            // Rows 1 to 10,000, each later than the last; with `finished`,
+            // the second half completed.
+            for i in 1..=history::MAX_ROWS as i64 {
+                let status = if finished && i > 5000 {
+                    "completed"
+                } else {
+                    "uploading"
+                };
+                conn.execute(
+                    "INSERT INTO publishes (type, status, started_at) VALUES ('data', ?1, ?2)",
+                    rusqlite::params![status, T0 as i64 + i],
+                )
+                .unwrap();
+            }
+            conn.execute_batch("COMMIT").unwrap();
+        }
+        // The clock set back: the new row is the oldest.
+        let early = T0 - 1_000_000;
+        let added = history_main_op(&mut world, early, "add", &[("entry", entry())]);
+        assert_eq!(row_id(&added), 10_001.0, "finished {finished}");
+        // The oldest finished row went, else the oldest of all but the new.
+        let gone = if finished { 5001 } else { 1 };
+        let after = ids(&world);
+        assert_eq!(
+            after,
+            (1..=10_001).filter(|i| *i != gone).collect::<Vec<i64>>(),
+            "finished {finished}"
+        );
+        assert_eq!(after.len(), history::MAX_ROWS);
+        // An update trims nothing.
+        let updated = history_main_op(
+            &mut world,
+            early,
+            "update",
+            &[
+                ("id", JsValue::Number(10_001.0)),
+                ("updates", js(r#"{"status":"completed"}"#)),
+            ],
+        );
+        assert_eq!(row_id(&updated), 10_001.0);
+        assert_eq!(ids(&world), after, "finished {finished}");
+    }
+}
+
+/// `add` and `update` refuse what the typed form carries but no history
+/// value is (a BigInt, bytes), and the chrome; a write that fails is
+/// thrown with its text.
+#[test]
+fn main_s_history_ops_refuse_and_fail() {
+    for (op, members) in [
+        ("add", r#"{"entry":{"object":[["tagUid",{"bigint":"1"}]]}}"#),
+        (
+            "add",
+            r#"{"entry":{"object":[["name",{"bytes":1,"kind":"Buffer","base64":"YQ=="}]]}}"#,
+        ),
+        ("update", r#"{"id":{"bigint":"1"}}"#),
+        (
+            "update",
+            r#"{"id":{"number":"1"},"updates":{"array":[{"hole":true}]}}"#,
+        ),
+        ("add", r#"{"entry":{"undefined":true},"id":{"number":"1"}}"#),
+        ("update", r#"{"entry":{"object":[]}}"#),
+    ] {
+        let mut p = js(members);
+        p.set("op", s(op));
+        assert!(
+            matches!(
+                Call::parse(ops::HISTORY, &p, Caller::Shell),
+                Err(Refused::Invalid(_))
+            ),
+            "{op} {members}"
+        );
+        assert_eq!(
+            Call::parse(ops::HISTORY, &p, Caller::Chrome),
+            Err(Refused::Forbidden(op_name(op))),
+            "{op} from the chrome, before its members are read"
+        );
+    }
+    // A write that fails: its text, thrown.
+    struct Failing;
+    impl Io for Failing {
+        fn write_feeds(&mut self, _: &str) -> Result<(), JsString> {
+            unreachable!()
+        }
+        fn read_manifests(&mut self) -> Option<Vec<u8>> {
+            unreachable!()
+        }
+        fn read_manifests_backup(&mut self) -> Option<Vec<u8>> {
+            unreachable!()
+        }
+        fn save_manifests(&mut self, _: &Save) -> Result<(), JsString> {
+            unreachable!()
+        }
+        fn random(&mut self) -> Option<[u8; 24]> {
+            unreachable!()
+        }
+        fn query(&mut self, _: &Statement) -> Result<Vec<Row>, JsString> {
+            Err(JsString::from("read failed"))
+        }
+        fn run(&mut self, _: &Statement) -> Result<usize, JsString> {
+            Err(JsString::from("write failed"))
+        }
+        fn insert(&mut self, _: &Statement) -> Result<i64, JsString> {
+            Err(JsString::from("insert failed"))
+        }
+    }
+    let mut keeper = Keeper::new(FeedStore::empty());
+    let mut manifests = ManifestStore::new();
+    let mut grants = GrantMirror {
+        grants: JsValue::Null,
+    };
+    let mut io = Failing;
+    let mut stores = Stores {
+        now_ms: T0,
+        keeper: &mut keeper,
+        manifests: &mut manifests,
+        grants: &mut grants,
+        io: &mut io,
+    };
+    for (op, members, text) in [
+        ("add", r#"{"entry":{"object":[]}}"#, "insert failed"),
+        (
+            "update",
+            r#"{"id":{"number":"1"},"updates":{"object":[]}}"#,
+            "write failed",
+        ),
+    ] {
+        let mut p = js(members);
+        p.set("op", s(op));
+        let call = Call::parse(ops::HISTORY, &p, Caller::Shell).unwrap();
+        let mut running = Op::new(call, Ticket(1));
+        let Step::Done(Outcome::Thrown(thrown)) = running.start(&mut stores) else {
+            panic!("{op}: thrown");
+        };
+        assert_eq!((thrown.message.as_str(), thrown.code), (text, None), "{op}");
+    }
+}
+
 // --- D12's recorded cases: vectors/swarm.json's `shell` section --------------------
 
 fn num(value: &JsValue) -> f64 {
@@ -3041,7 +3265,7 @@ fn every_shell_case_through_the_ops() {
     assert_eq!(
         counts,
         [
-            ("swarm.history", 2),
+            ("swarm.history", 4),
             ("swarm.identities", 21),
             ("swarm.manifest", 15)
         ]

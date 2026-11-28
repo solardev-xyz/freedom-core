@@ -64,7 +64,9 @@ pub const MANIFEST: &str = "swarm.manifest";
 pub const STORE_FULL: &str = "store_full";
 
 /// Who calls (design 0015's rows, D5): `swarm.identities` and
-/// `swarm.history` are the chrome's and main's, `swarm.manifest` main's.
+/// `swarm.history` are the chrome's and main's, `swarm.manifest` main's;
+/// some ops of the first two are main's alone (D7; `swarm.history`'s `add`
+/// and `update`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Caller {
     Chrome,
@@ -97,7 +99,7 @@ impl Call {
         let (op, members) = Members::read(params)?;
         match method {
             IDENTITIES => identities::Op::parse(op, members, caller).map(Call::Identities),
-            HISTORY => history::Op::parse(op, members).map(Call::History),
+            HISTORY => history::Op::parse(op, members, caller).map(Call::History),
             MANIFEST => manifest::Op::parse(op, members).map(Call::Manifest),
             _ => Err(Refused::Invalid(format!("no store op for {method}"))),
         }
@@ -160,6 +162,8 @@ pub trait Io {
     fn query(&mut self, statement: &Statement) -> Result<Vec<Row>, JsString>;
     /// A statement run: the rows it changed.
     fn run(&mut self, statement: &Statement) -> Result<usize, JsString>;
+    /// One `INSERT` run: the new row's rowid (`swarm.history`'s `add`).
+    fn insert(&mut self, statement: &Statement) -> Result<i64, JsString>;
 }
 
 /// What an op runs against: the swarm thread's stores, at `now_ms`
@@ -311,7 +315,7 @@ impl Op {
         };
         let step = match &mut self.run {
             Run::Identities(run) => run.start(&mut cx, stores),
-            Run::History(op) => Step::Done(op.run(stores.io)),
+            Run::History(op) => Step::Done(op.run(stores.now_ms, stores.io)),
             Run::Manifest(run) => run.start(&mut cx, stores),
         };
         self.settle(step)

@@ -14,7 +14,8 @@
 // - swarm.identities: feed-store.js's IPC handlers, the functions
 //   page-swarm.js's feed prompt calls, and getEthereumWalletIdentityReferences;
 // - swarm.history: publish-history.js's getEntries, clearEntries and
-//   removeEntry, and its two IPC handlers;
+//   removeEntry, and its two IPC handlers; addEntry and updateEntry (main's
+//   own: the freedom://publish handlers' rows and the agent's);
 // - swarm.manifest: permission-manifests.js's page path (checkPageManifest,
 //   decidePageManifest, releasePageManifest) and its three IPC handlers.
 //
@@ -889,6 +890,75 @@ function historyCases() {
     ref.history.addEntry({ type: 'data', name: 'a', status: 'completed', origin: C.ORIGIN });
     ref.history.getDb().prepare('UPDATE publishes SET started_at = ? WHERE id = 1').run(Buffer.from('61', 'hex'));
   }, steps: [list] });
+  // add and update, main's own (design 0015's 2026-11-28 amendment, core
+  // PR K1): the rows publish-service.js's freedom://publish handlers keep
+  // around an upload ({ status: 'completed', ...normalizeUploadResult }, or
+  // the failure's text), the agent's publication controller's (origin
+  // freedom://agent, written before the upload while it waits for postage,
+  // then its state changes), and the values addEntry and updateEntry read
+  // by their types: falsy fields defaulted, `??`'s 0 kept, a primitive or
+  // absent argument as `{}`, an id of another type, NaN and Infinity as
+  // better-sqlite3 binds them, an array's items bound in its place, an
+  // object binding nothing, and the throws (null, a value it can't bind).
+  const add = (entry, over = {}) => ({ op: 'add', members: entry === undefined ? {} : { entry }, call: 'addEntry',
+    run: (ref) => ref.history.addEntry(entry), ...over });
+  const update = (id, updates, over = {}) => ({ op: 'update',
+    members: { ...(id === undefined ? {} : { id }), ...(updates === undefined ? {} : { updates }) }, call: 'updateEntry',
+    run: (ref) => ref.history.updateEntry(id, updates), ...over });
+  const R1 = 'ab'.repeat(32);
+  const R2 = 'cd'.repeat(32);
+  const uploaded = (reference, tagUid, bytesSize) => ({ status: 'completed', reference, bzzUrl: `bzz://${reference}`, tagUid,
+    batchIdUsed: C.BATCH_A, bytesSize });
+  out.push({ id: 'history-add-update', method: 'swarm.history', seed: async (ref) => {
+    ref.history.addEntry({ type: 'data', name: 'Text', status: 'uploading', origin: 'freedom://publish' });
+    ref.history.updateEntry(1, uploaded(R1, 100, 4));
+  }, steps: [
+    // swarm:publish-data's row, then the service's result.
+    add({ type: 'data', name: 'Text', status: 'uploading', origin: 'freedom://publish' }),
+    update(2, uploaded(R1, 101, 5), { clock: T0 + 2500 }),
+    // swarm:publish-file's row, and a failure's text.
+    add({ type: 'file', name: 'notes.txt', status: 'uploading', origin: 'freedom://publish' }),
+    update(3, { status: 'failed', errorMessage: 'Could not read "notes.txt" (EACCES)' }),
+    // The agent's: its row before the upload, a state change with no
+    // error, then the upload's outcome.
+    add({ type: 'directory', name: 'site (private draft link)', status: 'uploading', origin: 'freedom://agent', bytesSize: 4096 },
+      { clock: T0 + 3000 }),
+    update(4, { status: 'uploading', errorMessage: undefined }),
+    update(4, { status: 'completed', reference: R2, bzzUrl: `bzz://${R2}`, tagUid: 7, batchIdUsed: C.BATCH_A }, { clock: T0 + 9000 }),
+    add({ type: 'file', name: 'report.txt', status: 'uploading', origin: 'freedom://agent' }),
+    update(5, { status: 'failed', reference: R2, bzzUrl: `bzz://${R2}` }),
+    // A missing row: null.
+    update(99, { status: 'failed' }),
+    // A final status at the insert stamps completed_at.
+    add({ type: 'data', name: 'Text', status: 'failed', origin: 'freedom://agent', errorMessage: 'no usable stamp' }),
+    // Defaults and falsy values.
+    add(undefined),
+    add({}),
+    add({ type: '', name: '', status: '', reference: '', bzzUrl: '', tagUid: 0, batchIdUsed: '', origin: '', bytesSize: 0, errorMessage: '' }),
+    add({ type: 'chunk', status: 'completed', origin: C.ORIGIN, tagUid: null, bytesSize: NaN }),
+    add(5),
+    update('2', { errorMessage: 'later' }),
+    update(7),
+    update(8, {}),
+    update(undefined, { status: 'failed' }),
+    update(null, { status: 'failed' }),
+    update(3, { status: 'completed', tagUid: Infinity, bytesSize: 1.5 }),
+    update(3, { reference: [R2] }),
+    // The throws: nothing written.
+    add(null),
+    update(2, null),
+    add({ name: true }),
+    add({ type: ['data', 'file'] }),
+    update(2, { bzzUrl: { a: 1 } }),
+    list,
+  ] });
+  // history-blobs: update's row read back holds a BLOB cell no writer
+  // makes; the reference's rowToEntry throws on the started_at it can't
+  // read, the core refuses the read for the BLOB. Both made the update.
+  out.push({ id: 'history-update-blob', method: 'swarm.history', deviation: 'history-blobs', seed: async (ref) => {
+    ref.history.addEntry({ type: 'data', name: 'a', status: 'uploading', origin: 'freedom://agent' });
+    ref.history.getDb().prepare('UPDATE publishes SET started_at = ? WHERE id = 1').run(Buffer.from('61', 'hex'));
+  }, steps: [update(1, { status: 'completed', reference: R1 })] });
   return out;
 }
 
