@@ -10,4 +10,4 @@ node crates/fc-ledger/tests/gen/synthetic-recordings.js --freedom-browser <check
 
 The checkout needs its packages installed. Timings and `recordedAt` differ from run to run. The replay doesn't judge timings, so a regenerated file replays the same.
 
-**The real recordings** go in `vectors/ledger-devices/`, one file per model, named `ledger-devices-<model>.json` as the recorder suggests, copied in unchanged. Nothing else goes in that directory. Once it exists, `device_recordings_replay` replays every file in it and CI holds the core to them. These synthetic files stay as the damage tests' material.
+**The real recordings** go in `vectors/ledger-devices/`, one file per model, named `ledger-devices-<model>.json` as the recorder suggests, copied in unchanged. Each must be the whole session the recorder plays for its model: `meta.complete`, and every step done as it asks. Nothing else goes in that directory. Once it holds a file, `device_recordings_replay` replays every file in it and CI holds the core to them. These synthetic files stay as the damage tests' material.

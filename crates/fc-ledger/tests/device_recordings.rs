@@ -15,12 +15,14 @@
 //! - `vectors/ledger-devices/ledger-devices-<model>.json`: the user's
 //!   recordings from the device session (the plan's §5), copied in under
 //!   the names the recorder suggests, one per model. Until the session the
-//!   directory doesn't exist and [`device_recordings_replay`] replays
-//!   nothing. **When the recordings land** it replays every file there,
-//!   each of which must be a real recording (no `meta.synthetic`, run
-//!   under Electron, a firmware version that isn't `synthetic`), and CI
-//!   then holds the core to them; the synthetic files stay, as the
-//!   damage tests' material.
+//!   directory is missing or empty and [`device_recordings_replay`]
+//!   replays nothing. **When the recordings land** it replays every file
+//!   there, each of which must be a real recording (no `meta.synthetic`,
+//!   run under Electron, a firmware version that isn't `synthetic`) of
+//!   the whole session: `meta.complete`, and every step the recorder plays
+//!   for its model ([`FIELD_STEPS`], or a Nano S's [`HASH_ONLY_STEPS`])
+//!   done as it asks. CI then holds the core to them; the synthetic files
+//!   stay, as the damage tests' material.
 //! - `tests/data/ledger-devices-synthetic/`: the same recorder run against
 //!   the fake node-hid and a scripted Ethereum app
 //!   (`tests/gen/synthetic-recordings.js`), `meta.synthetic` set and the
@@ -35,8 +37,11 @@
 //! when the parent ends, so it sends nothing more. A `stream: "reference"`
 //! case holds the JS reference's APDUs for F-2's names, which the core
 //! refuses before any APDU (deviation `name-ascii`): device evidence only,
-//! read as strictly, checked to be ledger.json's reference APDUs for a
-//! request the core refuses, and not replayed.
+//! read as strictly and not replayed. Its APDUs are ledger.json's reference
+//! ones for a request the core refuses; it stops short of them only where
+//! the device ended it with a status other than `9000` or a failure, and a
+//! signature the device gave recovers to the test account over
+//! `expected_hash`.
 //!
 //! The timings (R2, R3) are read and recomputed, never judged: an answer
 //! later than the core's `deadline_ms` is counted and printed for C2/C3.
@@ -71,25 +76,118 @@ const MODELS: [(&str, &str); 5] = [
     ("flex", "Flex"),
     ("nanoS", "Nano S"),
 ];
-const FAMILIES: [&str; 7] = [
-    "discovery",
-    "transaction",
-    "message",
-    "typed-data",
-    "name-length",
-    "add",
-    "hash-only",
+/// One step of the device session, as scripts/ledger-record.js plays it
+/// (`DISCOVERY`, `FIELD_STEPS`, `HASH_ONLY_STEPS`): its id, the ledger.json
+/// case it plays (`from`, ledger-record-cases.json's), its family and its
+/// hands.
+type SessionStep = (&'static str, &'static str, &'static str, &'static str);
+/// The check of the first account, recorded before any step.
+const DISCOVERY: SessionStep = ("discovery", "discovery-live-0-1", "discovery", "none");
+/// The steps for a device that shows typed data's fields.
+const FIELD_STEPS: [SessionStep; 19] = [
+    (
+        "tx-type0",
+        "tx-type0-chain-1-parity-0",
+        "transaction",
+        "approve",
+    ),
+    (
+        "tx-type2",
+        "tx-type2-chain-1-parity-0",
+        "transaction",
+        "approve",
+    ),
+    ("message", "msg-steps", "message", "approve"),
+    ("typed-mail", "typed-mail", "typed-data", "approve"),
+    ("typed-safe-tx", "typed-safe-tx", "typed-data", "approve"),
+    (
+        "typed-eip3009",
+        "typed-eip3009-transfer-with-authorization",
+        "typed-data",
+        "approve",
+    ),
+    (
+        "name-field-ascii-253",
+        "name-field-ascii-253",
+        "name-length",
+        "approve",
+    ),
+    (
+        "name-primary-type-ascii-255",
+        "name-primary-type-ascii-255",
+        "name-length",
+        "approve",
+    ),
+    (
+        "name-field-e-acute-252",
+        "name-field-e-acute-252",
+        "name-length",
+        "any",
+    ),
+    (
+        "name-field-e-acute-253",
+        "name-field-e-acute-253",
+        "name-length",
+        "any",
+    ),
+    (
+        "name-field-emoji-252",
+        "name-field-emoji-252",
+        "name-length",
+        "any",
+    ),
+    (
+        "name-field-emoji-253",
+        "name-field-emoji-253",
+        "name-length",
+        "any",
+    ),
+    ("add", "add-live-0", "add", "approve"),
+    ("reject", "msg-live-125", "message", "reject"),
+    (
+        "contract-call-blind-off",
+        "tx-steps",
+        "transaction",
+        "refuse",
+    ),
+    (
+        "contract-call-blind-on",
+        "tx-steps",
+        "transaction",
+        "approve",
+    ),
+    ("unplug", "msg-live-126", "message", "unplug"),
+    ("cancel-old", "msg-live-275", "message", "leave"),
+    ("cancel-new", "msg-live-1", "message", "reject-old"),
 ];
-const HANDS: [&str; 8] = [
-    "none",
-    "approve",
-    "reject",
-    "refuse",
-    "unplug",
-    "leave",
-    "reject-old",
-    "any",
+/// A Nano S's steps: the hash-only ones alone.
+const HASH_ONLY_STEPS: [SessionStep; 2] = [
+    (
+        "typed-hash-only-mail",
+        "typed-hash-only-mail",
+        "hash-only",
+        "approve",
+    ),
+    (
+        "typed-hash-only-safe-tx",
+        "typed-hash-only-safe-tx",
+        "hash-only",
+        "approve",
+    ),
 ];
+
+/// A model's whole session, discovery first.
+fn session(model: &str) -> Vec<SessionStep> {
+    let steps: &[SessionStep] = if model == "nanoS" {
+        &HASH_ONLY_STEPS
+    } else {
+        &FIELD_STEPS
+    };
+    std::iter::once(DISCOVERY)
+        .chain(steps.iter().copied())
+        .collect()
+}
+
 /// The public test phrase's first account (keys.json's abandon-12).
 const TEST_PATH: &str = "44'/60'/0'/0/0";
 const TEST_ADDRESS: &str = "0x9858EfFD232B4033E47d90003D41EC34EcaEda94";
@@ -170,6 +268,8 @@ struct Case {
     hands: String,
     exchanges: Vec<Exchange>,
     outcome: Outcome,
+    /// `outcome.as_asked`, which is what the step's hands asked for.
+    as_asked: bool,
     /// `signer` (a signature's) or `address` (`ledger.accounts`,
     /// `ledger.add`); `None` for null.
     answered: Option<[u8; 20]>,
@@ -405,9 +505,16 @@ fn parse(file: &str, value: &Value, kind: Kind) -> R<Recording> {
         .as_array()
         .filter(|list| !list.is_empty())
         .ok_or_else(|| format!("{file}: cases isn't a list of cases"))?;
+    let session = session(model);
     let mut cases: Vec<Case> = Vec::new();
     for (k, value) in list.iter().enumerate() {
-        let case = case(&format!("{file}: case {k}"), value, &device, held_ms)?;
+        let case = case(
+            &format!("{file}: case {k}"),
+            value,
+            &device,
+            &session,
+            held_ms,
+        )?;
         let at = format!("{file}: {} #{}", case.id, case.attempt);
         if cases
             .iter()
@@ -435,6 +542,15 @@ fn parse(file: &str, value: &Value, kind: Kind) -> R<Recording> {
         return Err(format!(
             "{file}: the first case isn't discovery's check of the test account"
         ));
+    }
+    // The whole session its model's steps define: each step done as it
+    // asks, at some attempt.
+    for (id, ..) in &session {
+        if !cases.iter().any(|c| c.id == *id && c.as_asked) {
+            return Err(format!(
+                "{file}: the session has no {id} done as its step asks"
+            ));
+        }
     }
     // One session clock, each APDU sent after the one before.
     let sent: Vec<f64> = cases
@@ -521,13 +637,14 @@ fn meta(file: &str, value: &Value, kind: Kind) -> R<f64> {
     if held_ms <= 0.0 {
         return Err(format!("{at}: heldMs"));
     }
-    let complete = flag(meta, "complete", &at)?;
-    if kind == Kind::Synthetic
-        && (!complete || !text(meta, "synthetic", &at)?.starts_with("Not device evidence"))
+    // The recorder writes the file after every step, `complete` once the
+    // last is done.
+    if !flag(meta, "complete", &at)? {
+        return Err(format!("{at}: complete is false: an unfinished session"));
+    }
+    if kind == Kind::Synthetic && !text(meta, "synthetic", &at)?.starts_with("Not device evidence")
     {
-        return Err(format!(
-            "{at}: a synthetic recording, incomplete or unmarked"
-        ));
+        return Err(format!("{at}: a synthetic recording, unmarked"));
     }
     Ok(held_ms)
 }
@@ -621,7 +738,7 @@ fn wire_request(source: &Value) -> Value {
     })
 }
 
-fn case(at: &str, value: &Value, device: &Value, held_ms: f64) -> R<Case> {
+fn case(at: &str, value: &Value, device: &Value, session: &[SessionStep], held_ms: f64) -> R<Case> {
     let operation = value
         .get("operation")
         .and_then(Value::as_str)
@@ -666,8 +783,13 @@ fn case(at: &str, value: &Value, device: &Value, held_ms: f64) -> R<Case> {
         .cases
         .get(from)
         .ok_or_else(|| format!("{at}: from {from} isn't a case of vectors/ledger.json"))?;
-    if !FAMILIES.contains(&text(c, "family", at)?) {
-        return Err(format!("{at}: family"));
+    let step = session
+        .iter()
+        .find(|step| step.0 == id)
+        .ok_or_else(|| format!("{at}: not a step of this model's session"))?;
+    let hands = text(c, "hands", at)?;
+    if (from, text(c, "family", at)?, hands) != (step.1, step.2, step.3) {
+        return Err(format!("{at}: from, family or hands isn't the step's"));
     }
     if source["operation"] != operation {
         return Err(format!("{at}: operation isn't ledger.json {from}'s"));
@@ -707,10 +829,6 @@ fn case(at: &str, value: &Value, device: &Value, held_ms: f64) -> R<Case> {
     if c["device"] != *device {
         return Err(format!("{at}: device isn't the file's"));
     }
-    let hands = text(c, "hands", at)?;
-    if !HANDS.contains(&hands) {
-        return Err(format!("{at}: hands {hands}"));
-    }
     let list = c["exchanges"]
         .as_array()
         .filter(|l| !l.is_empty())
@@ -725,11 +843,29 @@ fn case(at: &str, value: &Value, device: &Value, held_ms: f64) -> R<Case> {
         }
         exchanges.push(e);
     }
-    let outcome = outcome(
+    if stream == Stream::Reference && exchanges.iter().any(|e| e.hash_only) {
+        return Err(format!("{at}: hash_only in a reference stream"));
+    }
+    let (outcome, as_asked) = outcome(
         &format!("{at}: outcome"),
         &c["outcome"],
         exchanges.last().unwrap(),
     )?;
+    // The recorder's own judgement (`asAsked`), recomputed: a reference
+    // stream is whole when it carries every APDU of ledger.json's case.
+    let whole = stream == Stream::Core
+        || Some(exchanges.len()) == source["exchanges"].as_array().map(Vec::len);
+    let asked = match hands {
+        "none" | "approve" | "reject-old" => outcome == Outcome::Status(0x9000) && whole,
+        "reject" => matches!(outcome, Outcome::Status(0x6985 | 0x5501)),
+        "refuse" => matches!(outcome, Outcome::Status(status) if status != 0x9000),
+        "unplug" => outcome == Outcome::Failed(Failed::Disconnected),
+        "leave" => outcome == Outcome::Cancelled,
+        _ => true,
+    };
+    if as_asked != asked {
+        return Err(format!("{at}: as_asked isn't what the hands asked for"));
+    }
     let answered = optional_address(&c[if signs { "signer" } else { "address" }], at)?;
     let hashes = match c.get("hashes") {
         None => None,
@@ -776,6 +912,7 @@ fn case(at: &str, value: &Value, device: &Value, held_ms: f64) -> R<Case> {
         hands: hands.to_owned(),
         exchanges,
         outcome,
+        as_asked,
         answered,
         hashes,
         after,
@@ -864,7 +1001,8 @@ fn exchange(at: &str, value: &Value, held_ms: f64) -> R<Exchange> {
     })
 }
 
-fn outcome(at: &str, value: &Value, last: &Exchange) -> R<Outcome> {
+/// `outcome`, and its `as_asked`.
+fn outcome(at: &str, value: &Value, last: &Exchange) -> R<(Outcome, bool)> {
     let object = value
         .as_object()
         .ok_or_else(|| format!("{at}: not an object"))?;
@@ -873,7 +1011,7 @@ fn outcome(at: &str, value: &Value, last: &Exchange) -> R<Outcome> {
         .find(|k| object.contains_key(*k))
         .ok_or_else(|| format!("{at}: no status, failed or cancelled"))?;
     let o = members(value, at, &[key, "as_asked"], &[])?;
-    flag(o, "as_asked", at)?;
+    let as_asked = flag(o, "as_asked", at)?;
     let outcome = match key {
         "status" => {
             let status = bytes(text(o, "status", at)?, at)?;
@@ -896,7 +1034,7 @@ fn outcome(at: &str, value: &Value, last: &Exchange) -> R<Outcome> {
     if outcome != ended {
         return Err(format!("{at}: not the last exchange's end"));
     }
-    Ok(outcome)
+    Ok((outcome, as_asked))
 }
 
 /// `stats` in scripts/ledger-record.js.
@@ -1340,9 +1478,11 @@ fn signed_end(case: &Case, at: &str, expect: &Expect, signed: Signed) -> R<Strin
 }
 
 /// A reference stream: read, never replayed. The core refuses its request
-/// before any APDU, its APDUs are ledger.json's reference ones, and its
-/// `signer` is what the device's signature recovers to over
-/// `expected_hash`, as the recorder read it.
+/// before any APDU, and its APDUs are ledger.json's reference ones, in
+/// order. It stops short of them only where the device ended it, with a
+/// status other than `9000` or a failure; one the device signed is whole,
+/// its signature by the record's account (the test phrase's) over
+/// `expected_hash`, and its `signer` that account.
 fn reference(case: &Case, at: &str, core_signs: bool) -> R<String> {
     if core_signs {
         return Err(format!(
@@ -1363,30 +1503,30 @@ fn reference(case: &Case, at: &str, core_signs: bool) -> R<String> {
             case.from
         ));
     }
-    let last = match &case.exchanges.last().unwrap().end {
-        End::Answer(a) if a.len() == 67 && a.ends_with(&[0x90, 0x00]) => Some(a),
-        _ => None,
-    };
-    match last {
-        Some(answer) if matches!(answer[0], 27 | 28) => {
-            let expected = hash(case.request["expected_hash"].as_str().unwrap(), at)?;
-            let mut signature = [0u8; 65];
-            signature[..64].copy_from_slice(&answer[1..65]);
-            signature[64] = answer[0];
-            // A signature the core wouldn't recover (a high s) is recorded
-            // as the recorder read it.
-            if let Ok(signer) = recover_address(&expected, &signature)
-                && case.answered != Some(signer)
-            {
-                return Err(format!("{at}: signer isn't what the signature recovers to"));
+    let answer = match &case.exchanges.last().unwrap().end {
+        End::Answer(answer) if answer.ends_with(&[0x90, 0x00]) => answer,
+        // The device ended it: no signature.
+        _ => {
+            if case.answered.is_some() {
+                return Err(format!("{at}: a signer without a signature"));
             }
+            return Ok("reference".into());
         }
-        Some(_) => {}
-        None if case.answered.is_some() => {
-            return Err(format!("{at}: a signer without a signature"));
-        }
-        None => {}
+    };
+    if ours.len() != theirs.len() {
+        return Err(format!(
+            "{at}: a reference stream cut short of its signature"
+        ));
     }
+    if answer.len() != 67 || !matches!(answer[0], 27 | 28) {
+        return Err(format!("{at}: the last answer isn't a signature"));
+    }
+    let expected = hash(case.request["expected_hash"].as_str().unwrap(), at)?;
+    let mut signature = [0u8; 65];
+    signature[..64].copy_from_slice(&answer[1..65]);
+    signature[64] = answer[0];
+    // A high s, or a signature no key recovers, fails here too.
+    check_signer(case, at, recovered(&expected, &signature, at)?)?;
     Ok("reference".into())
 }
 
@@ -1455,10 +1595,15 @@ fn read_dir(dir: &Path) -> R<Vec<(String, Value)>> {
         files.push((name, value));
     }
     files.sort_by(|a, b| a.0.cmp(&b.0));
-    if files.is_empty() {
-        return Err(format!("{}: no recording", dir.display()));
-    }
     Ok(files)
+}
+
+/// The user's recordings: none while the directory is missing or empty.
+fn device_files(dir: &Path) -> R<Vec<(String, Value)>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    read_dir(dir)
 }
 
 fn synthetic_dir() -> PathBuf {
@@ -1483,6 +1628,7 @@ fn report(tally: &Tally) {
 #[test]
 fn synthetic_recordings_replay() {
     let files = read_dir(&synthetic_dir()).unwrap();
+    assert!(!files.is_empty(), "no synthetic recording");
     let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(
         names,
@@ -1529,19 +1675,29 @@ fn synthetic_recordings_replay() {
 #[test]
 fn device_recordings_replay() {
     let dir = devices_dir();
-    if !dir.exists() {
+    let files = device_files(&dir).unwrap_or_else(|e| panic!("{e}"));
+    if files.is_empty() {
         eprintln!(
             "{}: no device recordings yet (the LDG-3 device session); only the synthetic ones are replayed",
             dir.display()
         );
         return;
     }
-    let files = read_dir(&dir).unwrap_or_else(|e| panic!("{e}"));
     for (name, value) in &files {
         let tally = verdict(name, value, Kind::Device).unwrap_or_else(|e| panic!("{e}"));
         report(&tally);
-        assert!(tally.core > 0, "{name}: no core case");
     }
+}
+
+/// A missing and an empty directory both hold no recording yet.
+#[test]
+fn no_device_recordings_yet_is_a_missing_or_empty_directory() {
+    let empty = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("ledger-devices-empty-{}", std::process::id()));
+    std::fs::create_dir_all(&empty).unwrap();
+    assert!(device_files(&empty).unwrap().is_empty());
+    std::fs::remove_dir(&empty).unwrap();
+    assert!(device_files(&empty).unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -1836,24 +1992,233 @@ fn every_file_is_read_strictly() {
 /// read as device evidence and replayed; each synthetic mark fails it.
 #[test]
 fn the_device_form_is_read_and_replayed() {
-    let (name, mut value) = fixture("nanoSP");
-    value["meta"].as_object_mut().unwrap().remove("synthetic");
-    value["meta"]["host"]["electron"] = json!("39.2.7");
-    let firmware = |value: &mut Value, firmware: &str| {
-        value["device"]["firmware"] = json!(firmware);
-        for case in value["cases"].as_array_mut().unwrap() {
-            case["device"]["firmware"] = json!(firmware);
-        }
-    };
-    firmware(&mut value, "1.3.0");
+    let (name, value) = device_form("nanoSP");
     let tally = verdict(&name, &value, Kind::Device).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!((tally.core, tally.reference), (16, 4));
     let mut damaged = value.clone();
-    firmware(&mut damaged, "synthetic");
+    set_firmware(&mut damaged, "synthetic");
     fails(verdict(&name, &damaged, Kind::Device), "firmware");
     let mut damaged = value.clone();
     damaged["meta"]["host"]["electron"] = Value::Null;
     fails(verdict(&name, &damaged, Kind::Device), "host.electron");
     // And the device form isn't a synthetic recording.
     fails(verdict(&name, &value, Kind::Synthetic), "no synthetic");
+}
+
+fn set_firmware(value: &mut Value, firmware: &str) {
+    value["device"]["firmware"] = json!(firmware);
+    for case in value["cases"].as_array_mut().unwrap() {
+        case["device"]["firmware"] = json!(firmware);
+    }
+}
+
+/// A synthetic recording as the device session writes a file: no synthetic
+/// mark, run under Electron, the firmware the user read.
+fn device_form(model: &str) -> (String, Value) {
+    let (name, mut value) = fixture(model);
+    value["meta"].as_object_mut().unwrap().remove("synthetic");
+    value["meta"]["host"]["electron"] = json!("39.2.7");
+    set_firmware(&mut value, "1.3.0");
+    (name, value)
+}
+
+fn remove_case(value: &mut Value, id: &str) {
+    value["cases"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|c| c["id"] != id);
+}
+
+/// A device file holds the whole session its model's steps define.
+#[test]
+fn a_device_file_holds_the_whole_session() {
+    for model in ["nanoSP", "nanoS"] {
+        let (name, value) = device_form(model);
+        verdict(&name, &value, Kind::Device).unwrap_or_else(|e| panic!("{e}"));
+        // An unfinished session, as the recorder writes it after each step.
+        let mut damaged = value.clone();
+        damaged["meta"]["complete"] = json!(false);
+        fails(
+            verdict(&name, &damaged, Kind::Device),
+            "complete is false: an unfinished session",
+        );
+        // Discovery alone, marked complete.
+        let mut damaged = value.clone();
+        damaged["cases"].as_array_mut().unwrap().truncate(1);
+        let first = if model == "nanoS" {
+            "typed-hash-only-mail"
+        } else {
+            "tx-type0"
+        };
+        fails(
+            verdict(&name, &damaged, Kind::Device),
+            &format!("the session has no {first} done as its step asks"),
+        );
+    }
+    // A complete-looking file without one of its steps: each step in turn.
+    for (model, steps) in [
+        ("nanoSP", &FIELD_STEPS[..]),
+        ("nanoS", &HASH_ONLY_STEPS[..]),
+    ] {
+        let (name, value) = device_form(model);
+        for (id, ..) in steps {
+            let mut damaged = value.clone();
+            remove_case(&mut damaged, id);
+            // The cancel case's new request names the old one.
+            let words = if *id == "cancel-old" {
+                "after names no cancelled case before it".to_owned()
+            } else {
+                format!("the session has no {id} done as its step asks")
+            };
+            fails(verdict(&name, &damaged, Kind::Device), &words);
+        }
+    }
+    let (name, value) = device_form("nanoSP");
+    // The rejection, answered otherwise: it doesn't count.
+    let mut damaged = value.clone();
+    let reject = case_mut(&mut damaged, "reject");
+    let last = reject["exchanges"].as_array().unwrap().len() - 1;
+    reject["exchanges"][last]["answer"] = json!("6a80");
+    reject["outcome"] = json!({ "status": "6a80", "as_asked": false });
+    fails(
+        verdict(&name, &damaged, Kind::Device),
+        "the session has no reject done as its step asks",
+    );
+    // as_asked that isn't what the hands asked for.
+    let mut damaged = value.clone();
+    case_mut(&mut damaged, "unplug")["outcome"]["as_asked"] = json!(false);
+    fails(
+        verdict(&name, &damaged, Kind::Device),
+        "as_asked isn't what the hands asked for",
+    );
+    // A case that isn't a step of its model's session.
+    let mut damaged = value.clone();
+    case_mut(&mut damaged, "typed-mail")["id"] = json!("typed-mail-2");
+    fails(
+        verdict(&name, &damaged, Kind::Device),
+        "not a step of this model's session",
+    );
+    let (nano_s, mut damaged) = device_form("nanoS");
+    let message = fixture("nanoSP").1["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "message")
+        .unwrap()
+        .clone();
+    damaged["cases"].as_array_mut().unwrap().push(message);
+    fails(
+        verdict(&nano_s, &damaged, Kind::Device),
+        "not a step of this model's session",
+    );
+    // A step that plays another case.
+    let mut damaged = value.clone();
+    case_mut(&mut damaged, "message")["from"] = json!("msg-live-1");
+    fails(
+        verdict(&name, &damaged, Kind::Device),
+        "from, family or hands isn't the step's",
+    );
+}
+
+/// The device's answer `v ‖ r ‖ s ‖ 9000` for a signature `r ‖ s ‖ v`.
+fn signature_answer(signature: &[u8; 65]) -> Vec<u8> {
+    let mut answer = vec![signature[64]];
+    answer.extend_from_slice(&signature[..64]);
+    answer.extend_from_slice(&[0x90, 0x00]);
+    answer
+}
+
+fn reference_case() -> Case {
+    parsed("nanoSP")
+        .cases
+        .into_iter()
+        .find(|c| c.id == "name-field-e-acute-252")
+        .unwrap()
+}
+
+/// A reference stream's signature is the test account's over
+/// `expected_hash`.
+#[test]
+fn a_reference_signature_is_the_test_accounts() {
+    let case = reference_case();
+    assert_eq!(replay(&case).unwrap(), "reference");
+    let expected = hash(case.request["expected_hash"].as_str().unwrap(), "").unwrap();
+    let End::Answer(good) = case.exchanges.last().unwrap().end.clone() else {
+        unreachable!()
+    };
+    let with_last = |answer: Vec<u8>, answered: Option<[u8; 20]>| {
+        let mut damaged = case.clone();
+        damaged.exchanges.last_mut().unwrap().end = End::Answer(answer);
+        damaged.answered = answered;
+        replay(&damaged)
+    };
+    let refused = |result: R<String>, words: &str| match result {
+        Ok(_) => panic!("read, where {words:?} should fail it"),
+        Err(e) => assert!(e.contains(words), "{e:?} doesn't say {words:?}"),
+    };
+    // Another key's, its signer that key's.
+    let other = other_key();
+    let signature = sign_digest(other.signing_key(), &expected).unwrap();
+    refused(
+        with_last(
+            signature_answer(&signature),
+            Some(*other.address().as_bytes()),
+        ),
+        "not the record's",
+    );
+    // The same signature with s in the high half, the parity flipped: no
+    // signer recovers.
+    let s = U256::from_be_slice(&good[33..65]).unwrap();
+    let mut high = good.clone();
+    high[33..65].copy_from_slice(&common::order().checked_sub(&s).unwrap().to_be_bytes());
+    high[0] = 27 + 28 - high[0];
+    refused(with_last(high, None), "no signer recovers");
+    // r zero.
+    let mut zero = good.clone();
+    zero[1..33].fill(0);
+    refused(with_last(zero, None), "no signer recovers");
+    // The test account's signature with no signer.
+    refused(with_last(good.clone(), None), "signer isn't");
+    // A 9000 that isn't a signature.
+    refused(
+        with_last(vec![0x90, 0x00], Some(test_address())),
+        "the last answer isn't a signature",
+    );
+}
+
+/// A reference stream is whole unless the device ended it.
+#[test]
+fn a_reference_stream_ends_whole_or_where_the_device_ended_it() {
+    let case = reference_case();
+    let cut = |n: usize, end: End| {
+        let mut damaged = case.clone();
+        damaged.exchanges.truncate(n);
+        damaged.exchanges.last_mut().unwrap().end = end;
+        damaged.answered = None;
+        replay(&damaged)
+    };
+    // Cut after its successful app probe, with no signature.
+    let End::Answer(probe) = case.exchanges[1].end.clone() else {
+        unreachable!()
+    };
+    let e = cut(2, End::Answer(probe)).unwrap_err();
+    assert!(e.contains("cut short of its signature"), "{e}");
+    // Ended by the device: refused mid-way, unplugged, or rejected at the
+    // signature.
+    assert_eq!(cut(3, End::Answer(vec![0x6a, 0x80])).unwrap(), "reference");
+    assert_eq!(
+        cut(3, End::Failed(Failed::Disconnected)).unwrap(),
+        "reference"
+    );
+    let whole = case.exchanges.len();
+    assert_eq!(
+        cut(whole, End::Answer(vec![0x69, 0x85])).unwrap(),
+        "reference"
+    );
+    // A signer where the device ended it.
+    let mut damaged = case.clone();
+    damaged.exchanges.truncate(3);
+    damaged.exchanges[2].end = End::Answer(vec![0x6a, 0x80]);
+    let e = replay(&damaged).unwrap_err();
+    assert!(e.contains("a signer without a signature"), "{e}");
 }
